@@ -1,0 +1,29 @@
+# fly.toml — Fly.io app config for the Odds Compare Telegram bot.
+#
+# BEFORE DEPLOYING: change `app` to a globally-unique name (Fly will reject
+# duplicates). Something like "odds-compare-<yourhandle>".
+
+app            = "arbyx"
+primary_region = "iad"
+
+[build]
+
+[env]
+  DATA_DIR            = "/data/state"
+  OUTPUT_DIR          = "/data/output"
+  PYTHONUNBUFFERED    = "1"
+  DEFAULT_DK_BANKROLL = "100"
+  DEFAULT_FD_BANKROLL = "100"
+
+# Single persistent volume — subdirs handle state vs. outputs.
+[[mounts]]
+  source      = "odds_data"
+  destination = "/data"
+
+[[vm]]
+  memory   = "512mb"
+  cpu_kind = "shared"
+  cpus     = 1
+
+# No [http_service] block — the bot uses Telegram long-polling, so we don't
+# need to expose an HTTP port. Fly will keep the machine running regardless.

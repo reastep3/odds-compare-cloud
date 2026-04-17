@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.Python
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime output
+output/
+*.xlsx
+Archive/
+Backups/
+Backtest Archives/
+
+# State files (machine-local; persistent volume in cloud)
+prev_play_keys.json
+users.json
+
+# Logs
+*.log
