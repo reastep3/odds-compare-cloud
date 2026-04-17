@@ -10,10 +10,24 @@ Usage:
 Double-click pull-latest-ev.bat or pull-latest-backtest.bat for the same effect.
 """
 import os
+import shutil
 import subprocess
 import sys
 
-FLYCTL = r"C:\Users\re811\.fly\bin\flyctl.exe"
+
+def _find_flyctl() -> str:
+    # Prefer whatever's on PATH (Mac/Linux brew install, Windows after PATH setup).
+    found = shutil.which("flyctl") or shutil.which("fly")
+    if found:
+        return found
+    # Fallback: well-known Windows install location from the official installer.
+    win_default = os.path.expanduser(r"~\.fly\bin\flyctl.exe")
+    if os.path.exists(win_default):
+        return win_default
+    sys.exit("flyctl not found on PATH. Install: https://fly.io/docs/flyctl/install/")
+
+
+FLYCTL = _find_flyctl()
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 PREFIXES = {

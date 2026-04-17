@@ -13,13 +13,25 @@ Presets: last-1d, last-7d, last-30d, all
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
 from datetime import date, timedelta
 
-FLYCTL = r"C:\Users\re811\.fly\bin\flyctl.exe"
+
+def _find_flyctl() -> str:
+    found = shutil.which("flyctl") or shutil.which("fly")
+    if found:
+        return found
+    win_default = os.path.expanduser(r"~\.fly\bin\flyctl.exe")
+    if os.path.exists(win_default):
+        return win_default
+    sys.exit("flyctl not found on PATH. Install: https://fly.io/docs/flyctl/install/")
+
+
+FLYCTL = _find_flyctl()
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 SOURCES = {
