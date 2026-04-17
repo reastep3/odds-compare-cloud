@@ -1,0 +1,46 @@
+PULL SCRIPTS — quick reference
+================================
+
+Double-click any of these from this folder to pull reports off the Fly cloud
+volume to your PC.
+
+  pull-latest-ev.bat
+      Grabs the newest ev_edges_*.xlsx from the cloud (the most recent /run
+      output), saves it to this folder, and opens it in Excel.
+
+  pull-latest-backtest.bat
+      Grabs the newest backtest_*.xlsx from the cloud (the most recent
+      /backtest report), saves it here, and opens it in Excel.
+
+  pull-all-archives.bat
+      Bundles the entire archive/ folder (every historical EV edge sheet) plus
+      Backtest Archives/ into archives.tar.gz (~7 MB) and downloads it here.
+      Extract with:  tar -xzf archives.tar.gz
+
+  pull-range.bat
+      Interactive: prompts for type (ev or backtest), then asks which range:
+        1) Last day      2) Last 7 days     3) Last 30 days
+        4) All time      5) Custom date range
+      Bundles every matching report into one .zip and saves it here.
+      Output filename is e.g.  ev_2026-04-09_to_2026-04-16.zip
+      Open the .zip directly in Windows or extract to grab individual files.
+
+The first three call pull_latest.py and the last calls pull_range.py. You can
+also run them from any shell:
+      python pull_latest.py ev
+      python pull_latest.py backtest
+      python pull_latest.py archives
+      python pull_range.py                              (interactive)
+      python pull_range.py ev last-7d                   (preset: 1d/7d/30d/all)
+      python pull_range.py backtest all
+      python pull_range.py ev 2026-04-01 2026-04-15     (explicit range)
+
+Notes
+-----
+- "Latest" means the file currently sitting at the top level of /data/output/
+  on the cloud — i.e. the most recent run. Older runs are auto-moved into
+  archive/ on each new /run, so pull-latest-ev gives you the freshest one.
+- If you've never done a /run on the cloud bot yet, pull-latest-ev will say
+  "No ev reports found." Run /run in Telegram first.
+- These scripts require flyctl at C:\Users\re811\.fly\bin\flyctl.exe and that
+  you're signed in (you are: re81194@gmail.com).

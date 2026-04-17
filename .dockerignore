@@ -1,0 +1,35 @@
+# Secrets — loaded via `fly secrets set`, never bake into the image
+.env
+.env.local
+
+# Local Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Git / OS
+.git/
+.gitignore
+.DS_Store
+Thumbs.db
+
+# Runtime output (persisted in the Fly volume, not the image)
+output/
+Archive/
+Backups/
+Backtest Archives/
+*.xlsx
+
+# State (persisted in the Fly volume)
+prev_play_keys.json
+users.json
+
+# Fly metadata
+fly.toml
+.fly/
+
+# IDE
+.vscode/
+.idea/
