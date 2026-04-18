@@ -42,8 +42,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, LineChart, Reference
 
 
-import tkinter as tk
-from tkinter import messagebox
+# tkinter is imported lazily inside prompt_date_range() — it's only used by
+# the standalone CLI, never by the Telegram bot, and the Fly slim image
+# doesn't ship Tcl/Tk system libs (libtk8.6.so).
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -254,6 +255,8 @@ PROP_MAX_BET         = 5.0    # cap per-prop bet
 
 def prompt_date_range() -> tuple[date, date] | None:
     """Tkinter dialog. Returns (start, end) dates or None if cancelled."""
+    import tkinter as tk
+    from tkinter import messagebox
     result = [None]
     root = tk.Tk()
     root.title("Backtest — Select Date Range")
