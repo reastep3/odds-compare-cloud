@@ -1443,7 +1443,7 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
       4. Flag outcomes where EV ≥ MIN_EV_PERCENT and calculate Kelly size.
 
     live_only=True flips the time window to currently-in-progress games only
-    (started in the past 6 hours, none scheduled in the future) — used by /runlive.
+    (started in the past 6 hours, none scheduled in the future) — used by /run_live.
     """
     from datetime import timedelta
     edges   = []
@@ -6165,7 +6165,7 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
 
 def run_headless_live() -> list[dict]:
     """
-    Live-only pipeline used by /runlive: fetch main lines for all sports,
+    Live-only pipeline used by /run_live: fetch main lines for all sports,
     return +EV edges on currently in-progress games sorted by EV%.
 
     Skipped (vs run_headless_fetch): file archiving, Excel write, player

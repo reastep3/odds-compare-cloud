@@ -8,12 +8,15 @@ Usage:
     3. Open Telegram on your phone  ->  send /run to your bot
 
 Commands:
-    /run      — Start a new odds compare run (asks for bankrolls + promos)
-    /backtest — Run a backtest on past picks
-    /books    — View or change your sportsbook selection
-    /adduser  — (Admin) Authorize a new user
-    /status   — Check if a run is in progress
-    /help     — Show usage instructions
+    /run         — Start a new odds compare run (asks for bankrolls + promos)
+    /run_single  — Run for a single book of your choosing
+    /run_skip    — Just list the picks (no bankrolls, no promos)
+    /run_live    — Quick +EV picks on currently live games (for promos)
+    /backtest    — Run a backtest on past picks
+    /books       — View or change your sportsbook selection
+    /add_user    — (Admin) Authorize a new user
+    /status      — Check if a run is in progress
+    /help        — Show usage instructions
 """
 
 import asyncio
@@ -49,6 +52,7 @@ log = logging.getLogger(__name__)
 ASK_DK_BANKROLL, ASK_FD_BANKROLL, ASK_PROMOS, ASK_GAME_PICK = range(4)
 ASK_BT_PERIOD, ASK_BT_START, ASK_BT_END = range(10, 13)
 ASK_BOOKS = 20
+ASK_RUN_SINGLE_BOOK = 21
 
 # ── Run lock ────────────────────────────────────────────────────────
 _run_lock = asyncio.Lock()
@@ -558,15 +562,15 @@ async def recv_book_selection(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
-# ── /adduser command ─────────────────────────────────────────────────
+# ── /add_user command ────────────────────────────────────────────────
 
-async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("Admin only.")
         return
 
     if not context.args or len(context.args) != 1:
-        await update.message.reply_text("Usage: /adduser <telegram_user_id>")
+        await update.message.reply_text("Usage: /add_user <telegram_user_id>")
         return
 
     new_id = context.args[0]
@@ -635,13 +639,75 @@ async def _send_promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ── Conversation handlers ────────────────────────────────────────────
 
-async def cmd_runskip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def cmd_run_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Shortcut for /run skip — just list the picks, no bet sizing."""
     context.args = ["skip"]
     return await cmd_run(update, context)
 
 
-async def cmd_runlive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ── /run_single command ──────────────────────────────────────────────
+
+_RUN_SINGLE_BOOKS = ["DraftKings", "FanDuel"]
+
+
+def _run_single_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[b] for b in _RUN_SINGLE_BOOKS],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
+
+
+def _parse_run_single_book(text: str) -> str | None:
+    t = (text or "").strip().lower()
+    if t in ("dk", "draftkings"):
+        return "DraftKings"
+    if t in ("fd", "fanduel"):
+        return "FanDuel"
+    return None
+
+
+async def cmd_run_single(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for a single book, then hand off to the /run flow with that book only."""
+    if not is_authorized(update):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+
+    if context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    if not get_user_books(update):
+        await update.message.reply_text("Set up your books first with /books")
+        return ConversationHandler.END
+
+    args_text = " ".join(context.args).strip().lower() if context.args else ""
+    skip = args_text in ("skip", "fast", "quick")
+
+    context.user_data.clear()
+    context.user_data["_run_single_skip"] = skip
+
+    await update.message.reply_text(
+        "Which book for this run?",
+        reply_markup=_run_single_keyboard(),
+    )
+    return ASK_RUN_SINGLE_BOOK
+
+
+async def recv_run_single_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    book = _parse_run_single_book(update.message.text)
+    if book is None:
+        await update.message.reply_text(
+            "Tap DraftKings or FanDuel.", reply_markup=_run_single_keyboard())
+        return ASK_RUN_SINGLE_BOOK
+
+    skip = context.user_data.get("_run_single_skip", False)
+    context.user_data["_single_book_override"] = [book]
+    context.args = ["skip"] if skip else []
+    return await cmd_run(update, context)
+
+
+async def cmd_run_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List +EV picks on currently in-progress games. For grabbing a quick line
     to attach a live promo to. No archive, no Excel, no prev-pick tracking."""
     if not is_authorized(update):
@@ -700,6 +766,11 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not user_books:
         await update.message.reply_text("Set up your books first with /books")
         return ConversationHandler.END
+
+    # Single-book override set by /run_single picker — scoped to this run only
+    single_override = context.user_data.get("_single_book_override")
+    if single_override:
+        user_books = single_override
 
     # Check for "/run skip" shortcut — just list the picks, no bet sizing
     args_text = " ".join(context.args).strip().lower() if context.args else ""
@@ -1169,16 +1240,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "EV Edge Finder Bot\n"
         "\n"
-        "/run      — Start a new odds compare run\n"
-        "/runskip  — Just list the picks (no bankrolls, no promos)\n"
-        "/runlive  — Quick +EV picks on currently live games (for promos)\n"
-        "/backtest — Run a backtest on past picks\n"
-        "/books    — View or change your sportsbooks\n"
-        "/status   — Check if a run is in progress\n"
-        "/help     — Show this message"
+        "/run         — Start a new odds compare run\n"
+        "/run_single  — Run for a single book of your choosing\n"
+        "/run_skip    — Just list the picks (no bankrolls, no promos)\n"
+        "/run_live    — Quick +EV picks on currently live games (for promos)\n"
+        "/backtest    — Run a backtest on past picks\n"
+        "/books       — View or change your sportsbooks\n"
+        "/status      — Check if a run is in progress\n"
+        "/help        — Show this message"
     )
     if is_admin(update):
-        help_text += "\n/adduser  — Authorize a new user"
+        help_text += "\n/add_user    — Authorize a new user"
 
     books = get_user_books(update)
     if books:
@@ -1426,14 +1498,15 @@ def main():
 
     async def _register_commands(app):
         commands = [
-            BotCommand("run",      "Full odds compare (bankrolls + promos)"),
-            BotCommand("runskip",  "Just list the picks (no bankrolls)"),
-            BotCommand("runlive",  "Live in-progress games for promo picks"),
-            BotCommand("backtest", "Backtest past picks"),
-            BotCommand("books",    "Set or change your sportsbooks"),
-            BotCommand("status",   "Check if a run is in progress"),
-            BotCommand("help",     "Show command list"),
-            BotCommand("cancel",   "Cancel the current conversation"),
+            BotCommand("run",         "Full odds compare (bankrolls + promos)"),
+            BotCommand("run_single",   "Run for a single book of your choosing"),
+            BotCommand("run_skip",     "Just list the picks (no bankrolls)"),
+            BotCommand("run_live",     "Live in-progress games for promo picks"),
+            BotCommand("backtest",     "Backtest past picks"),
+            BotCommand("books",        "Set or change your sportsbooks"),
+            BotCommand("status",       "Check if a run is in progress"),
+            BotCommand("help",         "Show command list"),
+            BotCommand("cancel",       "Cancel the current conversation"),
         ]
         await app.bot.set_my_commands(commands)
         log.info("Registered command menu with Telegram")
@@ -1456,9 +1529,13 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("run", cmd_run),
-            CommandHandler("runskip", cmd_runskip),
+            CommandHandler("run_skip", cmd_run_skip),
+            CommandHandler("run_single", cmd_run_single),
         ],
         states={
+            ASK_RUN_SINGLE_BOOK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_run_single_book),
+            ],
             ASK_DK_BANKROLL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_dk_bankroll),
             ],
@@ -1494,8 +1571,8 @@ def main():
     app.add_handler(books_handler)
     app.add_handler(conv_handler)
     app.add_handler(bt_handler)
-    app.add_handler(CommandHandler("runlive", cmd_runlive))
-    app.add_handler(CommandHandler("adduser", cmd_adduser))
+    app.add_handler(CommandHandler("run_live", cmd_run_live))
+    app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
 
