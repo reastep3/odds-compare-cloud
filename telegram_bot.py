@@ -651,9 +651,9 @@ async def cmd_run_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def cmd_run_promos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Fetch + list PROMO PICKS only — skip bankroll prompts and suppress
-    the Summary / Play These output. Uses last-used bankrolls (or $100) so
-    bet-sizing math still works on the promo picks."""
+    """Fetch + list PROMO PICKS only — suppresses the Summary / Play These
+    output. Still asks for bankroll, since bet sizing (boosted Kelly, max-
+    bet cap) depends on it."""
     if not is_authorized(update):
         await update.message.reply_text("Unauthorized.")
         return ConversationHandler.END
@@ -676,11 +676,20 @@ async def cmd_run_promos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["books"]       = user_books
     context.user_data["promos"]      = []
     context.user_data["promos_only"] = True
-    context.user_data["dk_bankroll"] = last_bankrolls.get("DraftKings", 100)
-    context.user_data["fd_bankroll"] = last_bankrolls.get("FanDuel", 100)
 
-    await _send_promo_prompt(update, context)
-    return ASK_PROMOS
+    if "DraftKings" in user_books:
+        msg = "Enter your DraftKings bankroll ($):"
+        if last_bankrolls.get("DraftKings"):
+            msg += f"\n<i>Last: ${last_bankrolls['DraftKings']:,.0f}</i>"
+        await update.message.reply_text(msg, parse_mode="HTML")
+        return ASK_DK_BANKROLL
+    else:
+        context.user_data["dk_bankroll"] = 0
+        msg = "Enter your FanDuel bankroll ($):"
+        if last_bankrolls.get("FanDuel"):
+            msg += f"\n<i>Last: ${last_bankrolls['FanDuel']:,.0f}</i>"
+        await update.message.reply_text(msg, parse_mode="HTML")
+        return ASK_FD_BANKROLL
 
 
 # ── /run_single command ──────────────────────────────────────────────
@@ -1601,7 +1610,7 @@ def main():
             BotCommand("run",         "Full odds compare (bankrolls + promos)"),
             BotCommand("run_single",   "Run for a single book of your choosing"),
             BotCommand("run_skip",     "Just list the picks (no bankrolls)"),
-            BotCommand("run_promos",   "Only promo picks (skip Summary + Play These)"),
+            BotCommand("run_promos",   "Only promo picks (bankroll prompt; skip Summary + Play These)"),
             BotCommand("run_live",     "Live in-progress games for promo picks"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("books",        "Set or change your sportsbooks"),
