@@ -3004,7 +3004,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
             edges, promos, dk_bankroll, fd_bankroll,
             extra_edges=(list(golf_edges or [])
                          + list(player_prop_edges or [])),
-            parlay_pool=parlay_pool)
+            parlay_pool=parlay_pool, promo_pool=promo_pool)
         if parlay_rows:
             ws_par = wb.create_sheet("Parlay Promos")
 
@@ -5497,7 +5497,8 @@ def find_player_prop_edges(props: list[dict]) -> list[dict]:
 def _build_parlay_rows(edges: list[dict], promos: list[dict],
                        dk_bankroll: float, fd_bankroll: float,
                        extra_edges: list[dict] | None = None,
-                       parlay_pool: list = None) -> list[dict]:
+                       parlay_pool: list = None,
+                       promo_pool: list = None) -> list[dict]:
     """
     For each parlay promo, find the optimal N-leg parlay from qualifying edges.
 
@@ -5506,10 +5507,14 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
     Assumes legs are independent (different games) for probability math.
     Never puts two picks from the same game+market in one parlay (contradictory).
+
+    promo_pool (broader — all DK/FD outcomes, no fair_prob floor) is preferred
+    over parlay_pool (fair_prob ≥ 30% favorites) so SGPs can combine mid-range-
+    probability legs like +250/+300 bets that were previously excluded.
     """
     from itertools import combinations as _combinations
 
-    pool = parlay_pool if parlay_pool else edges
+    pool = promo_pool if promo_pool else (parlay_pool if parlay_pool else edges)
 
     parlay_promos = [p for p in promos if p.get("promo_type") == "parlay"]
     if not parlay_promos:
@@ -5567,23 +5572,28 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
         # Sort by fair probability descending (best parlay legs first)
         qualifying.sort(key=lambda e: e.get("fair_prob", 0), reverse=True)
-        # Cap candidates for brute-force feasibility
-        qualifying = qualifying[:30]
 
         is_sgp = promo.get("sgp", False)
 
-        # For SGP: group by game and build per-game candidate lists
+        # For SGP: group by game BEFORE capping so low-fair_prob legs survive
+        # within their game group (otherwise the global cap would knock them
+        # out in favor of high-fair_prob legs from other games that the SGP
+        # can't use anyway).
         if is_sgp:
             game_groups: dict[str, list] = {}
             for edge in qualifying:
                 g = edge.get("game", "")
                 game_groups.setdefault(g, []).append(edge)
-            # Only keep games with enough legs
+            # Cap per game — brute-force is feasible within one game
+            for g in list(game_groups):
+                game_groups[g] = game_groups[g][:15]
             sgp_candidates = [(g, legs) for g, legs in game_groups.items()
                               if len(legs) >= num_legs]
             if not sgp_candidates:
                 continue
         else:
+            # Multi-game parlay: global cap at 30 (brute-force feasibility)
+            qualifying = qualifying[:30]
             if len(qualifying) < num_legs:
                 continue
 
@@ -6298,7 +6308,8 @@ def run_headless_finalize(fetched: dict,
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(
         all_edges, promos, dk_bankroll, fd_bankroll,
-        extra_edges=player_prop_edges, parlay_pool=parlay_pool)
+        extra_edges=player_prop_edges, parlay_pool=parlay_pool,
+        promo_pool=promo_pool)
 
     return {
         "play_edges":        play_edges,
