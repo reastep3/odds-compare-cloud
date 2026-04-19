@@ -1039,6 +1039,11 @@ async def _accept_parsed_promo(update: Update,
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(original_text)
 
+    # Persist to saved_promos immediately so the recent-promos keyboard
+    # is up-to-date even if this run crashes or is cancelled before
+    # finalize. Typed and photo-extracted entries treated identically.
+    _save_promo_string(str(update.effective_user.id), original_text)
+
     # Game-specific is implicit from the promo text — only set when the
     # user (or vision extractor) included the word "game" in the string.
     # Anything else defaults to any-game, no follow-up prompt needed.
@@ -1049,6 +1054,19 @@ async def _accept_parsed_promo(update: Update,
         reply_markup=saved_kb or ReplyKeyboardRemove(),
     )
     return ASK_PROMOS
+
+
+def _save_promo_string(uid: str, promo_string: str) -> None:
+    """Upsert a promo string into the user's saved_promos list. Most-recent
+    first, deduped case-insensitively, capped at 6. Called incrementally
+    as each promo is added, not only at run-finalize time."""
+    profile = _users.setdefault(uid, {})
+    saved = profile.get("saved_promos", [])
+    key = promo_string.lower().strip()
+    saved = [s for s in saved if s.lower().strip() != key]
+    saved.insert(0, promo_string.strip())
+    profile["saved_promos"] = saved[:6]
+    save_users()
 
 
 async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1530,21 +1548,8 @@ async def _finalize_and_send(update: Update,
         last_bankrolls["FanDuel"] = fd
     profile["last_bankrolls"] = last_bankrolls
 
-    promo_strings = context.user_data.get("promo_strings", [])
-    if promo_strings:
-        seen = set()
-        unique = []
-        for ps in promo_strings:
-            key = ps.lower()
-            if key not in seen:
-                seen.add(key)
-                unique.append(ps)
-        old = profile.get("saved_promos", [])
-        for op in old:
-            if op.lower() not in seen:
-                seen.add(op.lower())
-                unique.append(op)
-        profile["saved_promos"] = unique[:6]
+    # Note: saved_promos is updated incrementally in _save_promo_string
+    # as each promo is added, so no promo-saving work needed here.
 
     save_users()
     return ConversationHandler.END
