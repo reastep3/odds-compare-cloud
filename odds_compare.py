@@ -5593,6 +5593,7 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         # different parlay promos don't steal each other's legs.
         copies = max(1, int(promo.get("count", 1) or 1))
         used_leg_keys: set = set()
+        rows_this_promo: list[dict] = []
 
         for copy_idx in range(copies):
             # Filter out legs already used by earlier copies of THIS promo.
@@ -5695,7 +5696,7 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                 bet = promo["max_bet"]
             profit = bet * (boost_dec - 1)
 
-            rows.append({
+            rows_this_promo.append({
                 "promo_label":      promo["label"],
                 "promo":            promo,
                 "legs":             list(best_overall_combo),
@@ -5712,6 +5713,23 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                 "profit":           round(profit, 2),
                 "copy_idx":         copy_idx,
                 "copy_of":          copies,
+            })
+
+        if rows_this_promo:
+            rows.extend(rows_this_promo)
+        else:
+            # Nothing qualifying for this parlay promo — emit a placeholder
+            # so the user sees the promo was considered (and understands
+            # why nothing came back: pool too small, not enough legs, or
+            # even the boosted combined EV was negative).
+            rows.append({
+                "promo_label": promo["label"],
+                "promo":       promo,
+                "legs":        None,
+                "num_legs":    0,
+                "boosted_ev":  float("-inf"),
+                "copy_idx":    0,
+                "copy_of":     copies,
             })
 
     rows.sort(key=lambda x: x["boosted_ev"], reverse=True)
@@ -6384,6 +6402,11 @@ def compute_promo_picks(all_edges: list[dict],
     used_keys: set = set()
     for promo in sorted(promos,
                         key=lambda p: (p.get("boost_pct") or 0), reverse=True):
+        # Parlay promos are handled by _build_parlay_rows — skip here
+        # so they don't pollute PROMO PICKS with "No qualifying pick
+        # found" (the straight-pick _promo_matches always rejects them).
+        if promo.get("promo_type") == "parlay":
+            continue
         # A promo with count=N means the user has N identical copies —
         # produce N distinct picks, each on a different edge (via
         # used_keys deduplication).

@@ -603,6 +603,17 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
         n_copies = row.get("copy_of", 1) or 1
         copy_suffix = (f" <i>[pick {row['copy_idx'] + 1}/{n_copies}]</i>"
                        if n_copies > 1 else "")
+
+        # Placeholder row — no qualifying parlay could be built
+        if legs is None:
+            lines.append(f"\n<b>{_esc(promo['label'])}</b>{copy_suffix}")
+            lines.append(
+                "  No qualifying parlay found "
+                "<i>(not enough legs on the slate, or no combo is +EV "
+                "after the boost)</i>"
+            )
+            continue
+
         lines.append(
             f"\n<b>{_esc(promo['label'])} ({row['num_legs']} legs)</b>"
             f"{copy_suffix}"
@@ -828,14 +839,14 @@ async def cmd_run_promos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if "DraftKings" in user_books:
         msg = "Enter your DraftKings bankroll ($):"
         if last_bankrolls.get("DraftKings"):
-            msg += f"\n<i>Last: ${last_bankrolls['DraftKings']:,.0f}</i>"
+            msg += f"\n<i>Last: ${last_bankrolls['DraftKings']:,.2f}</i>"
         await update.message.reply_text(msg, parse_mode="HTML")
         return ASK_DK_BANKROLL
     else:
         context.user_data["dk_bankroll"] = 0
         msg = "Enter your FanDuel bankroll ($):"
         if last_bankrolls.get("FanDuel"):
-            msg += f"\n<i>Last: ${last_bankrolls['FanDuel']:,.0f}</i>"
+            msg += f"\n<i>Last: ${last_bankrolls['FanDuel']:,.2f}</i>"
         await update.message.reply_text(msg, parse_mode="HTML")
         return ASK_FD_BANKROLL
 
@@ -989,7 +1000,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if "DraftKings" in user_books:
         msg = "Enter your DraftKings bankroll ($):"
         if last_bankrolls.get("DraftKings"):
-            msg += f"\n<i>Last: ${last_bankrolls['DraftKings']:,.0f}</i>"
+            msg += f"\n<i>Last: ${last_bankrolls['DraftKings']:,.2f}</i>"
         await update.message.reply_text(msg, parse_mode="HTML")
         return ASK_DK_BANKROLL
     else:
@@ -997,7 +1008,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data["dk_bankroll"] = 0
         msg = "Enter your FanDuel bankroll ($):"
         if last_bankrolls.get("FanDuel"):
-            msg += f"\n<i>Last: ${last_bankrolls['FanDuel']:,.0f}</i>"
+            msg += f"\n<i>Last: ${last_bankrolls['FanDuel']:,.2f}</i>"
         await update.message.reply_text(msg, parse_mode="HTML")
         return ASK_FD_BANKROLL
 
@@ -1019,7 +1030,7 @@ async def recv_dk_bankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         last_fd = _users.get(uid, {}).get("last_bankrolls", {}).get("FanDuel")
         msg = "Enter your FanDuel bankroll ($):"
         if last_fd:
-            msg += f"\n<i>Last: ${last_fd:,.0f}</i>"
+            msg += f"\n<i>Last: ${last_fd:,.2f}</i>"
         await update.message.reply_text(msg, parse_mode="HTML")
         return ASK_FD_BANKROLL
     else:
