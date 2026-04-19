@@ -4,6 +4,8 @@ A Telegram bot that scans DraftKings and FanDuel lines against sharper markets, 
 
 Runs on [Fly.io](https://fly.io) as a small always-on worker. The bot itself uses Telegram long-polling — no public HTTP endpoint needed.
 
+**Keys required to run**: a Telegram bot token, a [The Odds API](https://the-odds-api.com/) key for the odds data, and optionally an [Anthropic API](https://www.anthropic.com/api) key if you want the photo→promo feature.
+
 ---
 
 ## What it does
@@ -17,13 +19,15 @@ Runs on [Fly.io](https://fly.io) as a small always-on worker. The bot itself use
   - **Parlay Picks** — best N-leg parlay per parlay/SGP promo, with the broader candidate pool so long-shot legs can turn a -EV parlay into a +EV boosted one.
   - **Excel workbook** (for `/run`) with every edge, all books, confidence tiers, and a dedicated Promos tab.
 
-## Data sources (zero paid APIs)
+## Data sources
 
-1. **Action Network** internal API — aggregates up to 13 US books.
-2. **Pinnacle** public guest API — used as the primary fair-line anchor.
-3. **Bovada** public JSON API — extra sharp consensus line.
+**Primary: [The Odds API](https://the-odds-api.com/)** (paid, requires `ODDS_API_KEY`). A single call per sport returns DraftKings, FanDuel, Pinnacle, Bovada, BetMGM, and more — so no separate scraping is needed for the main scan path. Player props (MLB HR, PGA, NBA pts/reb/ast, strikeouts, etc.) also go through this API.
 
-If any source breaks (header rotation, etc.), the module-level docstring in `odds_compare.py` has troubleshooting notes.
+**Supplemental: Pinnacle** direct guest API for prop coverage gaps — Pinnacle is the sharpest book (~2% vig), and its prices are weighted 65% of the fair-probability estimate when available.
+
+Legacy scraper fetchers for Action Network and Bovada remain in `odds_compare.py` but are not called from the current main path (kept around as a fallback if The Odds API ever becomes cost-prohibitive). If any source breaks (key rotation, etc.), the module-level docstring in `odds_compare.py` has troubleshooting notes.
+
+**Secondary: [Anthropic Claude API](https://www.anthropic.com/api)** — used only for the photo→promo feature. Sonnet 4.6 extracts a compact promo string from a screenshot at roughly $0.003/image. Optional; the bot works without a key (text input only).
 
 ## Promo handling
 
@@ -95,10 +99,12 @@ pull-*.bat / .py    — Local helpers to pull Excel / backtests off the Fly volu
 ```bash
 pip install -r requirements.txt
 
-# Minimum env vars
+# Required env vars
 export TELEGRAM_BOT_TOKEN=your-bot-token           # from @BotFather
 export TELEGRAM_CHAT_ID=your-chat-id               # from @userinfobot
-export ANTHROPIC_API_KEY=sk-ant-...                # optional, only for photo→promo
+export ODDS_API_KEY=your-odds-api-key              # from the-odds-api.com
+# Optional
+export ANTHROPIC_API_KEY=sk-ant-...                # only for photo→promo
 
 python telegram_bot.py
 ```
@@ -111,7 +117,8 @@ Then message your bot on Telegram. `/help` lists everything.
 fly launch --no-deploy     # first time only — creates the app
 fly secrets set TELEGRAM_BOT_TOKEN=...  \
                 TELEGRAM_CHAT_ID=...    \
-                ANTHROPIC_API_KEY=sk-ant-...
+                ODDS_API_KEY=...        \
+                ANTHROPIC_API_KEY=sk-ant-...   # optional
 fly deploy
 ```
 
