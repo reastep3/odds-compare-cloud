@@ -5615,15 +5615,23 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         else:
             pools_to_try = [(qualifying, None)]
 
-        for candidate_pool, game_name in pools_to_try:
-            # Try multiple leg counts: num_legs through num_legs + 3
+        # Find the SINGLE best parlay for this promo — across every
+        # candidate game (SGP) and every try_legs count. Previously we
+        # emitted one row per (game × try_legs) which buried the user
+        # in near-duplicates; the user just wants the best pick per
+        # promo.
+        best_overall_combo = None
+        best_overall_ev    = -float("inf")
+        best_overall_legs  = None
+
+        for candidate_pool, _game_name in pools_to_try:
             max_try_legs = min(num_legs + 3, len(candidate_pool))
             for try_legs in range(num_legs, max_try_legs + 1):
                 if len(candidate_pool) < try_legs:
                     break
 
-                best_combo = None
-                best_ev = -float("inf")
+                combo_candidate = None
+                combo_ev = -float("inf")
 
                 if try_legs <= 4 and len(candidate_pool) <= 20:
                     for combo in _combinations(candidate_pool, try_legs):
@@ -5632,62 +5640,70 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                         for leg in combo:
                             parlay_dec  *= leg["odds_decimal"]
                             parlay_fair *= leg["fair_prob"] / 100
-                        if parlay_min_dec is not None and parlay_dec < parlay_min_dec:
+                        if (parlay_min_dec is not None
+                                and parlay_dec < parlay_min_dec):
                             continue
-                        boost_dec = apply_profit_boost(parlay_dec, promo["boost_pct"])
+                        boost_dec = apply_profit_boost(
+                            parlay_dec, promo["boost_pct"])
                         ev = calc_ev(parlay_fair, boost_dec)
-                        if ev > best_ev:
-                            best_ev    = ev
-                            best_combo = combo
+                        if ev > combo_ev:
+                            combo_ev    = ev
+                            combo_candidate = combo
                 else:
                     # Greedy: top-N by fair probability
-                    best_combo = tuple(candidate_pool[:try_legs])
+                    greedy = tuple(candidate_pool[:try_legs])
                     parlay_dec = 1.0
                     parlay_fair = 1.0
-                    for leg in best_combo:
+                    for leg in greedy:
                         parlay_dec  *= leg["odds_decimal"]
                         parlay_fair *= leg["fair_prob"] / 100
-                if parlay_min_dec is not None and parlay_dec < parlay_min_dec:
-                    best_combo = None
-                else:
-                    boost_dec = apply_profit_boost(parlay_dec, promo["boost_pct"])
-                    best_ev   = calc_ev(parlay_fair, boost_dec)
+                    if (parlay_min_dec is None
+                            or parlay_dec >= parlay_min_dec):
+                        boost_dec = apply_profit_boost(
+                            parlay_dec, promo["boost_pct"])
+                        combo_ev = calc_ev(parlay_fair, boost_dec)
+                        combo_candidate = greedy
 
-            if best_combo is None or best_ev <= 0:
-                continue
+                if combo_candidate is not None and combo_ev > best_overall_ev:
+                    best_overall_combo = combo_candidate
+                    best_overall_ev    = combo_ev
+                    best_overall_legs  = try_legs
 
-            parlay_dec  = 1.0
-            parlay_fair = 1.0
-            for leg in best_combo:
-                parlay_dec  *= leg["odds_decimal"]
-                parlay_fair *= leg["fair_prob"] / 100
+        if best_overall_combo is None or best_overall_ev <= 0:
+            continue
 
-            boost_dec    = apply_profit_boost(parlay_dec, promo["boost_pct"])
-            boosted_ev   = calc_ev(parlay_fair, boost_dec)
-            unboosted_ev = calc_ev(parlay_fair, parlay_dec)
-            boosted_kelly = kelly_bet(parlay_fair, boost_dec)
+        parlay_dec  = 1.0
+        parlay_fair = 1.0
+        for leg in best_overall_combo:
+            parlay_dec  *= leg["odds_decimal"]
+            parlay_fair *= leg["fair_prob"] / 100
 
-            bet = clamp_bet(bankroll * boosted_kelly, promo["book"])
-            if promo.get("max_bet") and bet > promo["max_bet"]:
-                bet = promo["max_bet"]
-            profit = bet * (boost_dec - 1)
+        boost_dec    = apply_profit_boost(parlay_dec, promo["boost_pct"])
+        boosted_ev   = calc_ev(parlay_fair, boost_dec)
+        unboosted_ev = calc_ev(parlay_fair, parlay_dec)
+        boosted_kelly = kelly_bet(parlay_fair, boost_dec)
 
-            rows.append({
-                "promo_label":      promo["label"],
-                "promo":            promo,
-                "legs":             list(best_combo),
-                "num_legs":         try_legs,
-                "parlay_decimal":   round(parlay_dec, 3),
-                "parlay_american":  format_american(parlay_dec),
-                "parlay_fair_prob": round(parlay_fair * 100, 3),
-                "boost_dec":        round(boost_dec, 3),
-                "boost_american":   format_american(boost_dec),
-                "unboosted_ev":     round(unboosted_ev, 2),
-                "boosted_ev":       round(boosted_ev, 2),
-                "boosted_kelly":    round(boosted_kelly * 100, 2),
-                "bet":              round(bet, 2),
-                "profit":           round(profit, 2),
-            })
+        bet = clamp_bet(bankroll * boosted_kelly, promo["book"])
+        if promo.get("max_bet") and bet > promo["max_bet"]:
+            bet = promo["max_bet"]
+        profit = bet * (boost_dec - 1)
+
+        rows.append({
+            "promo_label":      promo["label"],
+            "promo":            promo,
+            "legs":             list(best_overall_combo),
+            "num_legs":         best_overall_legs,
+            "parlay_decimal":   round(parlay_dec, 3),
+            "parlay_american":  format_american(parlay_dec),
+            "parlay_fair_prob": round(parlay_fair * 100, 3),
+            "boost_dec":        round(boost_dec, 3),
+            "boost_american":   format_american(boost_dec),
+            "unboosted_ev":     round(unboosted_ev, 2),
+            "boosted_ev":       round(boosted_ev, 2),
+            "boosted_kelly":    round(boosted_kelly * 100, 2),
+            "bet":              round(bet, 2),
+            "profit":           round(profit, 2),
+        })
 
     rows.sort(key=lambda x: x["boosted_ev"], reverse=True)
     return rows
@@ -6255,7 +6271,8 @@ def run_headless_live() -> list[dict]:
 
 def run_headless_finalize(fetched: dict,
                           promos: list[dict] | None = None,
-                          game_filters: dict[str, str] | None = None) -> dict:
+                          game_filters: dict[str, str] | None = None,
+                          skip_excel: bool = False) -> dict:
     """
     Phase 2 of the headless pipeline: apply game filters, write Excel,
     build promo picks + parlay rows. Fast (~1s).
@@ -6293,11 +6310,14 @@ def run_headless_finalize(fetched: dict,
         if promo.get("game_specific") and promo.get("label") in game_filters:
             promo["game_filter"] = game_filters[promo["label"]]
 
-    # Write Excel (also handles promo picks, seen-tracking, etc.)
-    write_excel(all_edges, dk_bankroll, fd_bankroll, output_path,
-                promos, hr_edges, golf_edges, player_prop_edges,
-                parlay_pool=parlay_pool, script_dir=script_dir,
-                promo_pool=promo_pool)
+    # Write Excel (also handles promo picks, seen-tracking, etc.).
+    # /run_promos passes skip_excel=True — the user doesn't want a
+    # spreadsheet for a promo-only query.
+    if not skip_excel:
+        write_excel(all_edges, dk_bankroll, fd_bankroll, output_path,
+                    promos, hr_edges, golf_edges, player_prop_edges,
+                    parlay_pool=parlay_pool, script_dir=script_dir,
+                    promo_pool=promo_pool)
 
     # Build play_edges for the bot
     play_edges = [e for e in all_edges if _qualifies(e)]
@@ -6327,7 +6347,7 @@ def run_headless_finalize(fetched: dict,
         "player_prop_edges": player_prop_edges,
         "dk_bankroll":       dk_bankroll,
         "fd_bankroll":       fd_bankroll,
-        "output_path":       output_path,
+        "output_path":       None if skip_excel else output_path,
         "summary": {
             "total_games":    counters["total_games"],
             "pinn_anchored":  counters["pinn_anchored"],
