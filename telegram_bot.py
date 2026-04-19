@@ -11,6 +11,7 @@ Commands:
     /run         — Start a new odds compare run (asks for bankrolls + promos)
     /run_single  — Run for a single book of your choosing
     /run_skip    — Just list the picks (no bankrolls, no promos)
+    /run_promos  — Only show promo picks (skip Summary + Play These)
     /run_live    — Quick +EV picks on currently live games (for promos)
     /backtest    — Run a backtest on past picks
     /books       — View or change your sportsbook selection
@@ -649,6 +650,39 @@ async def cmd_run_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return await cmd_run(update, context)
 
 
+async def cmd_run_promos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fetch + list PROMO PICKS only — skip bankroll prompts and suppress
+    the Summary / Play These output. Uses last-used bankrolls (or $100) so
+    bet-sizing math still works on the promo picks."""
+    if not is_authorized(update):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+
+    if context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    user_books = get_user_books(update)
+    if not user_books:
+        await update.message.reply_text("Set up your books first with /books")
+        return ConversationHandler.END
+
+    uid = str(update.effective_user.id)
+    profile = _users.get(uid, {})
+    last_bankrolls = profile.get("last_bankrolls", {})
+
+    context.user_data.clear()
+    context.user_data["books"]       = user_books
+    context.user_data["promos"]      = []
+    context.user_data["promos_only"] = True
+    context.user_data["dk_bankroll"] = last_bankrolls.get("DraftKings", 100)
+    context.user_data["fd_bankroll"] = last_bankrolls.get("FanDuel", 100)
+
+    await _send_promo_prompt(update, context)
+    return ASK_PROMOS
+
+
 # ── /run_single command ──────────────────────────────────────────────
 
 _RUN_SINGLE_BOOKS = ["DraftKings", "FanDuel"]
@@ -856,6 +890,14 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip().lower()
 
     if text in ("done", "skip", "no", "none"):
+        # /run_promos with no promos is pointless — cancel instead of fetching
+        if (context.user_data.get("promos_only")
+                and not context.user_data.get("promos")):
+            await update.message.reply_text(
+                "No promos entered — cancelled.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return ConversationHandler.END
         return await _start_run(update, context)
 
     # Saved-promo keyboard (None if the user has no saved promos)
@@ -1015,6 +1057,11 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
     """Send Summary + Play These messages right after fetch, before any
     game-pick prompts or promo finalization."""
     from odds_compare import _qualifies, _qualifies_prop
+
+    # /run_promos: user only wants promo-driven output. Skip Summary + Play
+    # These entirely — finalize will still send Promo Picks + Parlay Picks.
+    if context.user_data.get("promos_only"):
+        return
 
     chat_id = context.user_data["chat_id"]
     counters = fetched["_counters"]
@@ -1295,6 +1342,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/run         — Start a new odds compare run\n"
         "/run_single  — Run for a single book of your choosing\n"
         "/run_skip    — Just list the picks (no bankrolls, no promos)\n"
+        "/run_promos  — Only show promo picks (skip Summary + Play These)\n"
         "/run_live    — Quick +EV picks on currently live games (for promos)\n"
         "/backtest    — Run a backtest on past picks\n"
         "/books       — View or change your sportsbooks\n"
@@ -1553,6 +1601,7 @@ def main():
             BotCommand("run",         "Full odds compare (bankrolls + promos)"),
             BotCommand("run_single",   "Run for a single book of your choosing"),
             BotCommand("run_skip",     "Just list the picks (no bankrolls)"),
+            BotCommand("run_promos",   "Only promo picks (skip Summary + Play These)"),
             BotCommand("run_live",     "Live in-progress games for promo picks"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("books",        "Set or change your sportsbooks"),
@@ -1583,6 +1632,7 @@ def main():
             CommandHandler("run", cmd_run),
             CommandHandler("run_skip", cmd_run_skip),
             CommandHandler("run_single", cmd_run_single),
+            CommandHandler("run_promos", cmd_run_promos),
         ],
         states={
             ASK_RUN_SINGLE_BOOK: [
