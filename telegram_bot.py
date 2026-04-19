@@ -1039,27 +1039,16 @@ async def _accept_parsed_promo(update: Update,
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(original_text)
 
-    # If the promo string already included "game", skip the follow-up prompt.
-    if promo.get("game_specific"):
-        await update.message.reply_text(
-            f"Added: {promo['label']} — marked game-specific.\n"
-            f"Tap another saved promo, type/send a new one, or tap/type 'done'.",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
-        )
-        return ASK_PROMOS
-
-    kb = ReplyKeyboardMarkup(
-        [[_GAMESPEC_YES], [_GAMESPEC_NO]],
-        one_time_keyboard=True, resize_keyboard=True,
-    )
+    # Game-specific is implicit from the promo text — only set when the
+    # user (or vision extractor) included the word "game" in the string.
+    # Anything else defaults to any-game, no follow-up prompt needed.
+    tag = " — marked game-specific" if promo.get("game_specific") else ""
     await update.message.reply_text(
-        f"Added: {promo['label']}\n\n"
-        f"Is this boost for a <b>specific game</b> (e.g. SGP or "
-        f"game-only parlay boost)?",
-        parse_mode="HTML",
-        reply_markup=kb,
+        f"Added: {promo['label']}{tag}\n"
+        f"Tap another saved promo, type/send a new one, or tap/type 'done'.",
+        reply_markup=saved_kb or ReplyKeyboardRemove(),
     )
-    return ASK_PROMO_GAMESPEC
+    return ASK_PROMOS
 
 
 async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1112,6 +1101,10 @@ Rules:
 - min_odds: e.g. "+100" or "-200" (include the sign).
   If the promo lists "Min Total Odds" or similar, use that.
 - max_bet: e.g. "$10". If "Max Wager" is given, use it.
+- game: include the literal word "game" ONLY if the promo is restricted
+  to a specific matchup (e.g. "Bet on Lakers vs Celtics"). DO NOT add
+  "game" for generic SGP/parlay boosts on "any <sport> event" — those
+  apply league-wide, not to one game.
 - For bonus bets: "<book> bonus $<amount> [sport]"
 
 If the image is not a sportsbook promo (DraftKings or FanDuel), respond \
