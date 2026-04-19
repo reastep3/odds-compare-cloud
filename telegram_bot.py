@@ -61,6 +61,7 @@ ASK_BT_PERIOD, ASK_BT_START, ASK_BT_END = range(10, 13)
 ASK_BOOKS = 20
 ASK_RUN_SINGLE_BOOK = 21
 ASK_PROMO_GAMESPEC = 22
+ASK_PHOTO_BOOK = 23
 
 _GAMESPEC_YES = "🎯 Specific game"
 _GAMESPEC_NO  = "Any game"
@@ -1105,21 +1106,12 @@ and output ONLY one line in this compact format:
 <book> <boost%> [Nleg|N+] [sgp] [sport] [market] [+min_odds|-min_odds] [$max_bet]
 
 Rules:
-- book: "dk" (DraftKings) or "fd" (FanDuel). Identify by these cues,
-  in priority order:
-    1. Any visible text/logo ("DraftKings", "DK", "FanDuel", "Fanduel").
-    2. Color scheme:
-       · DraftKings = BLACK / very dark grey backgrounds with GREEN
-         accents and distinctive YELLOW boost/lightning-bolt icons.
-         CTA buttons are bright blue with white text ("Go to NBA").
-       · FanDuel = NAVY/ROYAL BLUE backgrounds throughout, often with
-         a lighter cyan-blue header strip. CTA buttons tend to be
-         white/light with blue text, or solid blue with white text.
-         No yellow/green boost icons.
-    3. UI layout: DraftKings promo cards show a rounded tile with the
-       boost % on the LEFT and a yellow circle icon on the right.
-       FanDuel promos use a flatter blue card with simpler iconography.
-  If both books plausibly match, prefer the brand text over colors.
+- book: "dk" (DraftKings) or "fd" (FanDuel). Look for VISIBLE BRAND
+  TEXT first — "DraftKings"/"DK" or "FanDuel"/"Fanduel"/"f" logo. If
+  no brand text is visible (the image is just a promo card crop),
+  output your best guess anyway — the user will confirm. Both books
+  now ship dark-theme promo cards with yellow boost icons, so color
+  alone is NOT a reliable signal. Do not hallucinate brand text.
 - boost: a SINGLE percentage, e.g. "25%". Never a range.
   For STEPPED/TIERED boosts (different % per leg count, e.g. "20% for 2
   legs, 33% for 3 legs, 50% for 4+ legs"), pick the HIGHEST tier and
@@ -1163,7 +1155,7 @@ async def _image_to_promo_string(img_bytes: bytes,
     try:
         resp = await asyncio.to_thread(
             client.messages.create,
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -1222,10 +1214,75 @@ async def recv_promo_photo(update: Update,
         )
         return ASK_PROMOS
 
+    user_books = context.user_data["books"]
+
+    # If only one book is selected, the book is unambiguous — override
+    # whatever the model guessed and skip the confirmation step.
+    if len(user_books) == 1:
+        forced = user_books[0]
+        if promo["book"] != forced:
+            promo["book"] = forced
+            extracted = re.sub(
+                r"^(dk|fd|draftkings|fanduel)\b",
+                "dk" if forced == "DraftKings" else "fd",
+                extracted, count=1, flags=re.IGNORECASE)
+        await status.edit_text(
+            f"Extracted: <code>{_esc(extracted)}</code>",
+            parse_mode="HTML",
+        )
+        return await _accept_parsed_promo(update, context, promo, extracted)
+
+    # Both books enabled → confirm with one tap. The model's guess is
+    # shown first on the keyboard but user can always flip it.
     await status.edit_text(
-        f"Extracted: <code>{_esc(extracted)}</code>",
+        f"Extracted: <code>{_esc(extracted)}</code>\n"
+        f"<i>Guessed book: {_esc(promo['book'])}</i>",
         parse_mode="HTML",
     )
+    context.user_data["_photo_promo"] = promo
+    context.user_data["_photo_text"]  = extracted
+    # Put the guessed book first so confirming is a single tap
+    guess_first = (["DraftKings", "FanDuel"]
+                   if promo["book"] == "DraftKings"
+                   else ["FanDuel", "DraftKings"])
+    kb = ReplyKeyboardMarkup(
+        [guess_first], one_time_keyboard=True, resize_keyboard=True,
+    )
+    await update.message.reply_text(
+        "Which book is this promo from? (tap to confirm or flip)",
+        reply_markup=kb,
+    )
+    return ASK_PHOTO_BOOK
+
+
+async def recv_photo_book(update: Update,
+                          context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Accept the user's book confirmation for a photo-extracted promo
+    and finish adding it."""
+    text = (update.message.text or "").strip().lower()
+    if text in ("dk", "draftkings"):
+        book = "DraftKings"
+    elif text in ("fd", "fanduel"):
+        book = "FanDuel"
+    else:
+        await update.message.reply_text(
+            "Tap DraftKings or FanDuel."
+        )
+        return ASK_PHOTO_BOOK
+
+    promo = context.user_data.pop("_photo_promo", None)
+    extracted = context.user_data.pop("_photo_text", None)
+    if promo is None or extracted is None:
+        # State got out of sync — bail back to the promo prompt
+        await _send_promo_prompt(update, context)
+        return ASK_PROMOS
+
+    promo["book"] = book
+    short = "dk" if book == "DraftKings" else "fd"
+    extracted = re.sub(
+        r"^(dk|fd|draftkings|fanduel)\b",
+        short, extracted, count=1, flags=re.IGNORECASE)
+
     return await _accept_parsed_promo(update, context, promo, extracted)
 
 
@@ -1912,6 +1969,10 @@ def main():
             ASK_PROMOS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_promo),
                 MessageHandler(filters.PHOTO, recv_promo_photo),
+            ],
+            ASK_PHOTO_BOOK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               recv_photo_book),
             ],
             ASK_PROMO_GAMESPEC: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
