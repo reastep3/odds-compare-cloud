@@ -695,24 +695,16 @@ async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-_HIDE_KB = "⇊ hide"
-
-
 def _promo_keyboard(update: Update,
                     context: ContextTypes.DEFAULT_TYPE | None = None,
                     ) -> ReplyKeyboardMarkup | None:
     """Build a reply keyboard from the user's saved promos.
 
-    Returns None when:
-      • the user has no saved promos yet, or
-      • the user has temporarily hidden the keyboard via the ⇊ hide
-        button (cleared by typing 'show'/'recent').
-
-    Last row always has [⇊ hide, done|skip] so dismissing + finishing
-    are one tap each.
+    Returned only when explicitly requested (initial prompt or /recent).
+    After any tap/message we send ReplyKeyboardRemove so it doesn't
+    cling to the bottom — the user can summon it back via /recent or
+    by typing 'show'/'recent'/'promos'.
     """
-    if context and context.user_data.get("_keyboard_hidden"):
-        return None
     uid = str(update.effective_user.id)
     profile = _users.get(uid, {})
     saved = profile.get("saved_promos", [])
@@ -720,7 +712,7 @@ def _promo_keyboard(update: Update,
         return None
     buttons = [[p] for p in saved[:6]]
     has_entries = bool(context and context.user_data.get("promos"))
-    buttons.append([_HIDE_KB, "done" if has_entries else "skip"])
+    buttons.append(["done" if has_entries else "skip"])
     return ReplyKeyboardMarkup(buttons, one_time_keyboard=True,
                                resize_keyboard=True)
 
@@ -1020,15 +1012,18 @@ async def recv_fd_bankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def _accept_parsed_promo(update: Update,
                                context: ContextTypes.DEFAULT_TYPE,
                                promo: dict, original_text: str) -> int:
-    """Validate + store a parsed promo, then prompt for game-specific.
-    Shared by recv_promo (text) and recv_promo_photo (image)."""
-    saved_kb = _promo_keyboard(update, context)
+    """Validate + store a parsed promo, then prompt for the next input.
+    Shared by recv_promo (text) and recv_promo_photo (image).
+
+    Always dismisses the saved-promos keyboard with ReplyKeyboardRemove
+    so it doesn't cling to the bottom of the chat. The user can summon
+    it again with /recent."""
     user_books = context.user_data["books"]
     if promo["book"] not in user_books:
         await update.message.reply_text(
             f"You don't have {promo['book']} selected. "
             f"Use /books to change. Try again or tap/type 'done'.",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ASK_PROMOS
 
@@ -1043,26 +1038,25 @@ async def _accept_parsed_promo(update: Update,
             "clearer screenshot, or type manually, e.g.\n"
             "<code>dk 50% 4+ sgp nhl $5</code> (for a 20/33/50% stepped-up boost)",
             parse_mode="HTML",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ASK_PROMOS
 
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(original_text)
 
-    # Persist to saved_promos immediately so the recent-promos keyboard
-    # is up-to-date even if this run crashes or is cancelled before
-    # finalize. Typed and photo-extracted entries treated identically.
+    # Persist to saved_promos immediately so /recent is up-to-date even
+    # if this run crashes or is cancelled before finalize. Typed and
+    # photo-extracted entries treated identically.
     _save_promo_string(str(update.effective_user.id), original_text)
 
     # Game-specific is implicit from the promo text — only set when the
     # user (or vision extractor) included the word "game" in the string.
-    # Anything else defaults to any-game, no follow-up prompt needed.
     tag = " — marked game-specific" if promo.get("game_specific") else ""
     await update.message.reply_text(
         f"Added: {promo['label']}{tag}\n"
-        f"Tap another saved promo, type/send a new one, or tap/type 'done'.",
-        reply_markup=saved_kb or ReplyKeyboardRemove(),
+        f"Type/send another, /recent for saved, or 'done' to finish.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ASK_PROMOS
 
@@ -1094,33 +1088,30 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return ConversationHandler.END
         return await _start_run(update, context)
 
-    # Toggle the recent-promos keyboard on demand
-    if text in (_HIDE_KB.lower(), "hide", "⇊ hide", "⇊hide"):
-        context.user_data["_keyboard_hidden"] = True
-        await update.message.reply_text(
-            "Recent promos hidden. Type <b>show</b> (or <b>recent</b>) to "
-            "bring them back.",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return ASK_PROMOS
+    # 'show'/'recent'/'promos' text re-summons the saved-promos keyboard
+    # (typing an alternative to the /recent slash command).
     if text in ("show", "recent", "promos"):
-        context.user_data.pop("_keyboard_hidden", None)
         await _send_promo_prompt(update, context)
         return ASK_PROMOS
-
-    saved_kb = _promo_keyboard(update, context)
 
     promo = parse_promo(update.message.text)
     if promo is None:
         await update.message.reply_text(
-            "Couldn't parse that promo. Try again or tap/type 'done'/'skip'.",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
+            "Couldn't parse that promo. Try again, /recent for saved, "
+            "or 'done'/'skip' to finish.",
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ASK_PROMOS
 
     return await _accept_parsed_promo(
         update, context, promo, update.message.text.strip())
+
+
+async def cmd_recent_promos(update: Update,
+                            context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/recent — re-show the saved-promos reply keyboard on demand."""
+    await _send_promo_prompt(update, context)
+    return ASK_PROMOS
 
 
 # ── Photo → promo via Claude vision ──────────────────────────────────
@@ -1219,7 +1210,6 @@ async def recv_promo_photo(update: Update,
         return ASK_PROMOS
 
     extracted = await _image_to_promo_string(img_bytes)
-    saved_kb = _promo_keyboard(update, context)
 
     if extracted.startswith("ERROR:"):
         await status.edit_text(
@@ -1335,11 +1325,10 @@ async def recv_promo_gamespec(update: Update,
     else:
         note = ""
 
-    saved_kb = _promo_keyboard(update, context)
     await update.message.reply_text(
         f"OK{note}\n"
-        f"Tap another saved promo, type a new one, or tap/type 'done'.",
-        reply_markup=saved_kb or ReplyKeyboardRemove(),
+        f"Type/send another, /recent for saved, or 'done' to finish.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ASK_PROMOS
 
@@ -1999,6 +1988,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_fd_bankroll),
             ],
             ASK_PROMOS: [
+                CommandHandler("recent", cmd_recent_promos),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_promo),
                 MessageHandler(filters.PHOTO, recv_promo_photo),
             ],
