@@ -53,6 +53,10 @@ ASK_DK_BANKROLL, ASK_FD_BANKROLL, ASK_PROMOS, ASK_GAME_PICK = range(4)
 ASK_BT_PERIOD, ASK_BT_START, ASK_BT_END = range(10, 13)
 ASK_BOOKS = 20
 ASK_RUN_SINGLE_BOOK = 21
+ASK_PROMO_GAMESPEC = 22
+
+_GAMESPEC_YES = "🎯 Specific game"
+_GAMESPEC_NO  = "Any game"
 
 # ── Run lock ────────────────────────────────────────────────────────
 _run_lock = asyncio.Lock()
@@ -204,8 +208,8 @@ def parse_promo(text: str) -> dict | None:
             i += 1
             continue
 
-        # min:-200
-        min_match = re.match(r"^min:(-?\d+)$", tok)
+        # min:-200 or min:+300 (also min:300)
+        min_match = re.match(r"^min:([+-]?\d+)$", tok)
         if min_match:
             promo["min_odds"] = int(min_match.group(1))
             i += 1
@@ -878,8 +882,53 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(
         update.message.text.strip())
+
+    # If the promo string already included "game", skip the follow-up prompt.
+    if promo.get("game_specific"):
+        await update.message.reply_text(
+            f"Added: {promo['label']} — marked game-specific.\n"
+            f"Tap another saved promo, type a new one, or tap/type 'done'.",
+            reply_markup=saved_kb or ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+
+    # Ask whether this boost applies to a single game (e.g. SGP boost,
+    # "bet $50 on Arsenal vs Man City"). Always asked so the option is
+    # always visible to the user.
+    kb = ReplyKeyboardMarkup(
+        [[_GAMESPEC_YES], [_GAMESPEC_NO]],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
     await update.message.reply_text(
-        f"Added: {promo['label']}\n"
+        f"Added: {promo['label']}\n\n"
+        f"Is this boost for a <b>specific game</b> (e.g. SGP or "
+        f"game-only parlay boost)?",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    return ASK_PROMO_GAMESPEC
+
+
+async def recv_promo_gamespec(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the yes/no answer about whether the last-added promo is
+    game-specific. Pick will happen after the fetch completes."""
+    text = (update.message.text or "").strip().lower()
+    promos = context.user_data.get("promos", [])
+
+    if text.startswith("🎯") or text in ("yes", "y", "specific game",
+                                          "specific", "game"):
+        if promos:
+            promos[-1]["game_specific"] = True
+            note = " — marked game-specific."
+        else:
+            note = ""
+    else:
+        note = ""
+
+    saved_kb = _promo_keyboard(update, context)
+    await update.message.reply_text(
+        f"OK{note}\n"
         f"Tap another saved promo, type a new one, or tap/type 'done'.",
         reply_markup=saved_kb or ReplyKeyboardRemove(),
     )
@@ -1018,11 +1067,14 @@ async def _prompt_next_game_pick(update: Update,
     fetched = context.user_data["fetched"]
     chat_id = context.user_data["chat_id"]
 
-    # Find the next promo that has at least one eligible game
+    # Find the next promo that has at least one eligible game.
+    # Use the broader promo_pool (all DK/FD outcomes) so games without a
+    # pre-boost +EV edge still surface — the boost may make them viable.
+    promo_edges = fetched.get("promo_pool") or fetched["all_edges"]
     while queue:
         promo = queue[0]
         eligible = eligible_games_for_promo(
-            promo, fetched["all_edges"], fetched["player_prop_edges"])
+            promo, promo_edges, fetched["player_prop_edges"])
         if eligible:
             break
         # No matching games — log + skip
@@ -1544,6 +1596,10 @@ def main():
             ],
             ASK_PROMOS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_promo),
+            ],
+            ASK_PROMO_GAMESPEC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               recv_promo_gamespec),
             ],
             ASK_GAME_PICK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_game_pick),
