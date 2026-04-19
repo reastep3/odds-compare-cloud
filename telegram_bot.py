@@ -695,22 +695,32 @@ async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+_HIDE_KB = "⇊ hide"
+
+
 def _promo_keyboard(update: Update,
                     context: ContextTypes.DEFAULT_TYPE | None = None,
                     ) -> ReplyKeyboardMarkup | None:
     """Build a reply keyboard from the user's saved promos.
 
-    Final button reads 'done' once any promos have been entered, 'skip' before.
+    Returns None when:
+      • the user has no saved promos yet, or
+      • the user has temporarily hidden the keyboard via the ⇊ hide
+        button (cleared by typing 'show'/'recent').
+
+    Last row always has [⇊ hide, done|skip] so dismissing + finishing
+    are one tap each.
     """
+    if context and context.user_data.get("_keyboard_hidden"):
+        return None
     uid = str(update.effective_user.id)
     profile = _users.get(uid, {})
     saved = profile.get("saved_promos", [])
     if not saved:
         return None
-    # Build rows of 1 button each (promo strings can be long)
     buttons = [[p] for p in saved[:6]]
     has_entries = bool(context and context.user_data.get("promos"))
-    buttons.append(["done" if has_entries else "skip"])
+    buttons.append([_HIDE_KB, "done" if has_entries else "skip"])
     return ReplyKeyboardMarkup(buttons, one_time_keyboard=True,
                                resize_keyboard=True)
 
@@ -1084,6 +1094,21 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return ConversationHandler.END
         return await _start_run(update, context)
 
+    # Toggle the recent-promos keyboard on demand
+    if text in (_HIDE_KB.lower(), "hide", "⇊ hide", "⇊hide"):
+        context.user_data["_keyboard_hidden"] = True
+        await update.message.reply_text(
+            "Recent promos hidden. Type <b>show</b> (or <b>recent</b>) to "
+            "bring them back.",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+    if text in ("show", "recent", "promos"):
+        context.user_data.pop("_keyboard_hidden", None)
+        await _send_promo_prompt(update, context)
+        return ASK_PROMOS
+
     saved_kb = _promo_keyboard(update, context)
 
     promo = parse_promo(update.message.text)
@@ -1270,18 +1295,25 @@ async def recv_photo_book(update: Update,
         )
         return ASK_PHOTO_BOOK
 
-    promo = context.user_data.pop("_photo_promo", None)
+    stashed = context.user_data.pop("_photo_promo", None)
     extracted = context.user_data.pop("_photo_text", None)
-    if promo is None or extracted is None:
+    if stashed is None or extracted is None:
         # State got out of sync — bail back to the promo prompt
         await _send_promo_prompt(update, context)
         return ASK_PROMOS
 
-    promo["book"] = book
     short = "dk" if book == "DraftKings" else "fd"
     extracted = re.sub(
         r"^(dk|fd|draftkings|fanduel)\b",
         short, extracted, count=1, flags=re.IGNORECASE)
+
+    # Re-parse the corrected string so the label (shown in "Added:" and
+    # in the match pipeline) reflects the user's book choice. Fall back
+    # to patching the stashed dict if re-parse fails for any reason.
+    promo = parse_promo(extracted)
+    if promo is None:
+        stashed["book"] = book
+        promo = stashed
 
     return await _accept_parsed_promo(update, context, promo, extracted)
 
