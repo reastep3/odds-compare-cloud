@@ -1057,6 +1057,19 @@ async def _accept_parsed_promo(update: Update,
         )
         return ASK_PROMOS
 
+    # Skip if the user already added an equivalent promo this session —
+    # otherwise each duplicate spawns its own parlay/pick row and buries
+    # the output. Compare semantic fields, not raw text, so different
+    # token orderings still dedupe.
+    existing = context.user_data.get("promos", [])
+    if any(_promos_equivalent(promo, e) for e in existing):
+        await update.message.reply_text(
+            f"Already added: {promo['label']} — skipping duplicate.",
+            reply_markup=_promo_keyboard(update, context)
+                         or ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(original_text)
 
@@ -1084,6 +1097,20 @@ async def _accept_parsed_promo(update: Update,
         reply_markup=saved_kb or ReplyKeyboardRemove(),
     )
     return ASK_PROMOS
+
+
+_EQUIV_FIELDS = (
+    "book", "sport", "market", "promo_type", "boost_pct",
+    "bet_amount", "min_odds", "max_bet", "num_legs",
+    "game_specific", "sgp", "game_hint",
+)
+
+
+def _promos_equivalent(a: dict, b: dict) -> bool:
+    """Return True if two parsed promos are semantically the same.
+    Used to dedupe within a single conversation — tokens-in-different-
+    order strings still produce the same dict and are considered equal."""
+    return all(a.get(f) == b.get(f) for f in _EQUIV_FIELDS)
 
 
 def _save_promo_string(uid: str, promo_string: str) -> None:
@@ -1636,9 +1663,10 @@ async def _finalize_and_send(update: Update,
     user_books = context.user_data["books"]
     skip_mode  = context.user_data.get("skip_mode", False)
 
+    promos_only = context.user_data.get("promos_only", False)
     try:
         result = await asyncio.to_thread(
-            _run_odds_compare_finalize, fetched, promos)
+            _run_odds_compare_finalize, fetched, promos, promos_only)
     except Exception as e:
         context.bot_data["running"] = False
         await context.bot.send_message(chat_id, f"Finalize failed: {e}",
@@ -1679,11 +1707,14 @@ async def _finalize_and_send(update: Update,
                         chat_id, chunk, parse_mode="HTML",
                         disable_web_page_preview=True)
 
-        await context.bot.send_message(
-            chat_id,
-            f"Excel saved: {os.path.basename(result['output_path'])}",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        # /run_promos skips the Excel write entirely — don't advertise
+        # a file that doesn't exist.
+        if result.get("output_path"):
+            await context.bot.send_message(
+                chat_id,
+                f"Excel saved: {os.path.basename(result['output_path'])}",
+                reply_markup=ReplyKeyboardRemove(),
+            )
     except Exception as e:
         await context.bot.send_message(chat_id, f"Error sending results: {e}")
 
@@ -1714,10 +1745,11 @@ def _run_odds_compare_fetch(dk: float, fd: float) -> dict:
     return run_headless_fetch(dk, fd)
 
 
-def _run_odds_compare_finalize(fetched: dict, promos: list) -> dict:
+def _run_odds_compare_finalize(fetched: dict, promos: list,
+                               promos_only: bool = False) -> dict:
     """Thread-safe wrapper around run_headless_finalize."""
     from odds_compare import run_headless_finalize
-    return run_headless_finalize(fetched, promos)
+    return run_headless_finalize(fetched, promos, skip_excel=promos_only)
 
 
 def _split_message(text: str, limit: int = 4096) -> list[str]:
