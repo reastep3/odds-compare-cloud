@@ -533,7 +533,7 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict) -> str | None:
             )
         else:
             boost_dec = apply_profit_boost(
-                edge["odds_decimal"], promo.get("boost_pct", 0))
+                edge["odds_decimal"], promo.get("boost_pct") or 0)
             fair_prob = edge["fair_prob"] / 100
             boosted_ev = calc_ev(fair_prob, boost_dec)
             boosted_odds = format_american(boost_dec)
@@ -1021,6 +1021,21 @@ async def _accept_parsed_promo(update: Update,
         )
         return ASK_PROMOS
 
+    # Boosts/parlays require a single boost %. Reject ambiguous cases
+    # (e.g. photo extraction produced "20-50%" from a stepped-up boost)
+    # so the user can fix it now instead of finalize crashing later.
+    if (promo.get("promo_type") in ("straight", "parlay")
+            and promo.get("boost_pct") is None):
+        await update.message.reply_text(
+            "Couldn't read a single boost % from that promo — stepped "
+            "or tiered boosts need to be resolved to one number. Try a "
+            "clearer screenshot, or type manually, e.g.\n"
+            "<code>dk 50% 4+ sgp nhl $5</code> (for a 20/33/50% stepped-up boost)",
+            parse_mode="HTML",
+            reply_markup=saved_kb or ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+
     context.user_data["promos"].append(promo)
     context.user_data.setdefault("promo_strings", []).append(original_text)
 
@@ -1083,15 +1098,20 @@ and output ONLY one line in this compact format:
 <book> <boost%> [Nleg|N+] [sgp] [sport] [market] [+min_odds|-min_odds] [$max_bet]
 
 Rules:
-- book: "dk" (DraftKings) or "fd" (FanDuel)
-- boost: e.g. "25%"
+- book: "dk" (DraftKings) or "fd" (FanDuel).
+- boost: a SINGLE percentage, e.g. "25%". Never a range.
+  For STEPPED/TIERED boosts (different % per leg count, e.g. "20% for 2
+  legs, 33% for 3 legs, 50% for 4+ legs"), pick the HIGHEST tier and
+  emit the matching minimum leg count. The example above → "50% 4+".
 - If it's a parlay boost: add "3-leg" (exactly 3) or "3+" (3 or more).
-  Include "sgp" if it's a same-game-parlay boost.
+  Include "sgp" if it's a same-game-parlay / SGP+ boost.
 - sport: one of nba, mlb, nhl, nfl, soccer, ncaab, ncaaf, ufc, pga.
   Omit if the promo applies to all sports.
-- market: one of ml, spreads, totals, hr, strikeouts. Omit if any market.
+- market: one of ml, spreads, totals, hr, strikeouts. Omit if any
+  market or if the market isn't one of these (e.g. "goalscorer" — omit).
 - min_odds: e.g. "+100" or "-200" (include the sign).
-- max_bet: e.g. "$10".
+  If the promo lists "Min Total Odds" or similar, use that.
+- max_bet: e.g. "$10". If "Max Wager" is given, use it.
 - For bonus bets: "<book> bonus $<amount> [sport]"
 
 If the image is not a sportsbook promo (DraftKings or FanDuel), respond \
