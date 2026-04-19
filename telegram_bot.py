@@ -214,6 +214,7 @@ def parse_promo(text: str) -> dict | None:
         "game_filter":   None,
         "game_hint":     None,
         "sgp":           False,
+        "count":         1,
         "label":         "",
     }
 
@@ -305,6 +306,15 @@ def parse_promo(text: str) -> dict | None:
             i += 1
             continue
 
+        # "Nx" — the user has N copies of this promo (e.g. "2x", "3x")
+        count_match = re.match(r"^(\d+)x$", tok)
+        if count_match:
+            n = int(count_match.group(1))
+            if n >= 1:
+                promo["count"] = n
+            i += 1
+            continue
+
         # game:TeamA-TeamB — matchup hint. TeamA/B may be short codes
         # (ATL), nicknames (Braves), or cities (Atlanta). Multi-word
         # names use underscores: Red_Sox, New_York. Matched case-
@@ -372,6 +382,8 @@ def parse_promo(text: str) -> dict | None:
         parts.append(f"(min {promo['min_odds']:+d})")
     if promo["max_bet"] is not None:
         parts.append(f"(max ${promo['max_bet']:.0f})")
+    if promo.get("count", 1) > 1:
+        parts.append(f"×{promo['count']}")
     promo["label"] = " ".join(parts)
 
     return promo
@@ -525,8 +537,11 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict) -> str | None:
     for pp in promo_picks:
         promo = pp["promo"]
         edge = pp["edge"]
+        n_copies = pp.get("copy_of", 1) or 1
+        copy_suffix = (f" <i>[pick {pp['copy_idx'] + 1}/{n_copies}]</i>"
+                       if n_copies > 1 else "")
 
-        lines.append(f"\n<b>{_esc(promo['label'])}</b>")
+        lines.append(f"\n<b>{_esc(promo['label'])}</b>{copy_suffix}")
 
         if edge is None:
             lines.append("  No qualifying pick found")
@@ -585,8 +600,12 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
     for row in parlay_rows:
         promo = row["promo"]
         legs = row["legs"]
+        n_copies = row.get("copy_of", 1) or 1
+        copy_suffix = (f" <i>[pick {row['copy_idx'] + 1}/{n_copies}]</i>"
+                       if n_copies > 1 else "")
         lines.append(
             f"\n<b>{_esc(promo['label'])} ({row['num_legs']} legs)</b>"
+            f"{copy_suffix}"
         )
         lines.append(
             f"  {row['parlay_american']} -&gt; {row['boost_american']} (boosted)"
@@ -1057,16 +1076,28 @@ async def _accept_parsed_promo(update: Update,
         )
         return ASK_PROMOS
 
-    # Skip if the user already added an equivalent promo this session —
-    # otherwise each duplicate spawns its own parlay/pick row and buries
-    # the output. Compare semantic fields, not raw text, so different
-    # token orderings still dedupe.
-    existing = context.user_data.get("promos", [])
-    if any(_promos_equivalent(promo, e) for e in existing):
+    # If a semantically-equivalent promo is already in this run, merge
+    # by incrementing its count instead of adding a second entry. This
+    # lets users with e.g. 2 copies of the same DK boost signal that
+    # fact (either via the '2x' suffix or by adding the promo twice);
+    # the analyzer will then produce 2 distinct picks for that promo.
+    existing_list = context.user_data.get("promos", [])
+    merged = next((e for e in existing_list if _promos_equivalent(promo, e)),
+                  None)
+    if merged is not None:
+        merged["count"] = merged.get("count", 1) + promo.get("count", 1)
+        # Rebuild the label's ×N suffix to reflect the new total count
+        merged["label"] = re.sub(r"\s+×\d+$", "", merged["label"])
+        if merged["count"] > 1:
+            merged["label"] += f" ×{merged['count']}"
+        _save_promo_string(str(update.effective_user.id), original_text)
+        saved_kb = _promo_keyboard(update, context)
         await update.message.reply_text(
-            f"Already added: {promo['label']} — skipping duplicate.",
-            reply_markup=_promo_keyboard(update, context)
-                         or ReplyKeyboardRemove(),
+            f"Already have this promo — now at ×{merged['count']}.\n"
+            f"<i>{_esc(merged['label'])}</i>\n"
+            f"Tap a saved promo, type/send another, or tap 'done' to finish.",
+            parse_mode="HTML",
+            reply_markup=saved_kb or ReplyKeyboardRemove(),
         )
         return ASK_PROMOS
 
