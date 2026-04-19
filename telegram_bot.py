@@ -21,12 +21,18 @@ Commands:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
 import sys
 import os
 from datetime import datetime, date, timedelta
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import (
@@ -712,14 +718,18 @@ async def _send_promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Send the promo prompt, with saved promos as quick-tap buttons if available."""
     keyboard = _promo_keyboard(update, context)
 
+    photo_hint = (
+        " or 📸 send a screenshot"
+        if os.environ.get("ANTHROPIC_API_KEY") else "")
     if keyboard:
         text = (
-            "<b>Promos</b> — tap a saved one, type a new one, "
+            f"<b>Promos</b> — tap a saved one, type a new one{photo_hint}, "
             "or <b>skip</b>/<b>done</b>."
         )
     else:
         text = (
-            "<b>Promos</b> — one per message, or <b>skip</b>/<b>done</b>.\n\n"
+            f"<b>Promos</b> — one per message{photo_hint}, or "
+            "<b>skip</b>/<b>done</b>.\n\n"
             "<i>Quick examples:</i>\n"
             "  <code>dk 25%</code>\n"
             "  <code>fd bonus $25 mlb</code>\n"
@@ -996,6 +1006,47 @@ async def recv_fd_bankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ASK_PROMOS
 
 
+async def _accept_parsed_promo(update: Update,
+                               context: ContextTypes.DEFAULT_TYPE,
+                               promo: dict, original_text: str) -> int:
+    """Validate + store a parsed promo, then prompt for game-specific.
+    Shared by recv_promo (text) and recv_promo_photo (image)."""
+    saved_kb = _promo_keyboard(update, context)
+    user_books = context.user_data["books"]
+    if promo["book"] not in user_books:
+        await update.message.reply_text(
+            f"You don't have {promo['book']} selected. "
+            f"Use /books to change. Try again or tap/type 'done'.",
+            reply_markup=saved_kb or ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+
+    context.user_data["promos"].append(promo)
+    context.user_data.setdefault("promo_strings", []).append(original_text)
+
+    # If the promo string already included "game", skip the follow-up prompt.
+    if promo.get("game_specific"):
+        await update.message.reply_text(
+            f"Added: {promo['label']} — marked game-specific.\n"
+            f"Tap another saved promo, type/send a new one, or tap/type 'done'.",
+            reply_markup=saved_kb or ReplyKeyboardRemove(),
+        )
+        return ASK_PROMOS
+
+    kb = ReplyKeyboardMarkup(
+        [[_GAMESPEC_YES], [_GAMESPEC_NO]],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
+    await update.message.reply_text(
+        f"Added: {promo['label']}\n\n"
+        f"Is this boost for a <b>specific game</b> (e.g. SGP or "
+        f"game-only parlay boost)?",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    return ASK_PROMO_GAMESPEC
+
+
 async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip().lower()
 
@@ -1010,7 +1061,6 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return ConversationHandler.END
         return await _start_run(update, context)
 
-    # Saved-promo keyboard (None if the user has no saved promos)
     saved_kb = _promo_keyboard(update, context)
 
     promo = parse_promo(update.message.text)
@@ -1021,44 +1071,117 @@ async def recv_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ASK_PROMOS
 
-    # Reject promos for books the user doesn't have
-    user_books = context.user_data["books"]
-    if promo["book"] not in user_books:
+    return await _accept_parsed_promo(
+        update, context, promo, update.message.text.strip())
+
+
+# ── Photo → promo via Claude vision ──────────────────────────────────
+
+_VISION_PROMPT = """Extract the sportsbook promo shown in this screenshot \
+and output ONLY one line in this compact format:
+
+<book> <boost%> [Nleg|N+] [sgp] [sport] [market] [+min_odds|-min_odds] [$max_bet]
+
+Rules:
+- book: "dk" (DraftKings) or "fd" (FanDuel)
+- boost: e.g. "25%"
+- If it's a parlay boost: add "3-leg" (exactly 3) or "3+" (3 or more).
+  Include "sgp" if it's a same-game-parlay boost.
+- sport: one of nba, mlb, nhl, nfl, soccer, ncaab, ncaaf, ufc, pga.
+  Omit if the promo applies to all sports.
+- market: one of ml, spreads, totals, hr, strikeouts. Omit if any market.
+- min_odds: e.g. "+100" or "-200" (include the sign).
+- max_bet: e.g. "$10".
+- For bonus bets: "<book> bonus $<amount> [sport]"
+
+If the image is not a sportsbook promo (DraftKings or FanDuel), respond \
+with exactly: ERROR: not a promo
+
+Output ONLY the single line — no preamble, no explanation."""
+
+
+def _vision_client() -> "anthropic.Anthropic | None":
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key or anthropic is None:
+        return None
+    return anthropic.Anthropic(api_key=key)
+
+
+async def _image_to_promo_string(img_bytes: bytes,
+                                 media_type: str = "image/jpeg") -> str:
+    """Send image to Claude vision, return the compact promo string
+    (or a string starting with 'ERROR:' on failure)."""
+    client = _vision_client()
+    if client is None:
+        return "ERROR: vision not configured"
+    b64 = base64.standard_b64encode(bytes(img_bytes)).decode("utf-8")
+    try:
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image",
+                     "source": {"type": "base64",
+                                "media_type": media_type,
+                                "data": b64}},
+                    {"type": "text", "text": _VISION_PROMPT},
+                ],
+            }],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+async def recv_promo_photo(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Extract a promo from a photo and add it like a typed one."""
+    if anthropic is None or not os.environ.get("ANTHROPIC_API_KEY"):
         await update.message.reply_text(
-            f"You don't have {promo['book']} selected. "
-            f"Use /books to change. Try again or tap/type 'done'.",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
+            "Photo-to-promo isn't configured (ANTHROPIC_API_KEY missing). "
+            "Type the promo instead."
         )
         return ASK_PROMOS
 
-    context.user_data["promos"].append(promo)
-    context.user_data.setdefault("promo_strings", []).append(
-        update.message.text.strip())
+    photo = update.message.photo[-1]  # largest size
+    status = await update.message.reply_text("📸 Reading promo from image…")
 
-    # If the promo string already included "game", skip the follow-up prompt.
-    if promo.get("game_specific"):
-        await update.message.reply_text(
-            f"Added: {promo['label']} — marked game-specific.\n"
-            f"Tap another saved promo, type a new one, or tap/type 'done'.",
-            reply_markup=saved_kb or ReplyKeyboardRemove(),
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        img_bytes = await file.download_as_bytearray()
+    except Exception as e:
+        await status.edit_text(f"Couldn't download the image: {e}")
+        return ASK_PROMOS
+
+    extracted = await _image_to_promo_string(img_bytes)
+    saved_kb = _promo_keyboard(update, context)
+
+    if extracted.startswith("ERROR:"):
+        await status.edit_text(
+            f"Couldn't read a promo from that image.\n"
+            f"<i>{_esc(extracted)}</i>\n"
+            f"Try a clearer screenshot or type the promo.",
+            parse_mode="HTML",
         )
         return ASK_PROMOS
 
-    # Ask whether this boost applies to a single game (e.g. SGP boost,
-    # "bet $50 on Arsenal vs Man City"). Always asked so the option is
-    # always visible to the user.
-    kb = ReplyKeyboardMarkup(
-        [[_GAMESPEC_YES], [_GAMESPEC_NO]],
-        one_time_keyboard=True, resize_keyboard=True,
-    )
-    await update.message.reply_text(
-        f"Added: {promo['label']}\n\n"
-        f"Is this boost for a <b>specific game</b> (e.g. SGP or "
-        f"game-only parlay boost)?",
+    promo = parse_promo(extracted)
+    if promo is None:
+        await status.edit_text(
+            f"Extracted: <code>{_esc(extracted)}</code>\n"
+            f"…but couldn't parse it. Type it manually and adjust as needed.",
+            parse_mode="HTML",
+        )
+        return ASK_PROMOS
+
+    await status.edit_text(
+        f"Extracted: <code>{_esc(extracted)}</code>",
         parse_mode="HTML",
-        reply_markup=kb,
     )
-    return ASK_PROMO_GAMESPEC
+    return await _accept_parsed_promo(update, context, promo, extracted)
 
 
 async def recv_promo_gamespec(update: Update,
@@ -1756,6 +1879,7 @@ def main():
             ],
             ASK_PROMOS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_promo),
+                MessageHandler(filters.PHOTO, recv_promo_photo),
             ],
             ASK_PROMO_GAMESPEC: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
