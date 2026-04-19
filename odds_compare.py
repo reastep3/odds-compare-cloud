@@ -5524,6 +5524,12 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
     rows = []
     for promo in parlay_promos:
+        # Boosted-EV math requires a boost %. If it's missing (e.g. the
+        # vision extractor couldn't resolve a tiered/stepped boost),
+        # skip rather than crash — the user can re-enter it manually.
+        if promo.get("boost_pct") is None:
+            print(f"  Skipping parlay promo — no boost_pct: {promo.get('label')}")
+            continue
         num_legs = promo.get("num_legs", 3)
 
         # Collect qualifying legs — NOTE: min_odds is NOT checked here.
