@@ -212,6 +212,7 @@ def parse_promo(text: str) -> dict | None:
         "num_legs":      None,
         "game_specific": False,
         "game_filter":   None,
+        "game_hint":     None,
         "sgp":           False,
         "label":         "",
     }
@@ -304,7 +305,21 @@ def parse_promo(text: str) -> dict | None:
             i += 1
             continue
 
-        # game (game-specific)
+        # game:TeamA-TeamB — matchup hint. TeamA/B may be short codes
+        # (ATL), nicknames (Braves), or cities (Atlanta). Multi-word
+        # names use underscores: Red_Sox, New_York. Matched case-
+        # insensitively as substrings in the eligible-game string.
+        game_hint_match = re.match(
+            r"^game:([A-Za-z][A-Za-z_]*)-([A-Za-z][A-Za-z_]*)$", tok)
+        if game_hint_match:
+            promo["game_specific"] = True
+            promo["game_hint"] = (
+                f"{game_hint_match.group(1)}-"
+                f"{game_hint_match.group(2)}")
+            i += 1
+            continue
+
+        # game (game-specific, no hint — will prompt manually)
         if tok == "game":
             promo["game_specific"] = True
             i += 1
@@ -1050,13 +1065,23 @@ async def _accept_parsed_promo(update: Update,
     # photo-extracted entries treated identically.
     _save_promo_string(str(update.effective_user.id), original_text)
 
-    # Game-specific is implicit from the promo text — only set when the
-    # user (or vision extractor) included the word "game" in the string.
-    tag = " — marked game-specific" if promo.get("game_specific") else ""
+    # Game-specific is implicit from the promo text. If the extractor
+    # also captured a matchup hint (game:XXX-YYY), we'll auto-resolve
+    # it after fetch — no prompt needed.
+    if promo.get("game_hint"):
+        tag = f" — tied to game {promo['game_hint']}"
+    elif promo.get("game_specific"):
+        tag = " — marked game-specific (will ask which game)"
+    else:
+        tag = ""
+
+    # Re-attach the saved-promos keyboard after each add so 'done' +
+    # picking another saved promo are one tap each.
+    saved_kb = _promo_keyboard(update, context)
     await update.message.reply_text(
         f"Added: {promo['label']}{tag}\n"
-        f"Type/send another, /recent for saved, or 'done' to finish.",
-        reply_markup=ReplyKeyboardRemove(),
+        f"Tap a saved promo, type/send another, or tap 'done' to finish.",
+        reply_markup=saved_kb or ReplyKeyboardRemove(),
     )
     return ASK_PROMOS
 
@@ -1141,10 +1166,18 @@ Rules:
 - min_odds: e.g. "+100" or "-200" (include the sign).
   If the promo lists "Min Total Odds" or similar, use that.
 - max_bet: e.g. "$10". If "Max Wager" is given, use it.
-- game: include the literal word "game" ONLY if the promo is restricted
-  to a specific matchup (e.g. "Bet on Lakers vs Celtics"). DO NOT add
-  "game" for generic SGP/parlay boosts on "any <sport> event" — those
-  apply league-wide, not to one game.
+- game: if the promo is restricted to ONE specific matchup (e.g.
+  "Bet on ATL Braves vs PHI Phillies", "Lakers vs Celtics SGP"),
+  output `game:TeamA-TeamB` where TeamA and TeamB are the team
+  NICKNAMES (Braves, Phillies, Yankees, Lakers) joined with a hyphen.
+  For multi-word nicknames use an underscore: `game:Yankees-Red_Sox`.
+  Examples:
+    · "ATL Braves vs PHI Phillies" → `game:Braves-Phillies`
+    · "Lakers vs Celtics SGP"      → `game:Lakers-Celtics`
+    · "Yankees at Red Sox only"    → `game:Yankees-Red_Sox`
+  If no specific matchup is mentioned (e.g. "Any NBA event", a sport-
+  wide SGP boost), OMIT the game token entirely. DO NOT add "game" or
+  "game:..." for generic SGP/parlay boosts that apply league-wide.
 - For bonus bets: "<book> bonus $<amount> [sport]"
 
 If the image is not a sportsbook promo (DraftKings or FanDuel), respond \
@@ -1457,6 +1490,30 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
                 disable_web_page_preview=True)
 
 
+def _match_game_hint(hint: str | None,
+                     eligible_games: list[str]) -> str | None:
+    """Try to resolve a `game_hint` (e.g. "ATL-PHI") to exactly one of
+    the eligible game strings ("Atlanta Braves @ Philadelphia Phillies").
+    Returns the matched game on unique match, else None.
+
+    Matching is case-insensitive substring: each short code must appear
+    somewhere in the game string (as a prefix of a team name in practice).
+    """
+    if not hint or "-" not in hint:
+        return None
+    # Split "TeamA-TeamB" → ["team a", "team b"]; underscores stand for
+    # spaces in multi-word names (e.g. "Red_Sox" → "red sox").
+    codes = [c.strip().lower().replace("_", " ")
+             for c in hint.split("-") if c.strip()]
+    if len(codes) < 2:
+        return None
+    matches = [
+        g for g in eligible_games
+        if all(code in g.lower() for code in codes)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 async def _prompt_next_game_pick(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE) -> int:
     """Pop the next game-specific promo from the queue and send a tap-keyboard
@@ -1478,14 +1535,32 @@ async def _prompt_next_game_pick(update: Update,
         promo = queue[0]
         eligible = eligible_games_for_promo(
             promo, promo_edges, fetched["player_prop_edges"])
-        if eligible:
-            break
-        # No matching games — log + skip
-        queue.pop(0)
-        await context.bot.send_message(
-            chat_id,
-            f"<i>No matching games for promo: {_esc(promo['label'])} — skipping.</i>",
-            parse_mode="HTML")
+        if not eligible:
+            # No matching games — log + skip
+            queue.pop(0)
+            await context.bot.send_message(
+                chat_id,
+                f"<i>No matching games for promo: {_esc(promo['label'])} — skipping.</i>",
+                parse_mode="HTML")
+            continue
+
+        # Auto-resolve if the vision extractor captured a game hint
+        # (e.g. "ATL-PHI") that uniquely matches one eligible game.
+        auto = _match_game_hint(promo.get("game_hint"), eligible)
+        if auto:
+            promo["game_filter"] = auto
+            short = auto.replace(" @ ", " vs ")
+            if f"[{short}]" not in promo["label"]:
+                promo["label"] = promo["label"].rstrip(")") + f" [{short}]"
+            queue.pop(0)
+            await context.bot.send_message(
+                chat_id,
+                f"<i>Auto-matched {_esc(promo['game_hint'])} → "
+                f"{_esc(auto)}</i>",
+                parse_mode="HTML")
+            continue
+
+        break  # need manual pick for this promo
 
     if not queue:
         return await _finalize_and_send(update, context)
