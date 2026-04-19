@@ -110,29 +110,75 @@ def get_user_books(update: Update) -> list[str] | None:
 
 # ── Promo parser ─────────────────────────────────────────────────────
 
+# Sport aliases → canonical key. Common names (hockey, basketball) map
+# to the underlying league so the user can type what's on the promo
+# slip ("any ice hockey event") without looking up the league code.
 PROMO_SPORT_KEYWORDS = {
-    "nba", "mlb", "nhl", "nfl", "ncaab", "ncaaf", "soccer", "ufc", "pga",
+    "nba": "nba",   "basketball": "nba",
+    "mlb": "mlb",   "baseball":   "mlb",
+    "nhl": "nhl",   "hockey":     "nhl",
+    "nfl": "nfl",   "football":   "nfl",
+    "ncaab": "ncaab", "cbb":      "ncaab",
+    "ncaaf": "ncaaf", "cfb":      "ncaaf",
+    "soccer": "soccer", "epl":    "soccer",
+    "ufc": "ufc",   "mma":        "ufc",
+    "pga": "pga",   "golf":       "pga",
 }
+
+# Two-word sport phrases checked with one-token lookahead.
+PROMO_SPORT_PHRASES = {
+    "ice hockey":         "nhl",
+    "premier league":     "soccer",
+    "college basketball": "ncaab",
+    "college football":   "ncaaf",
+    "american football":  "nfl",
+}
+
 PROMO_MARKET_KEYWORDS = {
-    "ml": "h2h", "moneyline": "h2h", "spreads": "spreads",
-    "totals": "totals", "hr": "hr", "strikeouts": "strikeouts",
+    "ml": "h2h", "moneyline": "h2h", "h2h": "h2h",
+    "spreads": "spreads", "spread": "spreads", "ats": "spreads",
+    "totals": "totals", "total": "totals", "ou": "totals", "o/u": "totals",
+    "hr": "hr", "homerun": "hr", "homeruns": "hr",
+    "strikeouts": "strikeouts", "ks": "strikeouts",
+}
+
+# Natural-language filler tokens that carry no semantic weight for the
+# parser. Lets users paste a near-verbatim promo description like
+# "25% any ice hockey event, 3+ leg parlays, $10 max wager, +100 min".
+PROMO_FILLER_TOKENS = {
+    "any", "all", "every",
+    "event", "events",
+    "bet", "bets", "parlay", "parlays",
+    "boost", "boosts", "wager", "wagers",
+    "min", "max", "minimum", "maximum",
+    "no", "odds", "legs", "leg",
+    "the", "a", "an", "on", "only", "just", "for",
+    "and", "or", "of",
+    "profit",  # "25% profit boost"
 }
 
 
 def parse_promo(text: str) -> dict | None:
     """
-    Parse a compact one-line promo string into a promo dict.
+    Parse a promo string into a promo dict. Tolerant of natural phrasing:
+    filler words are ignored, common sport/market aliases accepted, odds
+    with a sign (+100, -200) and dollar amounts ($10) don't need a
+    min:/max: prefix.
 
     Examples:
         dk 25%
         fd bonus $25 mlb
         dk 30% nba spreads min:-200 max:50
         dk 25% 3-leg nba
+        dk 25% 3+ ice hockey $10 +100
         dk 20% mlb game
     """
     text = text.strip().lower()
     if not text:
         return None
+
+    # Remove punctuation that would split natural-language tokens
+    text = text.replace(",", " ").replace(";", " ")
 
     tokens = text.split()
     if not tokens:
@@ -168,44 +214,45 @@ def parse_promo(text: str) -> dict | None:
     while i < len(rest):
         tok = rest[i]
 
-        # Boost percentage: "25%" or "25"
-        pct_match = re.match(r"^(\d+(?:\.\d+)?)%?$", tok)
-        if pct_match and promo["boost_pct"] is None and tok != "game":
-            promo["boost_pct"] = float(pct_match.group(1))
-            i += 1
-            continue
+        # Two-word sport phrase (e.g. "ice hockey", "premier league")
+        if i + 1 < len(rest):
+            two_word = f"{tok} {rest[i + 1]}"
+            if two_word in PROMO_SPORT_PHRASES:
+                promo["sport"] = PROMO_SPORT_PHRASES[two_word]
+                i += 2
+                continue
 
-        # Bonus bet: "bonus $25" or "bonus 25"
+        # Bonus bet: "bonus $25" or "bonus 25" or "bonus bet $25"
         if tok == "bonus":
             promo["promo_type"] = "bonus_bet"
-            if i + 1 < len(rest):
-                amt_str = rest[i + 1].replace("$", "")
+            # Skip filler ("bet", "free") between "bonus" and the amount
+            j = i + 1
+            while j < len(rest) and rest[j] in ("bet", "free"):
+                j += 1
+            if j < len(rest):
+                amt_str = rest[j].lstrip("$")
                 try:
                     promo["bet_amount"] = float(amt_str)
-                    i += 2
+                    i = j + 1
                     continue
                 except ValueError:
                     pass
             i += 1
             continue
 
-        # Parlay: "3-leg" or "3leg"
-        leg_match = re.match(r"^(\d+)-?leg", tok)
+        # Parlay: "3-leg", "3leg", "3+leg", "3legs", "3+legs"
+        leg_match = re.match(r"^(\d+)[-+]?legs?$", tok)
         if leg_match:
             promo["promo_type"] = "parlay"
             promo["num_legs"] = int(leg_match.group(1))
             i += 1
             continue
 
-        # Sport keyword
-        if tok in PROMO_SPORT_KEYWORDS:
-            promo["sport"] = tok
-            i += 1
-            continue
-
-        # Market keyword
-        if tok in PROMO_MARKET_KEYWORDS:
-            promo["market"] = PROMO_MARKET_KEYWORDS[tok]
+        # Parlay "3+" — matches DK's "3+ leg parlays" wording
+        plus_match = re.match(r"^(\d+)\+$", tok)
+        if plus_match:
+            promo["promo_type"] = "parlay"
+            promo["num_legs"] = int(plus_match.group(1))
             i += 1
             continue
 
@@ -216,10 +263,37 @@ def parse_promo(text: str) -> dict | None:
             i += 1
             continue
 
-        # max:50
-        max_match = re.match(r"^max:(\d+(?:\.\d+)?)$", tok)
+        # max:50 or max:$50
+        max_match = re.match(r"^max:\$?(\d+(?:\.\d+)?)$", tok)
         if max_match:
             promo["max_bet"] = float(max_match.group(1))
+            i += 1
+            continue
+
+        # Standalone American odds: "+100" or "-200" (explicit sign required)
+        signed_match = re.match(r"^([+-])(\d+)$", tok)
+        if signed_match and promo["min_odds"] is None:
+            sign, num = signed_match.groups()
+            promo["min_odds"] = int(num) if sign == "+" else -int(num)
+            i += 1
+            continue
+
+        # Standalone dollar amount: "$10" → max_bet (or bonus amount for
+        # bonus_bet that somehow missed the lookahead above)
+        dollar_match = re.match(r"^\$(\d+(?:\.\d+)?)$", tok)
+        if dollar_match:
+            amt = float(dollar_match.group(1))
+            if (promo["promo_type"] == "bonus_bet"
+                    and promo["bet_amount"] is None):
+                promo["bet_amount"] = amt
+            elif promo["max_bet"] is None:
+                promo["max_bet"] = amt
+            i += 1
+            continue
+
+        # sgp (same-game parlay)
+        if tok == "sgp":
+            promo["sgp"] = True
             i += 1
             continue
 
@@ -229,9 +303,28 @@ def parse_promo(text: str) -> dict | None:
             i += 1
             continue
 
-        # sgp (same-game parlay)
-        if tok == "sgp":
-            promo["sgp"] = True
+        # Sport keyword (after sgp/game to avoid clash with "game")
+        if tok in PROMO_SPORT_KEYWORDS:
+            promo["sport"] = PROMO_SPORT_KEYWORDS[tok]
+            i += 1
+            continue
+
+        # Market keyword
+        if tok in PROMO_MARKET_KEYWORDS:
+            promo["market"] = PROMO_MARKET_KEYWORDS[tok]
+            i += 1
+            continue
+
+        # Boost percentage: "25%" or "25" — lower priority than min-odds
+        # so a bare "100" after other fields isn't misread as the boost.
+        pct_match = re.match(r"^(\d+(?:\.\d+)?)%?$", tok)
+        if pct_match and promo["boost_pct"] is None:
+            promo["boost_pct"] = float(pct_match.group(1))
+            i += 1
+            continue
+
+        # Filler token — ignore
+        if tok in PROMO_FILLER_TOKENS:
             i += 1
             continue
 
@@ -627,13 +720,21 @@ async def _send_promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         text = (
             "<b>Promos</b> — one per message, or <b>skip</b>/<b>done</b>.\n\n"
-            "<i>Examples:</i>\n"
+            "<i>Quick examples:</i>\n"
             "  <code>dk 25%</code>\n"
             "  <code>fd bonus $25 mlb</code>\n"
             "  <code>dk 30% 3-leg sgp nba</code>\n"
-            "  <code>fd 25% max:50 min:-200</code>\n\n"
-            "<i>Sports:</i> nba mlb nhl nfl ncaab soccer ufc\n"
-            "<i>Markets:</i> ml spreads totals hr strikeouts"
+            "  <code>fd 25% spreads $50 -200</code>\n"
+            "  <code>dk 25% 3+ hockey $10 +100</code>\n\n"
+            "<i>Tips:</i>\n"
+            "  • Signed odds (<code>+100</code>, <code>-200</code>) set min odds\n"
+            "  • Dollar amounts (<code>$10</code>) set max bet\n"
+            "  • <code>3+</code> or <code>3-leg</code> → 3+ leg parlay\n"
+            "  • Filler words (<code>any</code>, <code>event</code>, "
+            "<code>min</code>, <code>max</code>, commas) are ignored\n\n"
+            "<i>Sports:</i> nba/basketball · mlb/baseball · nhl/hockey · "
+            "nfl/football · soccer · ufc · pga/golf · ncaab · ncaaf\n"
+            "<i>Markets:</i> ml · spreads/ats · totals/ou · hr · strikeouts"
         )
 
     await update.message.reply_text(
