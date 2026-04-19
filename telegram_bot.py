@@ -1087,7 +1087,21 @@ and output ONLY one line in this compact format:
 <book> <boost%> [Nleg|N+] [sgp] [sport] [market] [+min_odds|-min_odds] [$max_bet]
 
 Rules:
-- book: "dk" (DraftKings) or "fd" (FanDuel).
+- book: "dk" (DraftKings) or "fd" (FanDuel). Identify by these cues,
+  in priority order:
+    1. Any visible text/logo ("DraftKings", "DK", "FanDuel", "Fanduel").
+    2. Color scheme:
+       · DraftKings = BLACK / very dark grey backgrounds with GREEN
+         accents and distinctive YELLOW boost/lightning-bolt icons.
+         CTA buttons are bright blue with white text ("Go to NBA").
+       · FanDuel = NAVY/ROYAL BLUE backgrounds throughout, often with
+         a lighter cyan-blue header strip. CTA buttons tend to be
+         white/light with blue text, or solid blue with white text.
+         No yellow/green boost icons.
+    3. UI layout: DraftKings promo cards show a rounded tile with the
+       boost % on the LEFT and a yellow circle icon on the right.
+       FanDuel promos use a flatter blue card with simpler iconography.
+  If both books plausibly match, prefer the brand text over colors.
 - boost: a SINGLE percentage, e.g. "25%". Never a range.
   For STEPPED/TIERED boosts (different % per leg count, e.g. "20% for 2
   legs, 33% for 3 legs, 50% for 4+ legs"), pick the HIGHEST tier and
