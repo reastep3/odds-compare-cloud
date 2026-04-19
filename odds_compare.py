@@ -5581,129 +5581,138 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
         is_sgp = promo.get("sgp", False)
 
-        # For SGP: group by game BEFORE capping so low-fair_prob legs survive
-        # within their game group (otherwise the global cap would knock them
-        # out in favor of high-fair_prob legs from other games that the SGP
-        # can't use anyway).
-        if is_sgp:
-            game_groups: dict[str, list] = {}
-            for edge in qualifying:
-                g = edge.get("game", "")
-                game_groups.setdefault(g, []).append(edge)
-            # Cap per game — brute-force is feasible within one game
-            for g in list(game_groups):
-                game_groups[g] = game_groups[g][:15]
-            sgp_candidates = [(g, legs) for g, legs in game_groups.items()
-                              if len(legs) >= num_legs]
-            if not sgp_candidates:
-                continue
-        else:
-            # Multi-game parlay: global cap at 30 (brute-force feasibility)
-            qualifying = qualifying[:30]
-            if len(qualifying) < num_legs:
-                continue
-
         # Pre-compute the parlay-level min-odds decimal once (None = no floor)
         parlay_min_dec = (american_to_decimal(promo["min_odds"])
                           if promo.get("min_odds") is not None else None)
+        bankroll = (dk_bankroll if promo["book"] == "DraftKings"
+                    else fd_bankroll)
 
-        bankroll = (dk_bankroll if promo["book"] == "DraftKings" else fd_bankroll)
+        # A promo with count=N means the user has N identical copies —
+        # produce N distinct parlays by excluding each copy's legs from
+        # the pool available to the next copy. Scoped per-promo so two
+        # different parlay promos don't steal each other's legs.
+        copies = max(1, int(promo.get("count", 1) or 1))
+        used_leg_keys: set = set()
 
-        # For SGP: iterate per game; for regular: use full pool
-        if is_sgp:
-            pools_to_try = [(legs, g) for g, legs in sgp_candidates]
-        else:
-            pools_to_try = [(qualifying, None)]
+        for copy_idx in range(copies):
+            # Filter out legs already used by earlier copies of THIS promo.
+            qf = [e for e in qualifying
+                  if _make_pick_key(e) not in used_leg_keys]
 
-        # Find the SINGLE best parlay for this promo — across every
-        # candidate game (SGP) and every try_legs count. Previously we
-        # emitted one row per (game × try_legs) which buried the user
-        # in near-duplicates; the user just wants the best pick per
-        # promo.
-        best_overall_combo = None
-        best_overall_ev    = -float("inf")
-        best_overall_legs  = None
+            # Re-derive the pools to try (SGP groups each copy; non-SGP
+            # just re-caps the filtered list).
+            if is_sgp:
+                game_groups: dict[str, list] = {}
+                for edge in qf:
+                    g = edge.get("game", "")
+                    game_groups.setdefault(g, []).append(edge)
+                for g in list(game_groups):
+                    game_groups[g] = game_groups[g][:15]
+                sgp_candidates = [(g, legs)
+                                  for g, legs in game_groups.items()
+                                  if len(legs) >= num_legs]
+                if not sgp_candidates:
+                    continue
+                pools_to_try = [(legs, g) for g, legs in sgp_candidates]
+            else:
+                qf_capped = qf[:30]
+                if len(qf_capped) < num_legs:
+                    continue
+                pools_to_try = [(qf_capped, None)]
 
-        for candidate_pool, _game_name in pools_to_try:
-            max_try_legs = min(num_legs + 3, len(candidate_pool))
-            for try_legs in range(num_legs, max_try_legs + 1):
-                if len(candidate_pool) < try_legs:
-                    break
+            # Find the SINGLE best parlay for this copy — across every
+            # candidate game (SGP) and every try_legs count.
+            best_overall_combo = None
+            best_overall_ev    = -float("inf")
+            best_overall_legs  = None
 
-                combo_candidate = None
-                combo_ev = -float("inf")
+            for candidate_pool, _game_name in pools_to_try:
+                max_try_legs = min(num_legs + 3, len(candidate_pool))
+                for try_legs in range(num_legs, max_try_legs + 1):
+                    if len(candidate_pool) < try_legs:
+                        break
 
-                if try_legs <= 4 and len(candidate_pool) <= 20:
-                    for combo in _combinations(candidate_pool, try_legs):
+                    combo_candidate = None
+                    combo_ev = -float("inf")
+
+                    if try_legs <= 4 and len(candidate_pool) <= 20:
+                        for combo in _combinations(candidate_pool, try_legs):
+                            parlay_dec = 1.0
+                            parlay_fair = 1.0
+                            for leg in combo:
+                                parlay_dec  *= leg["odds_decimal"]
+                                parlay_fair *= leg["fair_prob"] / 100
+                            if (parlay_min_dec is not None
+                                    and parlay_dec < parlay_min_dec):
+                                continue
+                            boost_dec = apply_profit_boost(
+                                parlay_dec, promo["boost_pct"])
+                            ev = calc_ev(parlay_fair, boost_dec)
+                            if ev > combo_ev:
+                                combo_ev    = ev
+                                combo_candidate = combo
+                    else:
+                        # Greedy: top-N by fair probability
+                        greedy = tuple(candidate_pool[:try_legs])
                         parlay_dec = 1.0
                         parlay_fair = 1.0
-                        for leg in combo:
+                        for leg in greedy:
                             parlay_dec  *= leg["odds_decimal"]
                             parlay_fair *= leg["fair_prob"] / 100
-                        if (parlay_min_dec is not None
-                                and parlay_dec < parlay_min_dec):
-                            continue
-                        boost_dec = apply_profit_boost(
-                            parlay_dec, promo["boost_pct"])
-                        ev = calc_ev(parlay_fair, boost_dec)
-                        if ev > combo_ev:
-                            combo_ev    = ev
-                            combo_candidate = combo
-                else:
-                    # Greedy: top-N by fair probability
-                    greedy = tuple(candidate_pool[:try_legs])
-                    parlay_dec = 1.0
-                    parlay_fair = 1.0
-                    for leg in greedy:
-                        parlay_dec  *= leg["odds_decimal"]
-                        parlay_fair *= leg["fair_prob"] / 100
-                    if (parlay_min_dec is None
-                            or parlay_dec >= parlay_min_dec):
-                        boost_dec = apply_profit_boost(
-                            parlay_dec, promo["boost_pct"])
-                        combo_ev = calc_ev(parlay_fair, boost_dec)
-                        combo_candidate = greedy
+                        if (parlay_min_dec is None
+                                or parlay_dec >= parlay_min_dec):
+                            boost_dec = apply_profit_boost(
+                                parlay_dec, promo["boost_pct"])
+                            combo_ev = calc_ev(parlay_fair, boost_dec)
+                            combo_candidate = greedy
 
-                if combo_candidate is not None and combo_ev > best_overall_ev:
-                    best_overall_combo = combo_candidate
-                    best_overall_ev    = combo_ev
-                    best_overall_legs  = try_legs
+                    if (combo_candidate is not None
+                            and combo_ev > best_overall_ev):
+                        best_overall_combo = combo_candidate
+                        best_overall_ev    = combo_ev
+                        best_overall_legs  = try_legs
 
-        if best_overall_combo is None or best_overall_ev <= 0:
-            continue
+            if best_overall_combo is None or best_overall_ev <= 0:
+                continue
 
-        parlay_dec  = 1.0
-        parlay_fair = 1.0
-        for leg in best_overall_combo:
-            parlay_dec  *= leg["odds_decimal"]
-            parlay_fair *= leg["fair_prob"] / 100
+            # Mark these legs used so the next copy picks a different parlay
+            for leg in best_overall_combo:
+                used_leg_keys.add(_make_pick_key(leg))
 
-        boost_dec    = apply_profit_boost(parlay_dec, promo["boost_pct"])
-        boosted_ev   = calc_ev(parlay_fair, boost_dec)
-        unboosted_ev = calc_ev(parlay_fair, parlay_dec)
-        boosted_kelly = kelly_bet(parlay_fair, boost_dec)
+            parlay_dec  = 1.0
+            parlay_fair = 1.0
+            for leg in best_overall_combo:
+                parlay_dec  *= leg["odds_decimal"]
+                parlay_fair *= leg["fair_prob"] / 100
 
-        bet = clamp_bet(bankroll * boosted_kelly, promo["book"])
-        if promo.get("max_bet") and bet > promo["max_bet"]:
-            bet = promo["max_bet"]
-        profit = bet * (boost_dec - 1)
+            boost_dec    = apply_profit_boost(parlay_dec, promo["boost_pct"])
+            boosted_ev   = calc_ev(parlay_fair, boost_dec)
+            unboosted_ev = calc_ev(parlay_fair, parlay_dec)
+            boosted_kelly = kelly_bet(parlay_fair, boost_dec)
 
-        rows.append({
-            "promo_label":      promo["label"],
-            "promo":            promo,
-            "legs":             list(best_overall_combo),
-            "num_legs":         best_overall_legs,
-            "parlay_decimal":   round(parlay_dec, 3),
-            "parlay_american":  format_american(parlay_dec),
-            "parlay_fair_prob": round(parlay_fair * 100, 3),
-            "boost_dec":        round(boost_dec, 3),
-            "boost_american":   format_american(boost_dec),
-            "unboosted_ev":     round(unboosted_ev, 2),
-            "boosted_ev":       round(boosted_ev, 2),
-            "boosted_kelly":    round(boosted_kelly * 100, 2),
-            "bet":              round(bet, 2),
-            "profit":           round(profit, 2),
-        })
+            bet = clamp_bet(bankroll * boosted_kelly, promo["book"])
+            if promo.get("max_bet") and bet > promo["max_bet"]:
+                bet = promo["max_bet"]
+            profit = bet * (boost_dec - 1)
+
+            rows.append({
+                "promo_label":      promo["label"],
+                "promo":            promo,
+                "legs":             list(best_overall_combo),
+                "num_legs":         best_overall_legs,
+                "parlay_decimal":   round(parlay_dec, 3),
+                "parlay_american":  format_american(parlay_dec),
+                "parlay_fair_prob": round(parlay_fair * 100, 3),
+                "boost_dec":        round(boost_dec, 3),
+                "boost_american":   format_american(boost_dec),
+                "unboosted_ev":     round(unboosted_ev, 2),
+                "boosted_ev":       round(boosted_ev, 2),
+                "boosted_kelly":    round(boosted_kelly * 100, 2),
+                "bet":              round(bet, 2),
+                "profit":           round(profit, 2),
+                "copy_idx":         copy_idx,
+                "copy_of":          copies,
+            })
 
     rows.sort(key=lambda x: x["boosted_ev"], reverse=True)
     return rows
@@ -6375,29 +6384,40 @@ def compute_promo_picks(all_edges: list[dict],
     used_keys: set = set()
     for promo in sorted(promos,
                         key=lambda p: (p.get("boost_pct") or 0), reverse=True):
-        pool = [e for e in combined if _promo_matches(promo, e)]
-        pool = [e for e in pool if _make_pick_key(e) not in used_keys]
-        best = None
-        if pool:
-            if promo.get("promo_type") == "bonus_bet":
-                amt = promo.get("bet_amount", 0)
-                best = max(pool,
-                           key=lambda e: (e["fair_prob"] / 100)
-                                         * amt * (e["odds_decimal"] - 1))
-            else:
-                boost_pct = promo.get("boost_pct", 0) or 0
+        # A promo with count=N means the user has N identical copies —
+        # produce N distinct picks, each on a different edge (via
+        # used_keys deduplication).
+        count = max(1, int(promo.get("count", 1) or 1))
+        for copy_idx in range(count):
+            pool = [e for e in combined if _promo_matches(promo, e)]
+            pool = [e for e in pool if _make_pick_key(e) not in used_keys]
+            best = None
+            if pool:
+                if promo.get("promo_type") == "bonus_bet":
+                    amt = promo.get("bet_amount", 0)
+                    best = max(pool,
+                               key=lambda e: (e["fair_prob"] / 100)
+                                             * amt * (e["odds_decimal"] - 1))
+                else:
+                    boost_pct = promo.get("boost_pct", 0) or 0
 
-                def _boosted_ev(e):
-                    boost_dec = apply_profit_boost(
-                        e["odds_decimal"], boost_pct)
-                    return calc_ev(e["fair_prob"] / 100, boost_dec)
+                    def _boosted_ev(e, _bp=boost_pct):
+                        boost_dec = apply_profit_boost(
+                            e["odds_decimal"], _bp)
+                        return calc_ev(e["fair_prob"] / 100, boost_dec)
 
-                ranked = sorted(pool, key=_boosted_ev, reverse=True)
-                # Only take if the boosted bet is actually worth playing
-                best = ranked[0] if _boosted_ev(ranked[0]) >= 0.5 else None
-            if best is not None:
-                used_keys.add(_make_pick_key(best))
-        picks.append({"promo": promo, "edge": best})
+                    ranked = sorted(pool, key=_boosted_ev, reverse=True)
+                    # Only take if the boosted bet is actually worth playing
+                    best = (ranked[0]
+                            if _boosted_ev(ranked[0]) >= 0.5 else None)
+                if best is not None:
+                    used_keys.add(_make_pick_key(best))
+            picks.append({
+                "promo":     promo,
+                "edge":      best,
+                "copy_idx":  copy_idx,
+                "copy_of":   count,
+            })
     return picks
 
 
