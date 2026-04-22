@@ -551,10 +551,16 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict) -> str | None:
         pt = _format_point(edge.get("point"), edge.get("market", ""))
         if pt:
             pick_str += f" {pt}"
+        elif edge.get("market", "").lower() in ("spreads", "totals"):
+            log.warning(
+                "Promo pick on %s/%s has no point: %r",
+                edge.get("market"), edge.get("game"), edge)
+            pick_str += " <b>[!MISSING LINE!]</b>"
         odds_str = _format_american(edge["odds_american"])
         game = _esc(edge["game"])
+        market = _esc(edge.get("market", "?")).upper()
 
-        lines.append(f"  {game} | {pick_str}")
+        lines.append(f"  {game} | {market} | {pick_str}")
 
         if promo.get("promo_type") == "bonus_bet":
             amt = promo.get("bet_amount", 0)

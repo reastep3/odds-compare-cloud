@@ -2591,11 +2591,14 @@ def write_excel(edges: list[dict], dk_bankroll: float,
         rest = sorted(all_books_set - set(priority))
         book_order = [b for b in priority if b in all_books_set] + rest
 
-        # Header: Type column added so game lines vs props are instantly filterable
+        # Header: Type column added so game lines vs props are instantly filterable.
+        # Commence column (ET date) lets the backtester resolve to the real game
+        # date instead of relying on the file-write date as a proxy — critical
+        # during playoffs when books post props several days in advance.
         info_cols = [
             ("Rank", 6), ("Type", 13), ("Sport", 10), ("Game", 32),
             ("Market", 14), ("Pick", 24), ("Line", 8), ("EV %", 8),
-            ("Fair Odds", 10),
+            ("Fair Odds", 10), ("Commence", 12),
         ]
         cmp_columns = info_cols + [(bk, 13) for bk in book_order]
 
@@ -2645,10 +2648,20 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 type_label  = "GAME LINE"
                 row_fill    = None if i % 2 == 0 else alt_fill
 
+            commence_date = ""
+            c_raw = edge.get("commence", "")
+            if c_raw:
+                try:
+                    ct_et = datetime.fromisoformat(
+                        c_raw.replace("Z", "+00:00")).astimezone(EASTERN)
+                    commence_date = ct_et.strftime("%Y-%m-%d")
+                except Exception:
+                    commence_date = ""
+
             info_values = [
                 i + 1, type_label, edge["sport"], edge["game"],
                 market_disp, edge["outcome"], point_display,
-                edge["ev_pct"], fair_am,
+                edge["ev_pct"], fair_am, commence_date,
             ]
 
             for col_idx, val in enumerate(info_values, 1):
