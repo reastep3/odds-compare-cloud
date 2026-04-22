@@ -1002,10 +1002,12 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
     if not rows:
         return []
 
-    # Locate DraftKings and FanDuel in the dynamic book columns (row 0 = header)
+    # Locate DraftKings, FanDuel, and the optional Commence column (added
+    # 2026-04: lets us resolve to the real game date instead of the file date).
     header   = rows[0]
     dk_col   = None
     fd_col   = None
+    com_col  = None
     for ci, h in enumerate(header):
         if not isinstance(h, str):
             continue
@@ -1014,6 +1016,8 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
             dk_col = ci
         elif hl == "fanduel":
             fd_col = ci
+        elif hl == "commence":
+            com_col = ci
 
     props = []
     for row_vals in rows[1:]:
@@ -1082,11 +1086,25 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
         if bet_amt <= 0:
             continue
 
+        # Prefer the real commence date from the Commence column (added 2026-04).
+        # Older archives without that column fall back to the file date proxy,
+        # which is why playoff-era props 3+ days out used to miss grading.
+        game_date_str = file_dt.strftime("%Y%m%d")
+        if com_col is not None and com_col < len(row_vals):
+            c_raw = row_vals[com_col]
+            if c_raw:
+                c_str = c_raw.strftime("%Y-%m-%d") if hasattr(c_raw, "strftime") else str(c_raw).strip()
+                try:
+                    game_date_str = datetime.strptime(
+                        c_str[:10], "%Y-%m-%d").strftime("%Y%m%d")
+                except ValueError:
+                    pass
+
         props.append({
             "sport":       _normalise_sport(sport_val),
             "game":        game_val,
             "game_time":   "",
-            "game_date":   file_dt.strftime("%Y%m%d"),  # proxy; ±1-day tried at resolve time
+            "game_date":   game_date_str,
             "book":        book,
             "market":      market_key,
             "pick":        pick_val,
