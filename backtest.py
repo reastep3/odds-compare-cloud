@@ -2961,26 +2961,14 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main():
-    print("=" * 62)
-    print("  ODDS COMPARE — BACKTEST ENGINE")
-    print("  Source: Play These + EV Edges  |  Results: ESPN (free)")
-    print("=" * 62)
+def run_full_backtest(start_dt: date, end_dt: date) -> dict:
+    """Load, grade, and write the full Excel backtest report.
 
-    date_range = prompt_date_range()
-    if not date_range:
-        print("Cancelled.")
-        return
-
-    start_dt, end_dt = date_range
-    print(f"\nDate range: {start_dt}  →  {end_dt}")
-    print(f"Archive:    {ARCHIVE_DIR}\n")
-
-    if not os.path.isdir(ARCHIVE_DIR):
-        if not glob.glob(os.path.join(SCRIPT_DIR, "ev_edges_*.xlsx")):
-            print("No archive or ev_edges files found. Run odds_compare.py first.")
-            return
-
+    Returns a dict with:
+        primary_picks      — graded EV Edges (or Play These fallback); drives Excel
+        play_these_graded  — graded Play These subset
+        excel_path         — absolute path to the written .xlsx, or None if no picks
+    """
     # ── All +EV Picks (primary dataset — EV Edges tab) ────────────────────────
     print("─── All +EV Picks (EV Edges tab) ────────────────────────")
     ev_raw    = load_archive_ev_edges(start_dt, end_dt)
@@ -3003,9 +2991,8 @@ def main():
 
     if not ev_graded and not graded:
         print("\nNo picks found in the selected date range.")
-        return
+        return {"primary_picks": [], "play_these_graded": [], "excel_path": None}
 
-    # Use all EV picks as primary; fall back to Play These if EV Edges unavailable
     primary_picks   = ev_graded  if ev_graded  else graded
     primary_settled = ev_settled_list if ev_settled_list else pt_settled_list
 
@@ -3068,6 +3055,35 @@ def main():
                          play_these_picks=graded if graded else None,
                          prop_picks=prop_graded,
                          promo_picks=promo_graded)
+
+    return {
+        "primary_picks": primary_picks,
+        "play_these_graded": graded,
+        "excel_path": out_path,
+    }
+
+
+def main():
+    print("=" * 62)
+    print("  ODDS COMPARE — BACKTEST ENGINE")
+    print("  Source: Play These + EV Edges  |  Results: ESPN (free)")
+    print("=" * 62)
+
+    date_range = prompt_date_range()
+    if not date_range:
+        print("Cancelled.")
+        return
+
+    start_dt, end_dt = date_range
+    print(f"\nDate range: {start_dt}  →  {end_dt}")
+    print(f"Archive:    {ARCHIVE_DIR}\n")
+
+    if not os.path.isdir(ARCHIVE_DIR):
+        if not glob.glob(os.path.join(SCRIPT_DIR, "ev_edges_*.xlsx")):
+            print("No archive or ev_edges files found. Run odds_compare.py first.")
+            return
+
+    run_full_backtest(start_dt, end_dt)
 
 
 if __name__ == "__main__":

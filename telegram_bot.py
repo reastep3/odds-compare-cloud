@@ -1975,12 +1975,15 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     async with _run_lock:
         context.bot_data["running"] = True
         try:
-            picks = await asyncio.to_thread(_run_backtest_wrapper, start, end)
+            result = await asyncio.to_thread(_run_backtest_wrapper, start, end)
         except Exception as e:
             context.bot_data["running"] = False
             await context.bot.send_message(chat_id, f"Backtest failed: {e}")
             return ConversationHandler.END
         context.bot_data["running"] = False
+
+    picks      = result.get("play_these_graded", [])
+    excel_path = result.get("excel_path")
 
     # Filter to user's books
     picks = [p for p in picks if p["book"] in user_books]
@@ -1989,15 +1992,21 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for chunk in _split_message(msg):
         await context.bot.send_message(chat_id, chunk, parse_mode="HTML")
 
+    if excel_path and os.path.exists(excel_path):
+        with open(excel_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id,
+                document=f,
+                filename=os.path.basename(excel_path),
+                caption=f"Backtest {start} to {end}",
+            )
+
     return ConversationHandler.END
 
 
-def _run_backtest_wrapper(start_dt: date, end_dt: date) -> list[dict]:
-    from backtest import load_archive_picks, run_backtest
-    picks = load_archive_picks(start_dt, end_dt)
-    if not picks:
-        return []
-    return run_backtest(picks)
+def _run_backtest_wrapper(start_dt: date, end_dt: date) -> dict:
+    from backtest import run_full_backtest
+    return run_full_backtest(start_dt, end_dt)
 
 
 def format_backtest_results(picks: list[dict], start_dt: date, end_dt: date,

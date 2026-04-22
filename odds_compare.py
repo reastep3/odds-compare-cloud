@@ -1735,8 +1735,10 @@ def _starts_within_days(e, max_days: int) -> bool:
 # Ligue1 and Serie A were previously blocked but proved profitable once
 # the broader +EV pool was examined (Ligue1 +26% / +4%, Serie A +47% / +11%
 # across month + week), so they are now allowed.
+# LALIGA added provisionally 2026-04-21: 1W/4L with 4 pushes across 31d+7d PT
+# windows (-72% / -31% ROI). Small sample — revisit after more data.
 _BLOCKED_SOCCER = frozenset({
-    "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA",
+    "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA", "LALIGA",
 })
 
 
