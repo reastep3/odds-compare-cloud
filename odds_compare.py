@@ -6163,6 +6163,12 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     # Parlay promos use a separate optimisation path
     if promo.get("promo_type") == "parlay":
         return False
+    # HR props: not considered for all-purpose/straight promos. They live
+    # in their own dedicated Excel tab (_build_hr_boost_rows) so the
+    # all-market boost doesn't silently grab a HR prop when the user
+    # meant to apply it to a game line.
+    if edge.get("market") == "hr":
+        return False
     if promo["sport"] != "all":
         edge_sport = edge["sport"].lower().replace(" ", "")
         canonical = _LEAGUE_TO_SPORT.get(edge_sport, edge_sport)
@@ -6367,14 +6373,8 @@ def run_headless_finalize(fetched: dict,
         print(f"  {len(play_props)} player prop(s) qualify for Play These")
         play_edges.extend(play_props)
 
-    # Longshot-heavy markets (HR props, golf outrights) are the natural
-    # home for high-min-odds profit boosts. Pass them in alongside game-
-    # line promo_pool + player props so the matcher can consider them.
-    promo_picks = compute_promo_picks(
-        promo_pool, promos,
-        extra_edges=(list(player_prop_edges)
-                     + list(hr_edges)
-                     + list(golf_edges)))
+    promo_picks = compute_promo_picks(promo_pool, promos,
+                                      extra_edges=player_prop_edges)
 
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(
@@ -6485,21 +6485,29 @@ def _promo_no_pick_reason(promo: dict,
     """Human-readable explanation of why no pick was selected. Only reached
     when the pool was genuinely empty — with the fallback path in place,
     any non-empty pool will produce a pick (marked is_fallback if -EV)."""
-    book_candidates = [e for e in combined if e.get("book") == promo.get("book")]
     if not matched_all:
-        if not book_candidates:
-            return f"No {promo['book']} outcomes in today's slate."
+        # Re-check with min_odds relaxed to see whether the slate simply
+        # lacks long-enough lines (common for small slates) versus a
+        # broader filter (sport/market) blocking everything.
+        saved_min = promo.get("min_odds")
+        promo["min_odds"] = None
+        try:
+            no_min = [e for e in combined if _promo_matches(promo, e)]
+        finally:
+            promo["min_odds"] = saved_min
+        if not no_min:
+            return (f"No {promo['book']} outcomes match this promo's "
+                    f"sport/market filters in today's slate.")
         min_odds = promo.get("min_odds")
         if min_odds is not None:
-            min_dec = american_to_decimal(min_odds)
-            at_or_above = sum(1 for e in book_candidates
-                              if e["odds_decimal"] >= min_dec)
-            if at_or_above == 0:
-                min_am = format_american(min_dec)
-                return (f"0 {promo['book']} candidates at {min_am} or longer "
-                        f"in today's slate.")
-        return (f"0 candidates match this promo's filters "
-                f"(sport/market/min odds).")
+            min_am = format_american(american_to_decimal(min_odds))
+            longest = max(no_min, key=lambda e: e["odds_decimal"])
+            longest_am = format_american(longest["odds_decimal"])
+            outcome = longest.get("outcome", "?")
+            return (f"0 {promo['book']} candidates at {min_am} or longer. "
+                    f"Longest {promo['book']} line today: "
+                    f"{outcome} {longest_am}.")
+        return "0 candidates match this promo's filters."
     if not pool:
         return (f"All {len(matched_all)} matching candidate(s) already "
                 f"assigned to other promos.")
