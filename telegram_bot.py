@@ -635,8 +635,14 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
         lines.append(f"\n<b>{_esc(promo['label'])}</b>{copy_suffix}")
 
         if edge is None:
-            lines.append("  No qualifying pick found")
+            reason = pp.get("reason") or "No qualifying pick found"
+            lines.append(f"  {_esc(reason)}")
             continue
+
+        is_fallback = pp.get("is_fallback", False)
+        if is_fallback:
+            lines.append(
+                "  <i>No +EV pick — fallback to least-bad option:</i>")
 
         pick_str = _esc(edge["outcome"])
         pt = _format_point(edge.get("point"), edge.get("market", ""))
@@ -667,16 +673,24 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
             boosted_odds = format_american(boost_dec)
             boosted_k = kelly_bet(fair_prob, boost_dec, fraction=kelly_fraction)
             br = bankrolls.get(edge["book"], 0)
-            bet = clamp_bet(br * boosted_k, edge["book"])
-            if promo.get("max_bet") and bet > promo["max_bet"]:
-                bet = promo["max_bet"]
+            # For +EV picks: Kelly stake (capped by promo max).
+            # For fallback -EV picks: Kelly=0, so default to the promo's
+            # max_bet (or a small flat if no cap) — burning a promo on a
+            # max-$5 play is fine; don't recommend large stakes on -EV.
+            if is_fallback:
+                bet = promo.get("max_bet") or 5.0
+            else:
+                bet = clamp_bet(br * boosted_k, edge["book"])
+                if promo.get("max_bet") and bet > promo["max_bet"]:
+                    bet = promo["max_bet"]
             profit = bet * (boost_dec - 1)
             lines.append(
                 f"  {odds_str} -&gt; {boosted_odds} | "
-                f"EV {edge['ev_pct']}% -&gt; {boosted_ev:.1f}%"
+                f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}%"
             )
+            bet_label = "Bet" if not is_fallback else "Bet (promo max)"
             lines.append(
-                f"  Bet ${bet:.2f} -&gt; +${profit:.2f}"
+                f"  {bet_label} ${bet:.2f} -&gt; +${profit:.2f}"
             )
 
         link = _deep_link(edge)

@@ -6426,10 +6426,13 @@ def compute_promo_picks(all_edges: list[dict],
         # produce N distinct picks, each on a different edge (via
         # used_keys deduplication).
         count = max(1, int(promo.get("count", 1) or 1))
+        matched_all = [e for e in combined if _promo_matches(promo, e)]
         for copy_idx in range(count):
-            pool = [e for e in combined if _promo_matches(promo, e)]
-            pool = [e for e in pool if _make_pick_key(e) not in used_keys]
+            pool = [e for e in matched_all
+                    if _make_pick_key(e) not in used_keys]
             best = None
+            reason: str | None = None
+            is_fallback = False
             if pool:
                 if promo.get("promo_type") == "bonus_bet":
                     amt = promo.get("bet_amount", 0)
@@ -6445,18 +6448,59 @@ def compute_promo_picks(all_edges: list[dict],
                         return calc_ev(e["fair_prob"] / 100, boost_dec)
 
                     ranked = sorted(pool, key=_boosted_ev, reverse=True)
-                    # Only take if the boosted bet is actually worth playing
-                    best = (ranked[0]
-                            if _boosted_ev(ranked[0]) >= 0.5 else None)
+                    top_candidate = ranked[0]
+                    top_ev = _boosted_ev(top_candidate)
+                    # Preferred: post-boost EV clears MIN_EV_PERCENT.
+                    # Fallback: no +EV option, so take least-bad — burning
+                    # a promo on a marginal line beats letting it expire.
+                    # Marked is_fallback so display can flag it clearly.
+                    best = top_candidate
+                    is_fallback = top_ev < MIN_EV_PERCENT
                 if best is not None:
                     used_keys.add(_make_pick_key(best))
+
+            # Diagnostic message when nothing was selected (empty pool).
+            if best is None:
+                reason = _promo_no_pick_reason(
+                    promo, combined, matched_all, pool)
+
             picks.append({
-                "promo":     promo,
-                "edge":      best,
-                "copy_idx":  copy_idx,
-                "copy_of":   count,
+                "promo":       promo,
+                "edge":        best,
+                "copy_idx":    copy_idx,
+                "copy_of":     count,
+                "reason":      reason,
+                "is_fallback": is_fallback,
             })
     return picks
+
+
+def _promo_no_pick_reason(promo: dict,
+                          combined: list[dict],
+                          matched_all: list[dict],
+                          pool: list[dict]) -> str:
+    """Human-readable explanation of why no pick was selected. Only reached
+    when the pool was genuinely empty — with the fallback path in place,
+    any non-empty pool will produce a pick (marked is_fallback if -EV)."""
+    book_candidates = [e for e in combined if e.get("book") == promo.get("book")]
+    if not matched_all:
+        if not book_candidates:
+            return f"No {promo['book']} outcomes in today's slate."
+        min_odds = promo.get("min_odds")
+        if min_odds is not None:
+            min_dec = american_to_decimal(min_odds)
+            at_or_above = sum(1 for e in book_candidates
+                              if e["odds_decimal"] >= min_dec)
+            if at_or_above == 0:
+                min_am = format_american(min_dec)
+                return (f"0 {promo['book']} candidates at {min_am} or longer "
+                        f"in today's slate.")
+        return (f"0 candidates match this promo's filters "
+                f"(sport/market/min odds).")
+    if not pool:
+        return (f"All {len(matched_all)} matching candidate(s) already "
+                f"assigned to other promos.")
+    return "No qualifying pick found."
 
 
 def eligible_games_for_promo(promo: dict, all_edges: list[dict],
