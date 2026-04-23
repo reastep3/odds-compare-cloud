@@ -27,6 +27,7 @@ Notes:
 """
 
 import glob
+import html
 import os
 import re
 import shutil
@@ -2975,6 +2976,134 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
 
     wb.save(output_path)
     print(f"\nBacktest report saved to: {output_path}")
+
+
+# ── Weekly digest ──────────────────────────────────────────────────────────────
+
+def _digest_top_line(settled: list[dict], label: str) -> str:
+    w = sum(1 for p in settled if p["result"] == "WIN")
+    l = sum(1 for p in settled if p["result"] == "LOSS")
+    pu = sum(1 for p in settled if p["result"] == "PUSH")
+    pnl = sum(p["pnl"] for p in settled)
+    bet = sum(p["bet_amount"] for p in settled)
+    roi = pnl / bet * 100 if bet else 0
+    sgn = "+" if pnl >= 0 else ""
+    record = f"W{w}/L{l}" + (f"/P{pu}" if pu else "")
+    return f"<b>{html.escape(label)}</b>: {record}  {sgn}${pnl:.2f}  ROI {sgn}{roi:.1f}%"
+
+
+def _digest_by_key(settled: list[dict], key_fn, heading: str,
+                   min_size: int = 2) -> str:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for p in settled:
+        try:
+            k = key_fn(p)
+        except Exception:
+            continue
+        if k:
+            groups[k].append(p)
+    rows: list[str] = []
+    for key in sorted(groups, key=lambda k: (-len(groups[k]), k)):
+        g = groups[key]
+        if len(g) < min_size:
+            continue
+        w = sum(1 for p in g if p["result"] == "WIN")
+        l = sum(1 for p in g if p["result"] == "LOSS")
+        pnl = sum(p["pnl"] for p in g)
+        bet = sum(p["bet_amount"] for p in g)
+        roi = pnl / bet * 100 if bet else 0
+        sgn = "+" if pnl >= 0 else ""
+        rows.append(f"  {html.escape(str(key))}: W{w}/L{l}  "
+                    f"{sgn}${pnl:.0f}  ROI {sgn}{roi:.0f}%")
+    if not rows:
+        return ""
+    return f"\n<b>By {html.escape(heading)}</b>\n" + "\n".join(rows)
+
+
+def _confidence_tier(p: dict) -> str:
+    """EV-percentage buckets — a proxy for signal strength."""
+    ev = p.get("ev_pct")
+    if ev is None:
+        return ""
+    if ev >= 5:
+        return "Strong (EV≥5%)"
+    if ev >= 3:
+        return "Medium (3-5%)"
+    return "Light (<3%)"
+
+
+def weekly_digest_text(start_dt: date, end_dt: date) -> str:
+    """Build an HTML-formatted weekly P&L digest string for Telegram.
+
+    Grades Play These + Promo Picks from the archive window and reports
+    overall, by-category, by-sport, by-market, and by-confidence-tier ROI.
+    """
+    print(f"[digest] Building digest for {start_dt} .. {end_dt}")
+
+    def _settled(lst: list[dict]) -> list[dict]:
+        return [p for p in lst
+                if p.get("result") in ("WIN", "LOSS", "PUSH")
+                and p.get("pnl") is not None]
+
+    pt_graded    = run_backtest(load_archive_picks(start_dt, end_dt) or [])
+    promo_graded = run_backtest_promo(
+        load_archive_promo_picks(start_dt, end_dt) or [])
+
+    pt_s    = _settled(pt_graded)
+    promo_s = _settled(promo_graded)
+    total   = pt_s + promo_s
+
+    header = (f"📊 <b>Weekly P&amp;L — "
+              f"{start_dt.strftime('%b %d')}–{end_dt.strftime('%b %d')}</b>")
+
+    if not total:
+        return header + "\n\nNo settled picks in the last 7 days."
+
+    w   = sum(1 for p in total if p["result"] == "WIN")
+    l   = sum(1 for p in total if p["result"] == "LOSS")
+    pu  = sum(1 for p in total if p["result"] == "PUSH")
+    pnl = sum(p["pnl"] for p in total)
+    bet = sum(p["bet_amount"] for p in total)
+    roi = pnl / bet * 100 if bet else 0
+    sgn = "+" if pnl >= 0 else ""
+
+    lines: list[str] = [header, ""]
+    lines.append(
+        f"<b>Overall</b>: W{w}/L{l}" + (f"/P{pu}" if pu else "") +
+        f"  {sgn}${pnl:.2f}  ROI {sgn}{roi:.1f}%  ({len(total)} settled)")
+
+    lines.append("")
+    lines.append("<b>By Category</b>")
+    if pt_s:
+        lines.append("  " + _digest_top_line(pt_s, "+EV Picks"))
+    if promo_s:
+        lines.append("  " + _digest_top_line(promo_s, "Promos"))
+
+    sport_block  = _digest_by_key(
+        pt_s, lambda p: (p.get("sport") or "").upper(), "Sport")
+    if sport_block:
+        lines.append(sport_block)
+
+    market_block = _digest_by_key(
+        pt_s, lambda p: (p.get("market") or "").title(), "Market")
+    if market_block:
+        lines.append(market_block)
+
+    tier_block   = _digest_by_key(
+        pt_s, _confidence_tier, "Confidence")
+    if tier_block:
+        lines.append(tier_block)
+
+    best  = max(total, key=lambda p: p["pnl"])
+    worst = min(total, key=lambda p: p["pnl"])
+    lines.append("")
+    lines.append(f"🏆 Best:  {html.escape(str(best.get('pick','?')))} "
+                 f"(+${best['pnl']:.2f})")
+    if worst is not best and worst["pnl"] < 0:
+        lines.append(f"💀 Worst: {html.escape(str(worst.get('pick','?')))} "
+                     f"(${worst['pnl']:.2f})")
+
+    return "\n".join(lines)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
