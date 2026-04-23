@@ -29,7 +29,8 @@ import logging
 import re
 import sys
 import os
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 try:
     import anthropic
@@ -2102,6 +2103,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/quickbet    — Kelly calculator for promos (no API call, no archive)\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
+        "/digest      — Send the last-7-days P&L digest now\n"
         "/books       — View or change your sportsbooks\n"
         "/status      — Check if a run is in progress\n"
         "/help        — Show this message"
@@ -2115,6 +2117,53 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text += f"\nKelly fraction: {kf:g}"
 
     await update.message.reply_text(help_text)
+
+
+async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Build and send the last-7-days P&L digest to the caller."""
+    if not is_authorized(update):
+        return
+    end_dt   = date.today()
+    start_dt = end_dt - timedelta(days=6)
+    await update.message.reply_text("Building weekly digest…")
+    try:
+        from backtest import weekly_digest_text
+        text = await asyncio.to_thread(weekly_digest_text, start_dt, end_dt)
+    except Exception as e:
+        log.exception("[digest] on-demand build failed")
+        await update.message.reply_text(f"⚠️ Digest failed: {e}")
+        return
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: build the weekly digest and DM every authorized user.
+
+    Window = the 7 days ending yesterday (Mon–Sun when fired Sunday 10 AM ET).
+    """
+    end_dt   = date.today() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=6)
+    log.info(f"[digest] Weekly digest job firing for {start_dt} .. {end_dt}")
+    try:
+        from backtest import weekly_digest_text
+        text = await asyncio.to_thread(weekly_digest_text, start_dt, end_dt)
+    except Exception as e:
+        log.exception("[digest] Failed to build weekly digest")
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ Weekly digest build failed: {e}",
+            )
+        except Exception:
+            pass
+        return
+
+    for uid in list(_users.keys()):
+        try:
+            await context.bot.send_message(
+                chat_id=int(uid), text=text, parse_mode="HTML")
+        except Exception as e:
+            log.warning(f"[digest] Failed to send to {uid}: {e}")
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2373,6 +2422,7 @@ def main():
             BotCommand("quickbet",     "Kelly calculator for promos (no API, no archive)"),
             BotCommand("kelly",        "Show or set your Kelly fraction"),
             BotCommand("backtest",     "Backtest past picks"),
+            BotCommand("digest",       "Send the last-7-days P&L digest now"),
             BotCommand("books",        "Set or change your sportsbooks"),
             BotCommand("status",       "Check if a run is in progress"),
             BotCommand("help",         "Show command list"),
@@ -2476,7 +2526,26 @@ def main():
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("help", cmd_help))
+
+    # Weekly P&L digest — Sundays at 10:00 AM America/New_York.
+    # Saturday's late NBA/NHL/NCAAB/CFB are all graded on ESPN by then,
+    # and it lands before the Sunday NFL early kick at 1 PM ET.
+    # Requires python-telegram-bot[job-queue] (APScheduler) — without
+    # the extra, app.job_queue is None and we just log a warning.
+    if app.job_queue is not None:
+        app.job_queue.run_daily(
+            send_weekly_digest,
+            time=dtime(hour=10, minute=0,
+                       tzinfo=ZoneInfo("America/New_York")),
+            days=(6,),  # 0=Mon … 6=Sun per datetime.weekday()
+            name="weekly_digest",
+        )
+        log.info("Weekly P&L digest scheduled — Sundays 10:00 AM ET.")
+    else:
+        log.warning("JobQueue unavailable — weekly digest disabled. "
+                    "Install with: pip install 'python-telegram-bot[job-queue]'")
 
     log.info("Bot starting — listening for commands...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
