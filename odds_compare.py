@@ -6163,9 +6163,6 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     # Parlay promos use a separate optimisation path
     if promo.get("promo_type") == "parlay":
         return False
-    # HR props handled by dedicated HR Props tab
-    if edge.get("market") == "hr":
-        return False
     if promo["sport"] != "all":
         edge_sport = edge["sport"].lower().replace(" ", "")
         canonical = _LEAGUE_TO_SPORT.get(edge_sport, edge_sport)
@@ -6370,8 +6367,14 @@ def run_headless_finalize(fetched: dict,
         print(f"  {len(play_props)} player prop(s) qualify for Play These")
         play_edges.extend(play_props)
 
-    promo_picks = compute_promo_picks(promo_pool, promos,
-                                      extra_edges=player_prop_edges)
+    # Longshot-heavy markets (HR props, golf outrights) are the natural
+    # home for high-min-odds profit boosts. Pass them in alongside game-
+    # line promo_pool + player props so the matcher can consider them.
+    promo_picks = compute_promo_picks(
+        promo_pool, promos,
+        extra_edges=(list(player_prop_edges)
+                     + list(hr_edges)
+                     + list(golf_edges)))
 
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(

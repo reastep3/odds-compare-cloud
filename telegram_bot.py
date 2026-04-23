@@ -1715,10 +1715,13 @@ async def _prompt_next_game_pick(update: Update,
     # Use the broader promo_pool (all DK/FD outcomes) so games without a
     # pre-boost +EV edge still surface — the boost may make them viable.
     promo_edges = fetched.get("promo_pool") or fetched["all_edges"]
+    extra_prop_edges = (list(fetched.get("player_prop_edges") or [])
+                        + list(fetched.get("hr_edges") or [])
+                        + list(fetched.get("golf_edges") or []))
     while queue:
         promo = queue[0]
         eligible = eligible_games_for_promo(
-            promo, promo_edges, fetched["player_prop_edges"])
+            promo, promo_edges, extra_prop_edges)
         if not eligible:
             # No matching games — log + skip
             queue.pop(0)
