@@ -13,6 +13,8 @@ Commands:
     /run_skip    — Just list the picks (no bankrolls, no promos)
     /run_promos  — Only show promo picks (skip Summary + Play These)
     /run_live    — Quick +EV picks on currently live games (for promos)
+    /quickbet    — Standalone Kelly calculator for promos (no API, no archive)
+    /kelly       — Show or set your preferred Kelly fraction
     /backtest    — Run a backtest on past picks
     /books       — View or change your sportsbook selection
     /add_user    — (Admin) Authorize a new user
@@ -62,6 +64,7 @@ ASK_BOOKS = 20
 ASK_RUN_SINGLE_BOOK = 21
 ASK_PROMO_GAMESPEC = 22
 ASK_PHOTO_BOOK = 23
+ASK_QB_PICK, ASK_QB_TRUE, ASK_QB_BOOST, ASK_QB_BANKROLL = range(30, 34)
 
 _GAMESPEC_YES = "🎯 Specific game"
 _GAMESPEC_NO  = "Any game"
@@ -113,6 +116,32 @@ def get_user_books(update: Update) -> list[str] | None:
     if profile and profile.get("books"):
         return profile["books"]
     return None
+
+
+# ── Per-user Kelly fraction ──────────────────────────────────────────
+
+# odds_compare.py bakes edges with KELLY_FRACTION=0.5. When a user
+# prefers a different fraction, we scale the stored kelly_pct at
+# display time by (user_fraction / DEFAULT_KELLY_FRACTION).
+DEFAULT_KELLY_FRACTION = 0.5
+
+
+def get_user_kelly(update: Update) -> float:
+    """User's preferred Kelly fraction. Defaults to 0.5 (half-Kelly)."""
+    profile = _users.get(str(update.effective_user.id))
+    if not profile:
+        return DEFAULT_KELLY_FRACTION
+    frac = profile.get("kelly_fraction")
+    if not isinstance(frac, (int, float)) or not (0 < frac <= 1):
+        return DEFAULT_KELLY_FRACTION
+    return float(frac)
+
+
+def set_user_kelly(update: Update, fraction: float) -> None:
+    uid = str(update.effective_user.id)
+    profile = _users.setdefault(uid, {})
+    profile["kelly_fraction"] = float(fraction)
+    save_users()
 
 
 # ── Promo parser ─────────────────────────────────────────────────────
@@ -409,6 +438,60 @@ def _format_american(odds: int) -> str:
     return f"+{odds}" if odds > 0 else str(odds)
 
 
+def _parse_any_odds(text: str) -> float | None:
+    """Parse American (+150, -110) or decimal (2.50) odds. Returns decimal,
+    or None if unparseable. Values with |v| >= 100 are treated as American."""
+    t = (text or "").strip().replace(",", "")
+    if not t:
+        return None
+    try:
+        val = float(t)
+    except ValueError:
+        return None
+    if val >= 100 or val <= -100:
+        from odds_compare import american_to_decimal
+        return american_to_decimal(int(round(val)))
+    if val > 1.0:
+        return val
+    return None
+
+
+def _parse_kelly_input(text: str) -> float | None:
+    """Parse '0.25', '25%', '25', or word shortcuts (full/half/quarter/eighth).
+    Bare non-integer values > 1 (e.g. '1.5') are rejected as ambiguous."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    shortcuts = {"full": 1.0, "half": 0.5, "quarter": 0.25, "eighth": 0.125}
+    if t in shortcuts:
+        return shortcuts[t]
+    has_percent = t.endswith("%")
+    t = t.rstrip("%").strip()
+    try:
+        val = float(t)
+    except ValueError:
+        return None
+    if has_percent:
+        val = val / 100
+    elif val > 1:
+        # Accept bare whole-integer percents (e.g. "25" → 0.25) but reject
+        # ambiguous fractional values > 1 like "1.5".
+        if val == int(val) and 2 <= val <= 100:
+            val = val / 100
+        else:
+            return None
+    return val if 0 < val <= 1 else None
+
+
+def _parse_amount(text: str) -> float | None:
+    """Parse a dollar amount. Strips $ and commas."""
+    try:
+        val = float((text or "").replace("$", "").replace(",", "").strip())
+        return val if val > 0 else None
+    except ValueError:
+        return None
+
+
 def _format_point(point, market: str = "") -> str:
     """Format a point/line value. Only add '+' for spreads."""
     if point is None:
@@ -450,10 +533,13 @@ def format_summary(result: dict, user_books: list[str],
 
 
 def format_play_edges(play_edges: list[dict], bankrolls: dict,
-                      skip_mode: bool = False) -> list[str]:
+                      skip_mode: bool = False,
+                      kelly_scale: float = 1.0) -> list[str]:
     """
     Format "Play These" edges into Telegram messages (one per book).
     Returns a list of message strings. In skip_mode, omits bet amounts.
+    kelly_scale rescales the stored (half-Kelly) kelly_pct to the user's
+    preferred fraction — pass user_fraction / DEFAULT_KELLY_FRACTION.
     """
     from odds_compare import clamp_bet, _confidence, EASTERN
 
@@ -471,7 +557,8 @@ def format_play_edges(play_edges: list[dict], bankrolls: dict,
         lines = [f"<b>{short} PLAYS ({len(book_edges)})</b>"]
 
         for i, edge in enumerate(book_edges, 1):
-            bet = clamp_bet(br * edge["kelly_pct"] / 100, edge["book"])
+            bet = clamp_bet(
+                br * edge["kelly_pct"] * kelly_scale / 100, edge["book"])
             profit = bet * (edge["odds_decimal"] - 1)
             total_bet += bet
             total_profit += profit
@@ -524,8 +611,12 @@ def format_play_edges(play_edges: list[dict], bankrolls: dict,
     return messages
 
 
-def format_promo_picks(promo_picks: list[dict], bankrolls: dict) -> str | None:
-    """Format promo picks into a single message."""
+def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
+                       kelly_fraction: float = DEFAULT_KELLY_FRACTION,
+                       ) -> str | None:
+    """Format promo picks into a single message.
+    kelly_fraction is the user's preferred Kelly fraction; defaults to
+    DEFAULT_KELLY_FRACTION (0.5, matches the module-level default)."""
     if not promo_picks:
         return None
 
@@ -574,7 +665,7 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict) -> str | None:
             fair_prob = edge["fair_prob"] / 100
             boosted_ev = calc_ev(fair_prob, boost_dec)
             boosted_odds = format_american(boost_dec)
-            boosted_k = kelly_bet(fair_prob, boost_dec)
+            boosted_k = kelly_bet(fair_prob, boost_dec, fraction=kelly_fraction)
             br = bankrolls.get(edge["book"], 0)
             bet = clamp_bet(br * boosted_k, edge["book"])
             if promo.get("max_bet") and bet > promo["max_bet"]:
@@ -1490,6 +1581,7 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Stash for the finalize phase (and for game-pick callbacks)
     context.user_data["fetched"]     = fetched
     context.user_data["chat_id"]     = chat_id
+    context.user_data["kelly_fraction"] = get_user_kelly(update)
 
     # Send Summary + Play These immediately — these don't depend on promos
     try:
@@ -1558,7 +1650,10 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
     if "FanDuel" in user_books:
         bankrolls["FanDuel"] = fd
 
-    for msg in format_play_edges(play_edges, bankrolls, skip_mode=skip_mode):
+    user_kf = context.user_data.get("kelly_fraction", DEFAULT_KELLY_FRACTION)
+    kelly_scale = user_kf / DEFAULT_KELLY_FRACTION
+    for msg in format_play_edges(play_edges, bankrolls, skip_mode=skip_mode,
+                                 kelly_scale=kelly_scale):
         for chunk in _split_message(msg):
             await context.bot.send_message(
                 chat_id, chunk, parse_mode="HTML",
@@ -1736,7 +1831,11 @@ async def _finalize_and_send(update: Update,
 
     try:
         if not skip_mode:
-            promo_msg = format_promo_picks(result.get("promo_picks", []), bankrolls)
+            user_kf = context.user_data.get(
+                "kelly_fraction", DEFAULT_KELLY_FRACTION)
+            promo_msg = format_promo_picks(
+                result.get("promo_picks", []), bankrolls,
+                kelly_fraction=user_kf)
             if promo_msg:
                 for chunk in _split_message(promo_msg):
                     await context.bot.send_message(
@@ -1830,10 +1929,154 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Idle. Send /run to start.")
 
 
+async def cmd_kelly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show or set the invoking user's Kelly fraction."""
+    if not is_authorized(update):
+        return
+
+    current = get_user_kelly(update)
+    args_text = " ".join(context.args).strip() if context.args else ""
+
+    if not args_text:
+        await update.message.reply_text(
+            f"Your Kelly fraction is <b>{current:g}</b> "
+            f"({current * 100:.0f}% of full Kelly).\n\n"
+            f"Set a new one with <code>/kelly 0.25</code>, "
+            f"<code>/kelly 25%</code>, or <code>/kelly half</code>.\n"
+            f"Accepts 0.01–1.0. Shortcuts: full, half, quarter, eighth.",
+            parse_mode="HTML",
+        )
+        return
+
+    new_frac = _parse_kelly_input(args_text)
+    if new_frac is None or not (0.01 <= new_frac <= 1.0):
+        await update.message.reply_text(
+            "Invalid. Try /kelly 0.25, /kelly 25%, or /kelly half. "
+            "Must be between 0.01 and 1.0.")
+        return
+
+    set_user_kelly(update, new_frac)
+    await update.message.reply_text(
+        f"Kelly fraction set to <b>{new_frac:g}</b> "
+        f"({new_frac * 100:.0f}% of full Kelly). Applies to /run, /run_promos, "
+        f"and /quickbet.",
+        parse_mode="HTML",
+    )
+
+
+# ── /quickbet — standalone promo calculator ──────────────────────────
+
+async def cmd_quickbet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Promo sizing calculator. Asks for pick, original odds, boosted odds,
+    and bankroll, then returns a Kelly-sized stake. No API calls, no Excel,
+    no archive — just the math for promos we can't catch via /run."""
+    if not is_authorized(update):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "<b>Quickbet calculator</b> — no API call, no archive.\n\n"
+        "What's the pick? (e.g. <i>Alcaraz ML</i>)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ASK_QB_PICK
+
+
+async def recv_qb_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    pick = (update.message.text or "").strip()
+    if not pick:
+        await update.message.reply_text("Enter a short description of the pick:")
+        return ASK_QB_PICK
+    context.user_data["qb_pick"] = pick[:120]
+    await update.message.reply_text(
+        "Original odds (the fair-value line, pre-boost).\n"
+        "American (<code>+150</code>, <code>-110</code>) or decimal (<code>2.50</code>):",
+        parse_mode="HTML",
+    )
+    return ASK_QB_TRUE
+
+
+async def recv_qb_true(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    dec = _parse_any_odds(update.message.text)
+    if dec is None:
+        await update.message.reply_text(
+            "Invalid. Enter American (+150, -110) or decimal (2.50):")
+        return ASK_QB_TRUE
+    context.user_data["qb_true_dec"] = dec
+    await update.message.reply_text("Boosted odds (after the promo):")
+    return ASK_QB_BOOST
+
+
+async def recv_qb_boost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    dec = _parse_any_odds(update.message.text)
+    if dec is None:
+        await update.message.reply_text(
+            "Invalid. Enter American (+200) or decimal (3.00):")
+        return ASK_QB_BOOST
+    true_dec = context.user_data["qb_true_dec"]
+    if dec <= true_dec:
+        await update.message.reply_text(
+            f"Boosted ({dec:.2f}) isn't better than original ({true_dec:.2f}). "
+            f"Re-enter the boosted line:")
+        return ASK_QB_BOOST
+    context.user_data["qb_boost_dec"] = dec
+    await update.message.reply_text("Your bankroll ($)?")
+    return ASK_QB_BANKROLL
+
+
+async def recv_qb_bankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    br = _parse_amount(update.message.text)
+    if br is None:
+        await update.message.reply_text("Enter a valid dollar amount:")
+        return ASK_QB_BANKROLL
+
+    from odds_compare import kelly_bet, format_american
+
+    pick      = context.user_data["qb_pick"]
+    true_dec  = context.user_data["qb_true_dec"]
+    boost_dec = context.user_data["qb_boost_dec"]
+    fair_prob = 1 / true_dec
+    k_frac    = get_user_kelly(update)
+
+    kelly_pct = kelly_bet(fair_prob, boost_dec, fraction=k_frac)
+    stake     = br * kelly_pct
+    ev_pct    = (fair_prob * boost_dec - 1) * 100
+    true_am   = format_american(true_dec)
+    boost_am  = format_american(boost_dec)
+
+    header = (
+        f"<b>{_esc(pick)}</b>\n"
+        f"{true_am} -&gt; {boost_am}  (dec {true_dec:.2f} -&gt; {boost_dec:.2f})\n"
+        f"Edge: <b>{ev_pct:+.2f}%</b>"
+    )
+
+    if kelly_pct <= 0:
+        msg = (
+            f"{header}\n\n"
+            f"Kelly says <b>don't bet</b> — the boosted line isn't +EV "
+            f"vs the original odds you gave."
+        )
+    else:
+        profit = stake * (boost_dec - 1)
+        msg = (
+            f"{header}\n\n"
+            f"Kelly ({k_frac:g}): {kelly_pct * 100:.2f}% of bankroll\n"
+            f"Stake: <b>${stake:.2f}</b> -&gt; +${profit:.2f} if it wins"
+        )
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
+    kf = get_user_kelly(update)
     help_text = (
         "EV Edge Finder Bot\n"
         "\n"
@@ -1842,6 +2085,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/run_skip    — Just list the picks (no bankrolls, no promos)\n"
         "/run_promos  — Only show promo picks (skip Summary + Play These)\n"
         "/run_live    — Quick +EV picks on currently live games (for promos)\n"
+        "/quickbet    — Kelly calculator for promos (no API call, no archive)\n"
+        "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
         "/books       — View or change your sportsbooks\n"
         "/status      — Check if a run is in progress\n"
@@ -1853,6 +2098,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     books = get_user_books(update)
     if books:
         help_text += f"\n\nYour books: {', '.join(books)}"
+    help_text += f"\nKelly fraction: {kf:g}"
 
     await update.message.reply_text(help_text)
 
@@ -2110,6 +2356,8 @@ def main():
             BotCommand("run_skip",     "Just list the picks (no bankrolls)"),
             BotCommand("run_promos",   "Only promo picks (bankroll prompt; skip Summary + Play These)"),
             BotCommand("run_live",     "Live in-progress games for promo picks"),
+            BotCommand("quickbet",     "Kelly calculator for promos (no API, no archive)"),
+            BotCommand("kelly",        "Show or set your Kelly fraction"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("books",        "Set or change your sportsbooks"),
             BotCommand("status",       "Check if a run is in progress"),
@@ -2187,10 +2435,31 @@ def main():
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
+    quickbet_handler = ConversationHandler(
+        entry_points=[CommandHandler("quickbet", cmd_quickbet)],
+        states={
+            ASK_QB_PICK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_qb_pick),
+            ],
+            ASK_QB_TRUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_qb_true),
+            ],
+            ASK_QB_BOOST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_qb_boost),
+            ],
+            ASK_QB_BANKROLL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_qb_bankroll),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(books_handler)
     app.add_handler(conv_handler)
     app.add_handler(bt_handler)
+    app.add_handler(quickbet_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
+    app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
