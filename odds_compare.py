@@ -1745,12 +1745,25 @@ _BLOCKED_SOCCER = frozenset({
 def _qualifies(e):
     """Return True if an edge qualifies for the 'Play These' tab.
 
+    Recalibrated 2026-04-27 against the 30-day backtest (2026-03-28 → 04-27,
+    2553 +EV picks). The PT subset was underperforming the broad pool
+    (-4.1% ROI vs -3.2%); three issues drove almost all the bleed:
+
+      1. TOTALS market accounted for -$14.32 of -$14.83 PT P&L (96%).
+         Non-Pinnacle totals lose at every EV tier, including ≥4%
+         (-16.2% ROI). Pinnacle-anchored totals are ~breakeven (-1.3%
+         on 370 picks). Fix: drop the non-Pinn consensus path for
+         totals — Pinnacle anchor required.
+
+      2. MLS H2H added to the H2H whitelist. MLS H2H went +9.7% ROI
+         on 75 broad picks — the second-best H2H sport behind MLB.
+         Previously blocked by the MLB-only restriction.
+
     Recalibrated 2026-04-16 (v2). Non-Pinnacle EV threshold bumped from
     2.0% → 2.5% for H2H/spreads/totals. The EV 1–3% non-Pinnacle band
     produced -8.8% ROI over 235 picks (30-day) and -6.8% ROI over the
-    78 dropped picks in the past-week simulation — consistent bleed
-    across two independent windows. Pinnacle-anchored picks unchanged
-    (still qualify at EV ≥ 1.0%).
+    78 dropped picks in the past-week simulation. Pinnacle-anchored
+    picks unchanged (still qualify at EV ≥ 1.0%).
 
     Recalibrated 2026-04-16. Heavy-mispricing EV cap removed — the ≥ 5% EV
     tier showed +32% ROI (month) / +28% ROI (week) across the raw +EV pool,
@@ -1777,9 +1790,10 @@ def _qualifies(e):
     if sport == "NBA":
         return False
 
-    # H2H: block everything EXCEPT MLB (+26.4% ROI, 114 picks, 54% WR)
+    # H2H: MLB (+16.6% ROI broad, +26.4% lifetime) and MLS (+9.7% on 75 picks).
+    # All other sports' H2H is blocked.
     if mkt == "h2h":
-        if sport == "MLB":
+        if sport in ("MLB", "MLS"):
             if pinn and ev >= 1.0:
                 return True
             return ev >= 2.5
@@ -1790,16 +1804,22 @@ def _qualifies(e):
             return True
         return ev >= 2.5
 
+    # Totals: Pinnacle anchor required. Non-Pinn totals bleed at every
+    # EV tier (≥2%: -15.8%, ≥3%: -17.8%, ≥4%: -16.2%, ≥5%: -26.4%).
     if mkt == "totals":
-        if pinn and ev >= 1.0:
-            return True
-        return books >= 5 and ev >= 2.5
+        return pinn and ev >= 1.0
 
     return False
 
 
 def _qualifies_prop(e):
     """Return True if a player prop edge qualifies for 'Play These'.
+
+    Recalibrated 2026-04-27. NBA pts non-Pinnacle threshold raised
+    2.0% → 3.0% based on 30-day backtest of all props:
+      EV 2-3% bucket: -13.5% ROI (132 picks) — bleeds
+      EV 3-5% bucket: +10.3% ROI (99 picks) — winners
+    Pinnacle path unchanged (still qualifies at EV ≥ 1%).
 
     Calibrated 2026-04-12 against 149 settled NBA points picks:
       pts: 56% WR, +22.5% ROI this week (+9.1% lifetime) — profitable
@@ -1820,7 +1840,7 @@ def _qualifies_prop(e):
     if mkt == "pts":
         if pinn and ev >= 1.0:
             return True
-        return ev >= 2.0
+        return ev >= 3.0
 
     return False
 
