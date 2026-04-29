@@ -433,33 +433,37 @@ $$('button[data-bt-preset]').forEach((b) => {
 });
 
 function renderBacktest(j) {
-  const s = j.summary;
-  const sgn = s.pnl >= 0 ? "pos" : "neg";
+  const s   = j.summary;
+  const sgn = s.roi_pct >= 0 ? "pos" : "neg";
   $("#bt-summary").innerHTML = `
     <p><b>${s.wins}</b> W / <b>${s.losses}</b> L / <b>${s.pushes}</b> P
        · ${s.settled} settled${s.pending ? ` · ${s.pending} pending` : ""}</p>
-    <p>Wagered: <b>$${s.wagered.toFixed(2)}</b>
-       · P&L: <span class="${sgn}">${fmtMoney(s.pnl)}</span>
-       · ROI: <span class="${sgn}">${fmtPct(s.roi_pct)}</span></p>`;
+    <p>ROI: <span class="${sgn}" style="font-size:1.4em">${fmtPct(s.roi_pct)}</span>
+       · Win rate: <b>${fmtPct(s.win_rate)}</b></p>
+    <p class="muted" style="margin-top:6px;font-size:12px">
+      ROI is bankroll-independent (Kelly bet sizing scales linearly with bankroll).
+    </p>`;
 
   const settled = (j.picks || []).filter(
     (p) => p.result === "WIN" || p.result === "LOSS" || p.result === "PUSH");
   const rows = settled.map((p) => {
-    const cls = p.pnl > 0 ? "pos" : p.pnl < 0 ? "neg" : "";
+    const cls = p.result === "WIN"  ? "pos"
+              : p.result === "LOSS" ? "neg" : "";
+    const ev  = Number(p.ev_pct ?? 0);
     return `<tr>
-      <td>${p.sport ?? ""}</td>
+      <td>${(p.sport || "").toUpperCase()}</td>
       <td>${p.game ?? ""}</td>
-      <td>${p.book ?? ""}</td>
+      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
       <td>${p.pick ?? ""}</td>
       <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="${cls}">${p.result}</td>
-      <td class="num ${cls}">${fmtMoney(p.pnl ?? 0)}</td>
+      <td class="num ${ev > 0 ? "pos" : ""}">${fmtPct(ev, 1)}</td>
+      <td class="${cls}"><b>${p.result}</b></td>
     </tr>`;
   }).join("");
   $("#bt-table").innerHTML = `
     <thead><tr>
       <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
-      <th>Odds</th><th>Result</th><th>P&L</th>
+      <th>Odds</th><th>EV</th><th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
   $("#bt-result").hidden = false;
