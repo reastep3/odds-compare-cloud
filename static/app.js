@@ -1,6 +1,10 @@
 // Arbyx PWA — vanilla JS frontend.
 // Talks to the FastAPI backend via fetch + Bearer token from localStorage.
 
+// Bump on every meaningful release. Shown in the page footer so you can
+// confirm at a glance that the cache evicted and you're on fresh code.
+const BUILD = "2026-04-29 v3 (in-app archive viewer + ROI-only backtest)";
+
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -495,13 +499,45 @@ $("#bt-run-btn").addEventListener("click", async () => {
 });
 
 // ── Service worker (PWA) ──────────────────────────────────────────────
+//
+// Strategy: deliberately minimal — see sw.js. The page also auto-reloads
+// when a new SW takes control, so deploys are visible after one refresh.
 
 if ("serviceWorker" in navigator) {
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloading) return;
+    reloading = true;
+    window.location.reload();
+  });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(
-      (err) => console.warn("SW register failed:", err));
+    navigator.serviceWorker.register("/sw.js").then((reg) => {
+      // Force any waiting SW to take over now (happens after a deploy).
+      if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      reg.addEventListener("updatefound", () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener("statechange", () => {
+          if (sw.state === "installed" && navigator.serviceWorker.controller) {
+            // A new SW just installed and there's already a controller —
+            // tell the new SW to take over so the controllerchange handler
+            // above triggers the reload.
+            sw.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
+    }).catch((err) => console.warn("SW register failed:", err));
   });
 }
+
+// ── Build stamp (visible at bottom of every screen) ───────────────────
+
+window.addEventListener("DOMContentLoaded", () => {
+  const stamp = document.createElement("div");
+  stamp.className = "build-stamp";
+  stamp.textContent = `Build: ${BUILD}`;
+  document.body.appendChild(stamp);
+});
 
 // ── Boot ──────────────────────────────────────────────────────────────
 

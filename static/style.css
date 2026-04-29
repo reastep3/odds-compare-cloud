@@ -239,7 +239,18 @@ h3 .count {
 /* Sticky table headers when scrolling on mobile */
 .table-wrap { max-height: 70vh; }
 
+.build-stamp {
+  position: fixed; bottom: 4px; right: 8px;
+  padding: 3px 7px;
+  background: rgba(15, 23, 42, 0.6);
+  color: var(--muted); font-size: 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 5; opacity: 0.6;
+}
+
 @media (max-width: 380px) {
   .grid { grid-template-columns: 1fr; }
   .summary-grid { grid-template-columns: 1fr; }
+  .build-stamp { font-size: 9px; }
 }
