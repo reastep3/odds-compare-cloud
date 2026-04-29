@@ -77,11 +77,52 @@
 
     <!-- Archives tab -->
     <section data-panel="archives" class="panel">
-      <div class="card">
-        <h2>Archives</h2>
-        <p class="muted">Past <code>ev_edges_*.xlsx</code> reports. Newest first. Tap to download.</p>
-        <button id="archives-refresh" class="secondary-btn">↻ Refresh</button>
-        <div id="archives-list" class="list"></div>
+      <!-- List view -->
+      <div id="archives-list-view">
+        <div class="card">
+          <h2>Archives</h2>
+          <p class="muted">Past <code>ev_edges_*.xlsx</code> reports. Newest first. Tap any to view inside the app.</p>
+          <button id="archives-refresh" class="secondary-btn">↻ Refresh</button>
+          <div id="archives-list" class="list"></div>
+        </div>
+      </div>
+
+      <!-- Detail view -->
+      <div id="archives-detail-view" hidden>
+        <div class="card">
+          <button id="archive-back" class="ghost-btn">← Archives</button>
+          <h2 id="archive-title" style="margin-top: 10px;"></h2>
+          <p id="archive-subtitle" class="muted"></p>
+          <div id="archive-anonly-banner" class="banner warn" hidden>
+            ⚠ AN-ONLY RUN — Pinnacle blending degraded; size-down baseline.
+          </div>
+          <div id="archive-summary-grid" class="summary-grid"></div>
+          <div class="archive-actions">
+            <a id="archive-download-link" class="ghost-btn" href="#">⬇ Download .xlsx</a>
+          </div>
+        </div>
+
+        <!-- Section: Play These -->
+        <div id="archive-play-section" class="card" hidden>
+          <h3>Play These <span class="count" id="archive-play-count"></span></h3>
+          <div class="table-wrap"><table id="archive-play-table"></table></div>
+        </div>
+
+        <!-- Section: Promo Picks -->
+        <div id="archive-promo-section" class="card" hidden>
+          <h3>Promo Picks <span class="count" id="archive-promo-count"></span></h3>
+          <div class="table-wrap"><table id="archive-promo-table"></table></div>
+        </div>
+
+        <!-- Section: Player Props -->
+        <div id="archive-props-section" class="card" hidden>
+          <h3>Player Props <span class="count" id="archive-props-count"></span></h3>
+          <div class="table-wrap"><table id="archive-props-table"></table></div>
+        </div>
+
+        <div id="archive-empty-state" class="card" hidden>
+          <p class="muted">This archive is empty — no Play These picks, promos, or props.</p>
+        </div>
       </div>
     </section>
 

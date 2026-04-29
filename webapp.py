@@ -244,18 +244,29 @@ def build_app() -> FastAPI:
     async def download_archive(
         name: str, _user: str = Depends(current_user),
     ) -> FileResponse:
-        # Defense-in-depth: only allow simple basenames.
-        if "/" in name or ".." in name or not name.endswith(".xlsx"):
-            raise HTTPException(status_code=400, detail="Invalid archive name")
-        for parent in (_ARCHIVE_DIR, _OUTPUT_DIR):
-            cand = os.path.join(parent, name)
-            if os.path.isfile(cand):
-                return FileResponse(
-                    cand,
-                    filename=name,
-                    media_type=("application/vnd.openxmlformats-"
-                                "officedocument.spreadsheetml.sheet"))
-        raise HTTPException(status_code=404, detail="Archive not found")
+        path = _resolve_archive(name)
+        return FileResponse(
+            path,
+            filename=name,
+            media_type=("application/vnd.openxmlformats-"
+                        "officedocument.spreadsheetml.sheet"))
+
+    @api.get("/api/archives/{name}/contents")
+    async def archive_contents(
+        name: str, _user: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Render an archive's most useful tabs as JSON for in-app viewing.
+
+        Pulled from the same readers backtest.py uses, so what shows here
+        is exactly what the backtest grader sees — no parsing drift.
+        """
+        path = _resolve_archive(name)
+
+        # Run synchronous openpyxl reads in a thread so we don't block
+        # the asyncio loop while the bot is polling Telegram.
+        import asyncio
+        result = await asyncio.to_thread(_load_archive_contents, path, name)
+        return result
 
     @api.post("/api/backtest")
     async def backtest_run(
@@ -368,6 +379,202 @@ def _shape_backtest_pick(p: dict[str, Any]) -> dict[str, Any]:
         "ev_pct":     p.get("ev_pct"),
         "result":     p.get("result"),
         "pnl":        p.get("pnl"),
+        "bet_amount": p.get("bet_amount"),
+    }
+
+
+# ── Archive in-app viewer helpers ──────────────────────────────────────
+
+def _resolve_archive(name: str) -> str:
+    """Validate name + return the absolute path. Raises 400/404."""
+    if "/" in name or ".." in name or not name.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Invalid archive name")
+    for parent in (_ARCHIVE_DIR, _OUTPUT_DIR):
+        cand = os.path.join(parent, name)
+        if os.path.isfile(cand):
+            return cand
+    raise HTTPException(status_code=404, detail="Archive not found")
+
+
+def _file_date_from_name(name: str) -> date | None:
+    """Pull YYYYMMDD out of ev_edges_<date>_<time>[_ANONLY].xlsx."""
+    import re
+    m = re.search(r"ev_edges_(\d{8})_\d{4}", name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _read_summary_tab(path: str) -> dict[str, Any]:
+    """Read the Summary tab's known cells. Robust to the AN-only row shift
+    (banner inserted at A1 pushes everything down by 1)."""
+    import openpyxl
+    out: dict[str, Any] = {
+        "generated":      None,
+        "dk_bankroll":    None,
+        "fd_bankroll":    None,
+        "kelly_fraction": None,
+        "min_ev":         None,
+        "total_edges":    None,
+        "total_wagered":  None,
+        "pinnacle":       None,
+        "best_ev":        None,
+    }
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return out
+    if "Summary" not in wb.sheetnames:
+        wb.close()
+        return out
+    ws = wb["Summary"]
+
+    # Detect AN-only layout: A1 starts with the warning banner. Otherwise
+    # A1 is "ODDS COMPARE — +EV EDGE FINDER".
+    a1 = (ws["A1"].value or "")
+    offset = 1 if isinstance(a1, str) and "ACTION NETWORK ONLY" in a1 else 0
+
+    def at(addr: str) -> Any:
+        return ws[addr].value
+
+    # Generated timestamp lives one row below the title in either layout.
+    out["generated"] = at(f"A{2 + offset}")  # "Generated: ..."
+
+    # Bankrolls + config — labels in col A, values in col B.
+    # Map by label search across rows 4..14 + offset (covers both layouts).
+    label_map = {
+        "DraftKings Bankroll:":     "dk_bankroll",
+        "FanDuel Bankroll:":        "fd_bankroll",
+        "Kelly Fraction:":          "kelly_fraction",
+        "Min EV Threshold:":        "min_ev",
+        "Total +EV Bets Found:":    "total_edges",
+        "Total Capital Deployed:":  "total_wagered",
+        "Pinnacle-Anchored Edges:": "pinnacle",
+        "Best EV:":                 "best_ev",
+    }
+    for r in range(2, 18):
+        a = at(f"A{r}")
+        if not isinstance(a, str):
+            continue
+        a = a.strip()
+        if a in label_map:
+            out[label_map[a]] = at(f"B{r}")
+
+    wb.close()
+    return out
+
+
+def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
+    """Reuse backtest.py's existing tab readers. Returns a JSON-clean dict."""
+    from backtest import (_read_play_these, _read_promo_picks,
+                            _read_props_from_odds_comparison)
+
+    file_dt = _file_date_from_name(name) or date.today()
+
+    summary = _read_summary_tab(path)
+    play    = _read_play_these(path, file_dt)
+    promos  = _read_promo_picks(path, file_dt)
+    props   = _read_props_from_odds_comparison(path, file_dt)
+
+    return {
+        "name":     name,
+        "an_only":  "_ANONLY" in name.upper(),
+        "file_date": file_dt.isoformat(),
+        "summary":  _shape_summary(summary),
+        "play_these":  [_shape_archive_pick(p)  for p in play],
+        "promo_picks": [_shape_archive_promo(p) for p in promos],
+        "player_props": [_shape_archive_prop(p) for p in props],
+        "counts": {
+            "play_these":   len(play),
+            "promo_picks":  len(promos),
+            "player_props": len(props),
+        },
+    }
+
+
+def _shape_summary(s: dict[str, Any]) -> dict[str, Any]:
+    """Coerce openpyxl cell values to JSON-safe primitives."""
+    def _num(v):
+        if isinstance(v, (int, float)):
+            return v
+        return None
+    def _str(v):
+        if v is None:
+            return None
+        return str(v)
+    gen = _str(s.get("generated"))
+    if gen and gen.lower().startswith("generated:"):
+        gen = gen.split(":", 1)[1].strip()
+    return {
+        "generated":      gen,
+        "dk_bankroll":    _num(s.get("dk_bankroll")),
+        "fd_bankroll":    _num(s.get("fd_bankroll")),
+        "kelly_fraction": _str(s.get("kelly_fraction")),
+        "min_ev":         _str(s.get("min_ev")),
+        "total_edges":    _num(s.get("total_edges")),
+        "total_wagered":  (round(s["total_wagered"], 2)
+                           if isinstance(s.get("total_wagered"), (int, float))
+                           else None),
+        "pinnacle":       _str(s.get("pinnacle")),
+        "best_ev":        _str(s.get("best_ev")),
+    }
+
+
+def _round(v: Any, n: int = 2) -> Any:
+    if isinstance(v, (int, float)):
+        return round(v, n)
+    return v
+
+
+def _shape_archive_pick(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sport":      p.get("sport"),
+        "game":       p.get("game"),
+        "game_time":  p.get("game_time"),
+        "book":       p.get("book"),
+        "market":     p.get("market"),
+        "pick":       p.get("pick"),
+        "line":       p.get("line"),
+        "odds":       p.get("odds"),
+        "ev_pct":     _round(p.get("ev_pct"), 2),
+        "confidence": p.get("confidence"),
+        "bet_amount": _round(p.get("bet_amount"), 2),
+        "potential":  _round(p.get("potential"), 2),
+    }
+
+
+def _shape_archive_promo(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sport":           p.get("sport"),
+        "game":            p.get("game"),
+        "book":            p.get("book"),
+        "market":          p.get("market"),
+        "pick":            p.get("pick"),
+        "line":            p.get("line"),
+        "orig_odds":       p.get("orig_odds"),
+        "boost_odds":      p.get("odds"),
+        "boost_odds_str":  p.get("boost_odds_str"),
+        "orig_ev":         p.get("orig_ev"),
+        "boost_ev":        p.get("boost_ev"),
+        "ev_gain":         p.get("ev_gain"),
+        "promo":           p.get("promo_desc") or p.get("promo"),
+    }
+
+
+def _shape_archive_prop(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sport":     p.get("sport"),
+        "game":      p.get("game"),
+        "player":    p.get("player"),
+        "market":    p.get("market"),
+        "side":      p.get("side"),
+        "line":      p.get("line"),
+        "odds":      p.get("odds"),
+        "book":      p.get("book"),
+        "ev_pct":    p.get("ev_pct"),
         "bet_amount": p.get("bet_amount"),
     }
 

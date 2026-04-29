@@ -199,6 +199,47 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Archive detail view */
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+.summary-grid .kv {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.summary-grid .kv .label {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.summary-grid .kv .value {
+  font-size: 14px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.summary-grid .kv.full { grid-column: 1 / -1; }
+
+.archive-actions {
+  display: flex; gap: 8px; margin-top: 12px;
+}
+.archive-actions a, .archive-actions button {
+  flex: 1; text-align: center; text-decoration: none;
+  display: inline-block;
+}
+
+h3 .count {
+  color: var(--muted); font-weight: 400; font-size: 13px;
+  margin-left: 6px;
+}
+
+/* Sticky table headers when scrolling on mobile */
+.table-wrap { max-height: 70vh; }
+
 @media (max-width: 380px) {
   .grid { grid-template-columns: 1fr; }
+  .summary-grid { grid-template-columns: 1fr; }
 }
