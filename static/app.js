@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v6 (graded archive results + daily ROI)";
+const BUILD = "2026-04-29 v7 (dashboard layout: latest run on left, tools on right)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -56,6 +56,7 @@ function showApp() {
   const week = new Date(today.getTime() - 7 * 86400 * 1000);
   $("#bt-start").value = week.toISOString().slice(0, 10);
   $("#bt-end").value   = today.toISOString().slice(0, 10);
+  loadDashboard();
   loadArchives();
 }
 
@@ -101,6 +102,118 @@ $$(".tab").forEach((b) => {
     }
   });
 });
+
+// ── Dashboard (left pane: most recent run) ───────────────────────────
+
+async function loadDashboard() {
+  const meta = $("#dashboard-meta");
+  meta.innerHTML = `<span class="spinner"></span>Loading latest run + grading…`;
+  $("#dashboard-empty").hidden = true;
+  $("#dashboard-anonly-banner").hidden = true;
+  $("#dashboard-summary").innerHTML = "";
+  $("#dashboard-play-section").hidden = true;
+  $("#dashboard-all-section").hidden = true;
+
+  try {
+    const j = await apiJSON("/api/latest");
+    if (!j.archive) {
+      meta.textContent = "";
+      $("#dashboard-empty").hidden = false;
+      return;
+    }
+    renderDashboard(j.archive);
+  } catch (e) {
+    meta.innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+function renderDashboard(arc) {
+  const s = arc.summary || {};
+  const r = arc.results || {};
+  const pretty = prettyArchiveName(arc.name);
+
+  // Meta line: friendly date + raw filename caption
+  $("#dashboard-meta").innerHTML =
+    `<b>${pretty.primary}</b><br>` +
+    `<span style="font-size:11px;opacity:0.5">${arc.name}</span>`;
+
+  $("#dashboard-anonly-banner").hidden = !arc.an_only;
+
+  // Summary grid: focus on actionable metrics
+  let resultsHTML = "";
+  if (r && (r.settled || r.pending || r.manual)) {
+    const sgnCls  = r.roi_pct >= 0 ? "pos" : "neg";
+    const wlpLine = `<b>${r.wins}</b> W / <b>${r.losses}</b> L / <b>${r.pushes}</b> P`;
+    const extras  = [];
+    if (r.pending) extras.push(`${r.pending} pending`);
+    if (r.manual)  extras.push(`${r.manual} unresolved`);
+    const extraStr = extras.length ? ` · ${extras.join(" · ")}` : "";
+    const roiLine  = r.settled
+      ? `ROI: <span class="${sgnCls}" style="font-size:1.3em">${fmtPct(r.roi_pct)}</span>
+         · Win rate: <b>${fmtPct(r.win_rate)}</b>`
+      : "—";
+    resultsHTML = `
+      ${kvCell("Day's record", `${wlpLine}${extraStr}`, { full: true })}
+      ${kvCell("Day's ROI", roiLine, { full: true })}`;
+  }
+
+  $("#dashboard-summary").innerHTML = [
+    resultsHTML,
+    kvCell("Total +EV edges", s.total_edges),
+    kvCell("Pinnacle anchored", s.pinnacle),
+    kvCell("Best EV", s.best_ev, { full: true }),
+  ].join("");
+
+  // Play These (filtered actionable picks)
+  const play = arc.play_these || [];
+  $("#dashboard-play-count").textContent = `(${play.length})`;
+  if (play.length) {
+    $("#dashboard-play-section").hidden = false;
+    $("#dashboard-play-table").innerHTML = renderDashboardTable(play);
+  }
+
+  // All Plays (every +EV edge — broader pool)
+  const all = arc.all_plays || [];
+  $("#dashboard-all-count").textContent = `(${all.length})`;
+  if (all.length) {
+    $("#dashboard-all-section").hidden = false;
+    $("#dashboard-all-table").innerHTML = renderDashboardTable(all);
+  }
+}
+
+// Compact table optimized for the left pane on narrow screens.
+// Columns: Sport · Game · Book · Pick · Odds · Bankroll % · EV % · Result
+function renderDashboardTable(picks) {
+  const rows = picks.map((p) => {
+    const ev = Number(p.ev_pct ?? 0);
+    return `<tr>
+      <td>${(p.sport || "").toUpperCase()}</td>
+      <td>${p.game ?? ""}</td>
+      <td class="${bookCls(p.book)}">${shortBook(p.book)}</td>
+      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td class="num">${fmtAmerican(p.odds)}</td>
+      <td class="num">${p.kelly_pct != null
+        ? `${p.kelly_pct.toFixed(2)}%` : "—"}</td>
+      <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      ${resultCell(p)}
+    </tr>`;
+  }).join("");
+  return `<thead><tr>
+    <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
+    <th>Odds</th><th>BR %</th><th>EV</th><th>Result</th>
+  </tr></thead><tbody>${rows}</tbody>`;
+}
+
+function shortBook(book) {
+  if (book === "DraftKings") return "DK";
+  if (book === "FanDuel")    return "FD";
+  return book ?? "";
+}
+
+// Wire the small refresh button on the dashboard card. Script runs after
+// the body is parsed (it's at end of <body>) so the element exists.
+const _dashRefresh = document.querySelector("#dashboard-refresh");
+if (_dashRefresh) _dashRefresh.addEventListener("click", loadDashboard);
 
 // ── Run scan ─────────────────────────────────────────────────────────
 
@@ -211,7 +324,10 @@ $("#run-btn").addEventListener("click", async () => {
     setStatus($("#run-status"), "");
     renderRunSummary(j.summary);
     renderEdges(j.play_edges);
-    if (j.output_path) loadArchives();
+    if (j.output_path) {
+      loadArchives();
+      loadDashboard();   // refresh the left-pane board with the new run
+    }
   } catch (e) {
     setStatus($("#run-status"), e.message, "error");
   } finally {
