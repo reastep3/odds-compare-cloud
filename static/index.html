@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -54,6 +54,21 @@
           ⚠ AN-ONLY RUN — Pinnacle blending degraded; size-down baseline.
         </div>
         <div id="dashboard-summary" class="summary-grid"></div>
+      </div>
+
+      <div class="kelly-bar" id="kelly-bar" hidden>
+        <label for="kelly-slider">Kelly</label>
+        <div class="slider-wrap">
+          <input type="range" id="kelly-slider"
+                 min="5" max="100" step="5" value="50">
+          <span class="kelly-value" id="kelly-value">0.50×</span>
+        </div>
+        <div class="kelly-presets">
+          <button data-kelly="25">¼</button>
+          <button data-kelly="50" class="active">½</button>
+          <button data-kelly="75">¾</button>
+          <button data-kelly="100">Full</button>
+        </div>
       </div>
 
       <div class="card" id="dashboard-play-section" hidden>
@@ -210,6 +225,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>
