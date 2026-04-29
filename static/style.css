@@ -41,8 +41,35 @@ header {
 }
 .brand { font-weight: 700; font-size: 18px; letter-spacing: 0.5px; }
 
-.screen { padding: 16px; max-width: 720px; margin: 0 auto; }
+.screen { padding: 16px; max-width: 1280px; margin: 0 auto; }
 .screen[hidden] { display: none; }
+
+/* Two-column layout: dashboard left, tools right.
+   Login screen ignores .layout entirely (single card). */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.left-pane, .right-pane { min-width: 0; }
+.right-pane {
+  position: sticky; top: 0; align-self: start;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding-right: 4px;  /* room for the scrollbar */
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .right-pane { position: static; max-height: none; overflow: visible; }
+}
+
+.dashboard-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.dashboard-header h2 { margin: 0; }
+.ghost-btn.small { padding: 4px 10px; font-size: 13px; }
 
 .card {
   background: var(--surface);

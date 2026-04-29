@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="stylesheet" href="/static/style.css?v=7">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -41,6 +41,40 @@
 
   <!-- App shell -->
   <main id="app" class="screen" hidden>
+    <div class="layout">
+    <!-- LEFT: dashboard for the most recent run -->
+    <aside class="left-pane">
+      <div class="card" id="dashboard-card">
+        <div class="dashboard-header">
+          <h2>Latest Run</h2>
+          <button id="dashboard-refresh" class="ghost-btn small">↻</button>
+        </div>
+        <p id="dashboard-meta" class="muted">Loading…</p>
+        <div id="dashboard-anonly-banner" class="banner warn" hidden>
+          ⚠ AN-ONLY RUN — Pinnacle blending degraded; size-down baseline.
+        </div>
+        <div id="dashboard-summary" class="summary-grid"></div>
+      </div>
+
+      <div class="card" id="dashboard-play-section" hidden>
+        <h3>Play These <span class="count" id="dashboard-play-count"></span></h3>
+        <p class="muted">Filtered actionable picks.</p>
+        <div class="table-wrap"><table id="dashboard-play-table"></table></div>
+      </div>
+
+      <div class="card" id="dashboard-all-section" hidden>
+        <h3>All Plays <span class="count" id="dashboard-all-count"></span></h3>
+        <p class="muted">Every +EV edge found, including sub-threshold ones.</p>
+        <div class="table-wrap"><table id="dashboard-all-table"></table></div>
+      </div>
+
+      <div class="card" id="dashboard-empty" hidden>
+        <p class="muted">No archives yet. Tap <b>Run scan</b> on the right to generate the first one.</p>
+      </div>
+    </aside>
+
+    <!-- RIGHT: tools (Run / Backtest / Archives) -->
+    <aside class="right-pane">
     <nav class="tabs">
       <button data-tab="run"      class="tab active">Run</button>
       <button data-tab="archives" class="tab">Archives</button>
@@ -172,8 +206,10 @@
         <div class="table-wrap"><table id="bt-table"></table></div>
       </div>
     </section>
+    </aside>
+    </div>
   </main>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

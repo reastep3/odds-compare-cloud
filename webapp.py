@@ -283,6 +283,48 @@ def build_app() -> FastAPI:
         result = await asyncio.to_thread(_load_archive_contents, path, name)
         return result
 
+    @api.get("/api/latest")
+    async def latest_archive(
+        _user: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Return the most recent archive's contents — drives the dashboard.
+
+        Identifies "most recent" by file mtime (matches /api/archives sort).
+        Returns {"archive": null} if no archives exist yet.
+        """
+        # Discover the newest archive by mtime
+        candidates: list[tuple[float, str, str]] = []  # (mtime, name, path)
+        for parent in (_ARCHIVE_DIR, _OUTPUT_DIR):
+            if not os.path.isdir(parent):
+                continue
+            for f in glob.glob(os.path.join(parent, "ev_edges_*.xlsx")):
+                try:
+                    candidates.append((os.path.getmtime(f),
+                                        os.path.basename(f), f))
+                except OSError:
+                    continue
+        if not candidates:
+            return {"archive": None}
+
+        # Newest by mtime (dedup by basename — archive/ + outputdir overlap)
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        seen: set[str] = set()
+        winner = None
+        for mt, name, path in candidates:
+            if name in seen:
+                continue
+            seen.add(name)
+            winner = (mt, name, path)
+            break
+
+        if winner is None:
+            return {"archive": None}
+
+        _, name, path = winner
+        import asyncio
+        contents = await asyncio.to_thread(_load_archive_contents, path, name)
+        return {"archive": contents}
+
     @api.post("/api/backtest")
     async def backtest_run(
         req: Request, _user: str = Depends(current_user),
@@ -572,6 +614,7 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
     gracefully (results show "—" instead of breaking the page).
     """
     from backtest import (_read_play_these, _read_promo_picks,
+                            _read_ev_edges,
                             _read_props_from_odds_comparison,
                             run_backtest, run_backtest_promo)
 
@@ -579,10 +622,20 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
 
     summary = _read_summary_tab(path)
     play    = _read_play_these(path, file_dt)
+    all_ev  = _read_ev_edges(path, file_dt)   # broader "All Plays" pool
     promos  = _read_promo_picks(path, file_dt)
     props   = _read_props_from_odds_comparison(path, file_dt)
 
+    # Bankrolls drive the kelly_pct back-calculation in shapers.
+    bankrolls = {
+        "DraftKings": _num(summary.get("dk_bankroll")),
+        "FanDuel":    _num(summary.get("fd_bankroll")),
+    }
+
+    # Grade everything against ESPN. all_ev is graded too so "All Plays"
+    # rows in the dashboard show their WIN/LOSS outcome.
     play   = _safe_grade(play,   run_backtest,       "play_these")
+    all_ev = _safe_grade(all_ev, run_backtest,       "all_plays")
     promos = _safe_grade(promos, run_backtest_promo, "promo_picks")
     props  = _safe_grade(props,  run_backtest,       "player_props")
 
@@ -591,18 +644,26 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         "an_only":  "_ANONLY" in name.upper(),
         "file_date": file_dt.isoformat(),
         "summary":  _shape_summary(summary),
-        "play_these":  [_shape_archive_pick(p)  for p in play],
+        "play_these":  [_shape_archive_pick(p, bankrolls)  for p in play],
+        "all_plays":   [_shape_archive_pick(p, bankrolls)  for p in all_ev],
         "promo_picks": [_shape_archive_promo(p) for p in promos],
         "player_props": [_shape_archive_prop(p) for p in props],
         "counts": {
             "play_these":   len(play),
+            "all_plays":    len(all_ev),
             "promo_picks":  len(promos),
             "player_props": len(props),
         },
         # Daily results aggregate — bankroll-independent (ROI = pnl / wagered,
         # both scale linearly with bankroll so the ratio is constant).
+        # Computed from Play These (the actionable filtered set), not
+        # all_plays — All Plays includes sub-threshold edges we wouldn't bet.
         "results": _aggregate_archive_results(play + promos + props),
     }
+
+
+def _num(v: Any) -> float | None:
+    return v if isinstance(v, (int, float)) else None
 
 
 def _safe_grade(picks: list[dict], grader, label: str) -> list[dict]:
@@ -698,17 +759,31 @@ def _round(v: Any, n: int = 2) -> Any:
     return v
 
 
-def _shape_archive_pick(p: dict[str, Any]) -> dict[str, Any]:
+def _shape_archive_pick(p: dict[str, Any],
+                          bankrolls: dict[str, float | None] | None = None
+                          ) -> dict[str, Any]:
+    """kelly_pct is computed back from bet_amount + the bankroll for the
+    pick's book (read from the Summary tab). Bet size = bankroll × Kelly%
+    by definition, so this gives the bankroll-independent stake fraction
+    that the bot used at run time."""
+    bet  = p.get("bet_amount")
+    book = p.get("book")
+    bank = (bankrolls or {}).get(book)
+    kelly_pct = None
+    if (isinstance(bet, (int, float)) and bet > 0
+            and isinstance(bank, (int, float)) and bank > 0):
+        kelly_pct = round(bet / bank * 100, 3)
     return {
         "sport":      p.get("sport"),
         "game":       p.get("game"),
         "game_time":  p.get("game_time"),
-        "book":       p.get("book"),
+        "book":       book,
         "market":     p.get("market"),
         "pick":       p.get("pick"),
         "line":       p.get("line"),
         "odds":       p.get("odds"),
         "ev_pct":     _round(p.get("ev_pct"), 2),
+        "kelly_pct":  kelly_pct,
         "confidence": p.get("confidence"),
         "result":     p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
