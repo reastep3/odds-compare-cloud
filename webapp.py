@@ -564,9 +564,16 @@ def _read_summary_tab(path: str) -> dict[str, Any]:
 
 
 def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
-    """Reuse backtest.py's existing tab readers. Returns a JSON-clean dict."""
+    """Reuse backtest.py's existing tab readers + graders.
+
+    Picks are read from the .xlsx, then graded against ESPN results so
+    the in-app view shows WIN/LOSS/PUSH/PENDING per pick and a daily ROI
+    summary. Grading is wrapped in try/except so an ESPN outage degrades
+    gracefully (results show "—" instead of breaking the page).
+    """
     from backtest import (_read_play_these, _read_promo_picks,
-                            _read_props_from_odds_comparison)
+                            _read_props_from_odds_comparison,
+                            run_backtest, run_backtest_promo)
 
     file_dt = _file_date_from_name(name) or date.today()
 
@@ -574,6 +581,10 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
     play    = _read_play_these(path, file_dt)
     promos  = _read_promo_picks(path, file_dt)
     props   = _read_props_from_odds_comparison(path, file_dt)
+
+    play   = _safe_grade(play,   run_backtest,       "play_these")
+    promos = _safe_grade(promos, run_backtest_promo, "promo_picks")
+    props  = _safe_grade(props,  run_backtest,       "player_props")
 
     return {
         "name":     name,
@@ -588,7 +599,69 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
             "promo_picks":  len(promos),
             "player_props": len(props),
         },
+        # Daily results aggregate — bankroll-independent (ROI = pnl / wagered,
+        # both scale linearly with bankroll so the ratio is constant).
+        "results": _aggregate_archive_results(play + promos + props),
     }
+
+
+def _safe_grade(picks: list[dict], grader, label: str) -> list[dict]:
+    """Try to grade; on any failure, leave picks ungraded (frontend shows '—')."""
+    if not picks:
+        return picks
+    try:
+        return grader(picks)
+    except Exception as e:
+        log.warning(f"[archive] {label} grading failed: {e}")
+        return picks
+
+
+def _aggregate_archive_results(picks: list[dict]) -> dict[str, Any]:
+    """W/L/P counts + bet-weighted ROI across all graded picks for one day."""
+    settled = [p for p in picks
+                if p.get("result") in ("WIN", "LOSS", "PUSH")]
+    wins   = sum(1 for p in settled if p["result"] == "WIN")
+    losses = sum(1 for p in settled if p["result"] == "LOSS")
+    pushes = sum(1 for p in settled if p["result"] == "PUSH")
+    pending = sum(1 for p in picks if p.get("result") == "PENDING")
+    manual  = sum(1 for p in picks
+                   if p.get("result") in ("MANUAL", "NO_RESULT"))
+    pnl = sum(p.get("pnl") or 0 for p in settled)
+    bet = sum(p.get("bet_amount") or 0 for p in settled)
+    roi = (pnl / bet * 100) if bet else 0
+    decided = wins + losses
+    win_rate = (wins / decided * 100) if decided else 0
+    return {
+        "wins":      wins,
+        "losses":    losses,
+        "pushes":    pushes,
+        "settled":   len(settled),
+        "pending":   pending,
+        "manual":    manual,
+        "roi_pct":   round(roi, 2),
+        "win_rate":  round(win_rate, 1),
+    }
+
+
+def _unit_return_pct(p: dict[str, Any]) -> float | None:
+    """Per-pick % return on the unit bet — bankroll-independent.
+
+    WIN  -> (decimal - 1) * 100   (e.g. -110 winner = +90.9%)
+    LOSS -> -100   (or 0 for free-bet promos where stake isn't at risk)
+    PUSH -> 0
+    Anything else -> None.
+    """
+    res = p.get("result")
+    if res == "WIN":
+        dec = p.get("decimal")
+        if not isinstance(dec, (int, float)) or dec <= 1:
+            return None
+        return round((dec - 1) * 100, 2)
+    if res == "LOSS":
+        return 0.0 if p.get("is_free_bet") else -100.0
+    if res == "PUSH":
+        return 0.0
+    return None
 
 
 def _shape_summary(s: dict[str, Any]) -> dict[str, Any]:
@@ -637,8 +710,8 @@ def _shape_archive_pick(p: dict[str, Any]) -> dict[str, Any]:
         "odds":       p.get("odds"),
         "ev_pct":     _round(p.get("ev_pct"), 2),
         "confidence": p.get("confidence"),
-        "bet_amount": _round(p.get("bet_amount"), 2),
-        "potential":  _round(p.get("potential"), 2),
+        "result":     p.get("result"),
+        "unit_return_pct": _unit_return_pct(p),
     }
 
 
@@ -657,6 +730,8 @@ def _shape_archive_promo(p: dict[str, Any]) -> dict[str, Any]:
         "boost_ev":        p.get("boost_ev"),
         "ev_gain":         p.get("ev_gain"),
         "promo":           p.get("promo_desc") or p.get("promo"),
+        "result":          p.get("result"),
+        "unit_return_pct": _unit_return_pct(p),
     }
 
 
@@ -671,7 +746,8 @@ def _shape_archive_prop(p: dict[str, Any]) -> dict[str, Any]:
         "odds":      p.get("odds"),
         "book":      p.get("book"),
         "ev_pct":    p.get("ev_pct"),
-        "bet_amount": p.get("bet_amount"),
+        "result":    p.get("result"),
+        "unit_return_pct": _unit_return_pct(p),
     }
 
 
