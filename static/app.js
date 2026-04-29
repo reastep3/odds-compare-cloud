@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v7 (dashboard layout: latest run on left, tools on right)";
+const BUILD = "2026-04-29 v8 (fix grader: scheduled-but-not-played games now show PENDING)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);

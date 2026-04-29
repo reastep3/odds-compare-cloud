@@ -1163,51 +1163,55 @@ def load_archive_props(start_dt: date, end_dt: date,
 
 # ── ESPN results ───────────────────────────────────────────────────────────────
 
-_espn_cache: dict[str, list[dict]] = {}
+_espn_cache:     dict[str, list[dict]] = {}   # completed games only
+_espn_all_cache: dict[str, list[dict]] = {}   # all statuses (final + scheduled + in-progress)
 _espn_session = requests.Session()
 _espn_session.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 })
 
 
-def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
+def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
     """
-    Fetch completed game results from ESPN for one sport + date (YYYYMMDD).
-    Returns list of result dicts: home/away team names, scores, winner, total.
-    Cached per (sport, date).
+    Fetch ALL games from ESPN for one sport + date (YYYYMMDD), regardless
+    of status. Each result dict includes a "completed" bool so callers can
+    distinguish between "graded a final game" vs "found a scheduled or
+    in-progress game" (used to mark picks as PENDING instead of mis-grading
+    them against an adjacent-day game).
+
+    Cached per (sport, date) under _espn_all_cache.
     """
     cache_key = f"{sport}|{date_str}"
-    if cache_key in _espn_cache:
-        return _espn_cache[cache_key]
+    if cache_key in _espn_all_cache:
+        return _espn_all_cache[cache_key]
 
     espn_path = ESPN_SPORT_MAP.get(sport)
     if not espn_path:
-        _espn_cache[cache_key] = []
+        _espn_all_cache[cache_key] = []
         return []
 
     url = f"{ESPN_BASE}/{espn_path}/scoreboard?dates={date_str}&limit=100"
     try:
         resp = _espn_session.get(url, timeout=15)
         if resp.status_code != 200:
-            _espn_cache[cache_key] = []
+            _espn_all_cache[cache_key] = []
             return []
         events = resp.json().get("events", [])
     except Exception:
-        _espn_cache[cache_key] = []
+        _espn_all_cache[cache_key] = []
         return []
 
     # ESPN status names that mean the game is fully over
     _FINAL = {"STATUS_FINAL", "STATUS_FULL_TIME", "STATUS_END_PERIOD",
               "STATUS_FORFEIT", "STATUS_ABANDONED"}
 
-    results = []
+    games = []
     for event in events:
         comp        = event.get("competitions", [{}])[0]
         status_obj  = comp.get("status", {}).get("type", {})
         status_name = status_obj.get("name", "")
-        completed   = status_obj.get("completed", False)
-        if status_name not in _FINAL and not completed:
-            continue
+        completed   = status_obj.get("completed", False) \
+                      or status_name in _FINAL
 
         teams: dict[str, dict] = {}
         for competitor in comp.get("competitors", []):
@@ -1224,7 +1228,12 @@ def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
         if "home" not in teams or "away" not in teams:
             continue
 
-        results.append({
+        winner_team = ""
+        if completed:
+            winner_team = (teams["home"]["name"] if teams["home"]["winner"]
+                           else teams["away"]["name"])
+
+        games.append({
             "home_team":  teams["home"]["name"],
             "home_abbr":  teams["home"]["abbr"],
             "home_short": teams["home"]["short"],
@@ -1233,15 +1242,32 @@ def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
             "away_abbr":  teams["away"]["abbr"],
             "away_short": teams["away"]["short"],
             "away_score": teams["away"]["score"],
-            "winner":     teams["home"]["name"] if teams["home"]["winner"]
-                          else teams["away"]["name"],
+            "winner":     winner_team,
             "total":      teams["home"]["score"] + teams["away"]["score"],
             "event_id":   event.get("id", ""),
+            "completed":  completed,
+            "status":     status_name,
         })
 
-    _espn_cache[cache_key] = results
+    _espn_all_cache[cache_key] = games
     time.sleep(0.15)
-    return results
+    return games
+
+
+def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
+    """
+    Fetch completed game results from ESPN for one sport + date (YYYYMMDD).
+    Backward-compatible wrapper that filters fetch_espn_games() to only
+    games that have actually finished. Used everywhere the caller is
+    purely interested in graded outcomes.
+    """
+    cache_key = f"{sport}|{date_str}"
+    if cache_key in _espn_cache:
+        return _espn_cache[cache_key]
+    completed_only = [g for g in fetch_espn_games(sport, date_str)
+                      if g.get("completed")]
+    _espn_cache[cache_key] = completed_only
+    return completed_only
 
 
 # ── ESPN box score (player stats for prop grading) ────────────────────────────
@@ -1578,8 +1604,21 @@ def run_backtest(picks: list[dict]) -> list[dict]:
             pick["result"] = "PENDING"
             continue
 
-        # Try exact date first, then ±1 day (handles timezone boundary games
-        # and ESPN occasionally indexing a game under the UTC date rather than ET)
+        # First check the original date including unfinished games. If the
+        # matchup IS on the schedule but hasn't completed → PENDING. This
+        # prevents the ±1 day fallback from grabbing yesterday's game when
+        # the same teams played in a series.
+        same_day_all = fetch_espn_games(sport, gd.strftime("%Y%m%d"))
+        same_day_match = _find_game_result(pick, same_day_all)
+        if same_day_match is not None and not same_day_match.get("completed"):
+            pick["result"] = "PENDING"
+            continue
+
+        # Now look for a completed game. Try exact date first, then ±1 day
+        # (handles timezone boundary games — ESPN occasionally indexes
+        # a late-night game under the UTC date rather than ET). Only the
+        # ±1 fallback runs when the exact date had NO match at all, since
+        # we already filtered out the "scheduled today" case above.
         game_result = None
         for day_offset in (0, 1, -1):
             check_dt  = (gd + timedelta(days=day_offset)).strftime("%Y%m%d")
@@ -1679,6 +1718,26 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
 
         gd = datetime.strptime(game_dt, "%Y%m%d").date()
         if gd > today:
+            pick["result"] = "PENDING"
+            continue
+
+        # PENDING-aware: if the matchup is on today's schedule but hasn't
+        # completed, mark PENDING and skip the ±1 day fallback (which
+        # would otherwise grab yesterday's same-series game).
+        gd_str = gd.strftime("%Y%m%d")
+        same_day_match = None
+        if sport != "unknown" and sport in SCOREABLE:
+            same_day_match = _find_game_result(
+                pick, fetch_espn_games(sport, gd_str))
+        else:
+            for s in _ALL_SPORTS_FALLBACK:
+                if s not in SCOREABLE:
+                    continue
+                m = _find_game_result(pick, fetch_espn_games(s, gd_str))
+                if m is not None:
+                    same_day_match = m
+                    break
+        if same_day_match is not None and not same_day_match.get("completed"):
             pick["result"] = "PENDING"
             continue
 
