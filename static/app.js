@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v5 (friendly archive names)";
+const BUILD = "2026-04-29 v6 (graded archive results + daily ROI)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -297,7 +297,7 @@ async function showArchiveDetail(name) {
   const pretty = prettyArchiveName(name);
   $("#archive-title").textContent    = pretty.primary;
   $("#archive-subtitle").innerHTML   =
-    `<span class="spinner"></span>Reading sheet…`;
+    `<span class="spinner"></span>Reading sheet + grading vs ESPN…`;
   $("#archive-summary-grid").innerHTML = "";
 
   try {
@@ -319,6 +319,7 @@ function kvCell(label, value, opts = {}) {
 
 function renderArchiveDetail(j) {
   const s = j.summary || {};
+  const r = j.results || {};
   // Subtitle = generated timestamp from the sheet (more precise than the
   // filename-derived time) plus the raw filename in muted small text.
   const ts = s.generated || j.file_date || "";
@@ -342,16 +343,34 @@ function renderArchiveDetail(j) {
     } catch (err) { alert(err.message); }
   };
 
+  // Daily results card (only show if anything actually graded)
+  let resultsHTML = "";
+  if (r && (r.settled || r.pending || r.manual)) {
+    const sgnCls   = r.roi_pct >= 0 ? "pos" : "neg";
+    const wlpLine  = `<b>${r.wins}</b> W / <b>${r.losses}</b> L / <b>${r.pushes}</b> P`;
+    const extras   = [];
+    if (r.pending) extras.push(`${r.pending} pending`);
+    if (r.manual)  extras.push(`${r.manual} unresolved`);
+    const extraStr = extras.length ? ` · ${extras.join(" · ")}` : "";
+    const roiLine  = r.settled
+      ? `ROI: <span class="${sgnCls}" style="font-size:1.3em">${fmtPct(r.roi_pct)}</span>
+         · Win rate: <b>${fmtPct(r.win_rate)}</b>`
+      : "—";
+    resultsHTML = `
+      ${kvCell("Day's record", `${wlpLine}${extraStr}`, { full: true })}
+      ${kvCell("Day's ROI", roiLine, { full: true })}`;
+  }
+
   // Summary grid
   const fmtMoneyCell = (v) =>
     typeof v === "number" ? `$${v.toFixed(2)}` : "—";
   $("#archive-summary-grid").innerHTML = [
-    kvCell("Generated", s.generated),
+    resultsHTML,
     kvCell("Total +EV edges", s.total_edges),
+    kvCell("Pinnacle anchored", s.pinnacle),
     kvCell("DK bankroll", fmtMoneyCell(s.dk_bankroll)),
     kvCell("FD bankroll", fmtMoneyCell(s.fd_bankroll)),
     kvCell("Capital deployed", fmtMoneyCell(s.total_wagered)),
-    kvCell("Pinnacle anchored", s.pinnacle),
     kvCell("Best EV", s.best_ev, { full: true }),
   ].join("");
 
@@ -390,6 +409,22 @@ function fmtBet(v) {
   return typeof v === "number" ? `$${v.toFixed(2)}` : "—";
 }
 
+function resultCell(p) {
+  const r = p.result;
+  if (!r || r === "PENDING") {
+    return `<td class="muted">${r === "PENDING" ? "Pending" : "—"}</td>`;
+  }
+  if (r === "MANUAL" || r === "NO_RESULT" || r === "UNKNOWN") {
+    return `<td class="muted">—</td>`;
+  }
+  const cls = r === "WIN" ? "pos" : r === "LOSS" ? "neg" : "";
+  const u   = p.unit_return_pct;
+  const ret = (u !== null && u !== undefined)
+    ? ` <span class="muted">${u >= 0 ? "+" : ""}${u.toFixed(1)}%</span>`
+    : "";
+  return `<td class="${cls}"><b>${r}</b>${ret}</td>`;
+}
+
 function renderPlayTheseTable(picks) {
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
@@ -401,13 +436,13 @@ function renderPlayTheseTable(picks) {
       <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td class="num">${fmtAmerican(p.odds)}</td>
       <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
-      <td class="num">${fmtBet(p.bet_amount)}</td>
+      ${resultCell(p)}
     </tr>`;
   }).join("");
   $("#archive-play-table").innerHTML = `
     <thead><tr>
       <th>Sport</th><th>Game</th><th>Book</th><th>Mkt</th>
-      <th>Pick</th><th>Odds</th><th>EV</th><th>Bet</th>
+      <th>Pick</th><th>Odds</th><th>EV</th><th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
@@ -423,13 +458,13 @@ function renderPromoTable(promos) {
       <td class="num">${fmtAmerican(p.orig_odds)}</td>
       <td class="num">${p.boost_odds_str || fmtAmerican(p.boost_odds)}</td>
       <td class="num ${boostEv > 0 ? "pos" : "neg"}">${fmtPct(boostEv, 1)}</td>
-      <td>${p.promo ?? ""}</td>
+      ${resultCell(p)}
     </tr>`;
   }).join("");
   $("#archive-promo-table").innerHTML = `
     <thead><tr>
       <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
-      <th>Odds</th><th>Boost</th><th>EV</th><th>Promo</th>
+      <th>Odds</th><th>Boost</th><th>EV</th><th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
@@ -445,13 +480,13 @@ function renderPropsTable(props) {
       <td>${(p.side || "").toUpperCase()}${p.line != null ? ` ${p.line}` : ""}</td>
       <td class="num">${fmtAmerican(p.odds)}</td>
       <td class="num ${ev > 0 ? "pos" : "neg"}">${fmtPct(ev, 1)}</td>
-      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      ${resultCell(p)}
     </tr>`;
   }).join("");
   $("#archive-props-table").innerHTML = `
     <thead><tr>
       <th>Sport</th><th>Game</th><th>Player</th><th>Mkt</th>
-      <th>Side</th><th>Odds</th><th>EV</th><th>Book</th>
+      <th>Side</th><th>Odds</th><th>EV</th><th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
