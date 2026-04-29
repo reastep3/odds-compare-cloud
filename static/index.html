@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0F172A">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Arbyx">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+  <title>Arbyx — +EV Edge Finder</title>
+</head>
+<body>
+  <header>
+    <div class="brand">⚡ Arbyx</div>
+    <button id="logout-btn" class="ghost-btn" hidden>Sign out</button>
+  </header>
+
+  <!-- Login screen -->
+  <section id="login" class="screen">
+    <div class="card">
+      <h1>Sign in</h1>
+      <p class="muted">Enter the password you set as the <code>WEBAPP_PASSWORD</code> Fly secret.</p>
+      <form id="login-form">
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" class="primary-btn">Sign in</button>
+      </form>
+      <p id="login-err" class="error" hidden></p>
+    </div>
+  </section>
+
+  <!-- App shell -->
+  <main id="app" class="screen" hidden>
+    <nav class="tabs">
+      <button data-tab="run"      class="tab active">Run</button>
+      <button data-tab="archives" class="tab">Archives</button>
+      <button data-tab="backtest" class="tab">Backtest</button>
+    </nav>
+
+    <!-- Run tab -->
+    <section data-panel="run" class="panel active">
+      <div class="card">
+        <h2>Run scan</h2>
+        <p class="muted">Pulls live odds from The Odds API (with Action Network fallback), finds +EV edges across DK and FD.</p>
+
+        <div class="grid">
+          <label>DraftKings bankroll
+            <input type="number" id="dk-br" inputmode="decimal" min="1" step="1" value="100">
+          </label>
+          <label>FanDuel bankroll
+            <input type="number" id="fd-br" inputmode="decimal" min="1" step="1" value="100">
+          </label>
+        </div>
+
+        <button id="run-btn"      class="primary-btn">▶ Run scan</button>
+        <button id="run-live-btn" class="secondary-btn">⚡ Live edges only</button>
+
+        <div id="run-status" class="status" hidden></div>
+      </div>
+
+      <div id="run-summary" class="card" hidden>
+        <h3>Summary</h3>
+        <div id="run-summary-body"></div>
+        <div id="run-anonly-banner" class="banner warn" hidden>
+          ⚠ AN-ONLY RUN — Odds API quota exhausted, fell back to Action Network. Pinnacle blending degraded; size down.
+        </div>
+      </div>
+
+      <div id="run-edges" class="card" hidden>
+        <h3>Play These</h3>
+        <div class="table-wrap"><table id="run-edges-table"></table></div>
+      </div>
+    </section>
+
+    <!-- Archives tab -->
+    <section data-panel="archives" class="panel">
+      <div class="card">
+        <h2>Archives</h2>
+        <p class="muted">Past <code>ev_edges_*.xlsx</code> reports. Newest first. Tap to download.</p>
+        <button id="archives-refresh" class="secondary-btn">↻ Refresh</button>
+        <div id="archives-list" class="list"></div>
+      </div>
+    </section>
+
+    <!-- Backtest tab -->
+    <section data-panel="backtest" class="panel">
+      <div class="card">
+        <h2>Backtest</h2>
+        <p class="muted">Grade past picks against ESPN results.</p>
+
+        <div class="grid">
+          <label>Start
+            <input type="date" id="bt-start">
+          </label>
+          <label>End
+            <input type="date" id="bt-end">
+          </label>
+        </div>
+
+        <label>AN-only sheets
+          <select id="bt-anonly">
+            <option value="exclude" selected>Exclude (default)</option>
+            <option value="include">Include</option>
+            <option value="only">Only AN-only</option>
+          </select>
+        </label>
+
+        <div class="quick-row">
+          <button class="ghost-btn" data-bt-preset="1">Last day</button>
+          <button class="ghost-btn" data-bt-preset="7">Last week</button>
+          <button class="ghost-btn" data-bt-preset="30">Last month</button>
+        </div>
+
+        <button id="bt-run-btn" class="primary-btn">▶ Run backtest</button>
+        <div id="bt-status" class="status" hidden></div>
+      </div>
+
+      <div id="bt-result" class="card" hidden>
+        <h3>Results</h3>
+        <div id="bt-summary"></div>
+        <div class="table-wrap"><table id="bt-table"></table></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
