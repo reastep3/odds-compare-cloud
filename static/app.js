@@ -89,7 +89,12 @@ $$(".tab").forEach((b) => {
     $$(".panel").forEach((p) => {
       p.classList.toggle("active", p.dataset.panel === b.dataset.tab);
     });
-    if (b.dataset.tab === "archives") loadArchives();
+    if (b.dataset.tab === "archives") {
+      // Always reset to list view on tab entry — feels more predictable
+      // than landing back on a stale detail view.
+      archiveListView(true);
+      loadArchives();
+    }
   });
 });
 
@@ -219,35 +224,20 @@ async function loadArchives() {
       const date = new Date(a.mtime * 1000).toLocaleString();
       const kb   = (a.size / 1024).toFixed(1);
       const cls  = a.an_only ? " an-only" : "";
-      return `<a class="row${cls}" href="/api/archives/${
-        encodeURIComponent(a.name)}?token=${encodeURIComponent(token())}"
-        download="${a.name}" data-name="${a.name}">
+      return `<a class="row${cls}" href="#" data-name="${a.name}">
         <div>
           <div>${a.name}</div>
           <div class="meta">${date} · ${kb} KB${
             a.an_only ? ` · <span class="tag">AN-only</span>` : ""}</div>
         </div>
-        <div>↓</div>
+        <div>›</div>
       </a>`;
     }).join("");
 
-    // FileResponse needs the Authorization header — we can't put a Bearer
-    // in an <a href>. Intercept the click and stream as a Blob.
     wrap.querySelectorAll(".row").forEach((a) => {
-      a.addEventListener("click", async (e) => {
+      a.addEventListener("click", (e) => {
         e.preventDefault();
-        const name = a.dataset.name;
-        try {
-          const res = await api(`/api/archives/${encodeURIComponent(name)}`);
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          const tmp = document.createElement("a");
-          tmp.href = url; tmp.download = name;
-          document.body.appendChild(tmp); tmp.click(); tmp.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 30000);
-        } catch (err) {
-          alert(err.message);
-        }
+        showArchiveDetail(a.dataset.name);
       });
     });
   } catch (e) {
@@ -256,6 +246,179 @@ async function loadArchives() {
 }
 
 $("#archives-refresh").addEventListener("click", loadArchives);
+
+// ── Archive detail view ──────────────────────────────────────────────
+
+function archiveListView(showList) {
+  $("#archives-list-view").hidden   = !showList;
+  $("#archives-detail-view").hidden = showList;
+  if (showList) window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("#archive-back").addEventListener("click", () => archiveListView(true));
+
+async function showArchiveDetail(name) {
+  archiveListView(false);
+  // Reset visibility
+  ["#archive-play-section", "#archive-promo-section",
+   "#archive-props-section", "#archive-empty-state",
+   "#archive-anonly-banner"].forEach((s) => $(s).hidden = true);
+  $("#archive-title").textContent = name;
+  $("#archive-subtitle").innerHTML =
+    `<span class="spinner"></span>Reading sheet…`;
+  $("#archive-summary-grid").innerHTML = "";
+
+  try {
+    const j = await apiJSON(`/api/archives/${encodeURIComponent(name)}/contents`);
+    renderArchiveDetail(j);
+  } catch (e) {
+    $("#archive-subtitle").innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+function kvCell(label, value, opts = {}) {
+  if (value === null || value === undefined || value === "") return "";
+  const cls = opts.full ? "kv full" : "kv";
+  return `<div class="${cls}">
+    <span class="label">${label}</span>
+    <span class="value">${value}</span>
+  </div>`;
+}
+
+function renderArchiveDetail(j) {
+  const s = j.summary || {};
+  $("#archive-subtitle").textContent = s.generated || j.file_date || "";
+  $("#archive-anonly-banner").hidden = !j.an_only;
+
+  // Wire up download as the secondary option
+  const dl = $("#archive-download-link");
+  dl.href = `/api/archives/${encodeURIComponent(j.name)}`;
+  dl.onclick = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await api(`/api/archives/${encodeURIComponent(j.name)}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const tmp = document.createElement("a");
+      tmp.href = url; tmp.download = j.name;
+      document.body.appendChild(tmp); tmp.click(); tmp.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (err) { alert(err.message); }
+  };
+
+  // Summary grid
+  const fmtMoneyCell = (v) =>
+    typeof v === "number" ? `$${v.toFixed(2)}` : "—";
+  $("#archive-summary-grid").innerHTML = [
+    kvCell("Generated", s.generated),
+    kvCell("Total +EV edges", s.total_edges),
+    kvCell("DK bankroll", fmtMoneyCell(s.dk_bankroll)),
+    kvCell("FD bankroll", fmtMoneyCell(s.fd_bankroll)),
+    kvCell("Capital deployed", fmtMoneyCell(s.total_wagered)),
+    kvCell("Pinnacle anchored", s.pinnacle),
+    kvCell("Best EV", s.best_ev, { full: true }),
+  ].join("");
+
+  // Counts in section headers
+  const counts = j.counts || {};
+  $("#archive-play-count").textContent  = `(${counts.play_these || 0})`;
+  $("#archive-promo-count").textContent = `(${counts.promo_picks || 0})`;
+  $("#archive-props-count").textContent = `(${counts.player_props || 0})`;
+
+  // Tables
+  if ((j.play_these || []).length) {
+    $("#archive-play-section").hidden = false;
+    renderPlayTheseTable(j.play_these);
+  }
+  if ((j.promo_picks || []).length) {
+    $("#archive-promo-section").hidden = false;
+    renderPromoTable(j.promo_picks);
+  }
+  if ((j.player_props || []).length) {
+    $("#archive-props-section").hidden = false;
+    renderPropsTable(j.player_props);
+  }
+  if (!(j.play_these || []).length && !(j.promo_picks || []).length
+      && !(j.player_props || []).length) {
+    $("#archive-empty-state").hidden = false;
+  }
+}
+
+function bookCls(book) {
+  if (book === "DraftKings") return "book-DK";
+  if (book === "FanDuel")    return "book-FD";
+  return "";
+}
+
+function fmtBet(v) {
+  return typeof v === "number" ? `$${v.toFixed(2)}` : "—";
+}
+
+function renderPlayTheseTable(picks) {
+  const rows = picks.map((p) => {
+    const ev = Number(p.ev_pct ?? 0);
+    return `<tr>
+      <td>${(p.sport || "").toUpperCase()}</td>
+      <td>${p.game ?? ""}</td>
+      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td>${p.market ?? ""}</td>
+      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td class="num">${fmtAmerican(p.odds)}</td>
+      <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      <td class="num">${fmtBet(p.bet_amount)}</td>
+    </tr>`;
+  }).join("");
+  $("#archive-play-table").innerHTML = `
+    <thead><tr>
+      <th>Sport</th><th>Game</th><th>Book</th><th>Mkt</th>
+      <th>Pick</th><th>Odds</th><th>EV</th><th>Bet</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+}
+
+function renderPromoTable(promos) {
+  const rows = promos.map((p) => {
+    const boostEv = Number(p.boost_ev ?? p.orig_ev ?? 0);
+    return `<tr>
+      <td>${(p.sport || "").toUpperCase()}</td>
+      <td>${p.game ?? ""}</td>
+      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td class="num">${fmtAmerican(p.orig_odds)}</td>
+      <td class="num">${p.boost_odds_str || fmtAmerican(p.boost_odds)}</td>
+      <td class="num ${boostEv > 0 ? "pos" : "neg"}">${fmtPct(boostEv, 1)}</td>
+      <td>${p.promo ?? ""}</td>
+    </tr>`;
+  }).join("");
+  $("#archive-promo-table").innerHTML = `
+    <thead><tr>
+      <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
+      <th>Odds</th><th>Boost</th><th>EV</th><th>Promo</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+}
+
+function renderPropsTable(props) {
+  const rows = props.map((p) => {
+    const ev = Number(p.ev_pct ?? 0);
+    return `<tr>
+      <td>${(p.sport || "").toUpperCase()}</td>
+      <td>${p.game ?? ""}</td>
+      <td>${p.player ?? ""}</td>
+      <td>${(p.market || "").toUpperCase()}</td>
+      <td>${(p.side || "").toUpperCase()}${p.line != null ? ` ${p.line}` : ""}</td>
+      <td class="num">${fmtAmerican(p.odds)}</td>
+      <td class="num ${ev > 0 ? "pos" : "neg"}">${fmtPct(ev, 1)}</td>
+      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
+    </tr>`;
+  }).join("");
+  $("#archive-props-table").innerHTML = `
+    <thead><tr>
+      <th>Sport</th><th>Game</th><th>Player</th><th>Mkt</th>
+      <th>Side</th><th>Odds</th><th>EV</th><th>Book</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+}
 
 // ── Backtest ─────────────────────────────────────────────────────────
 
