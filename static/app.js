@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v4 (cache-bust escape hatch)";
+const BUILD = "2026-04-29 v5 (friendly archive names)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -116,6 +116,33 @@ function fmtPct(x, digits = 1) {
   if (x === null || x === undefined || Number.isNaN(x)) return "—";
   return `${Number(x).toFixed(digits)}%`;
 }
+
+// Parse "ev_edges_YYYYMMDD_HHMM[_ANONLY].xlsx" into a friendly display.
+// Returns { primary, secondary, isAnOnly } — falls back to the raw name
+// if the pattern doesn't match.
+function prettyArchiveName(filename, mtimeSec) {
+  const m = filename.match(
+    /^ev_edges_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(?:_ANONLY)?\.xlsx$/i);
+  if (!m) {
+    return { primary: filename, secondary: "", isAnOnly: false };
+  }
+  const [, y, mo, d, hh, mm] = m;
+  // Use the parsed time-in-filename (UTC-naive — it's local time from
+  // the machine that generated it). Build a JS Date for formatting.
+  const dt = new Date(+y, +mo - 1, +d, +hh, +mm);
+  const sameYear = dt.getFullYear() === new Date().getFullYear();
+  const dateOpts = sameYear
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" };
+  const timeOpts = { hour: "numeric", minute: "2-digit" };
+  const datePart = dt.toLocaleDateString(undefined, dateOpts);
+  const timePart = dt.toLocaleTimeString(undefined, timeOpts);
+  return {
+    primary:   `${datePart} · ${timePart}`,
+    secondary: filename,    // raw name preserved as caption
+    isAnOnly:  /_ANONLY/i.test(filename),
+  };
+}
 function fmtMoney(x) {
   if (x === null || x === undefined || Number.isNaN(x)) return "—";
   const sgn = x >= 0 ? "+" : "−";
@@ -225,14 +252,14 @@ async function loadArchives() {
       return;
     }
     wrap.innerHTML = j.archives.map((a) => {
-      const date = new Date(a.mtime * 1000).toLocaleString();
-      const kb   = (a.size / 1024).toFixed(1);
-      const cls  = a.an_only ? " an-only" : "";
+      const pretty = prettyArchiveName(a.name, a.mtime);
+      const kb     = (a.size / 1024).toFixed(1);
+      const cls    = a.an_only ? " an-only" : "";
       return `<a class="row${cls}" href="#" data-name="${a.name}">
         <div>
-          <div>${a.name}</div>
-          <div class="meta">${date} · ${kb} KB${
-            a.an_only ? ` · <span class="tag">AN-only</span>` : ""}</div>
+          <div class="row-title">${pretty.primary}</div>
+          <div class="meta">${kb} KB${
+            a.an_only ? ` · <span class="tag">AN-only fallback</span>` : ""}</div>
         </div>
         <div>›</div>
       </a>`;
@@ -267,8 +294,9 @@ async function showArchiveDetail(name) {
   ["#archive-play-section", "#archive-promo-section",
    "#archive-props-section", "#archive-empty-state",
    "#archive-anonly-banner"].forEach((s) => $(s).hidden = true);
-  $("#archive-title").textContent = name;
-  $("#archive-subtitle").innerHTML =
+  const pretty = prettyArchiveName(name);
+  $("#archive-title").textContent    = pretty.primary;
+  $("#archive-subtitle").innerHTML   =
     `<span class="spinner"></span>Reading sheet…`;
   $("#archive-summary-grid").innerHTML = "";
 
@@ -291,7 +319,11 @@ function kvCell(label, value, opts = {}) {
 
 function renderArchiveDetail(j) {
   const s = j.summary || {};
-  $("#archive-subtitle").textContent = s.generated || j.file_date || "";
+  // Subtitle = generated timestamp from the sheet (more precise than the
+  // filename-derived time) plus the raw filename in muted small text.
+  const ts = s.generated || j.file_date || "";
+  $("#archive-subtitle").innerHTML =
+    `${ts}<br><span style="font-size:11px;opacity:0.5">${j.name}</span>`;
   $("#archive-anonly-banner").hidden = !j.an_only;
 
   // Wire up download as the secondary option

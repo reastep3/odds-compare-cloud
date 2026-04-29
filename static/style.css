@@ -185,6 +185,7 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
   text-decoration: none; color: var(--text);
   font-size: 14px;
 }
+.list .row .row-title { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
 .list .row .meta { color: var(--muted); font-size: 12px; }
 .list .row.an-only { border-color: var(--warn-bg); }
 .list .row.an-only .tag { color: var(--warn-bg); font-weight: 600; }
