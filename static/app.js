@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v8 (fix grader: scheduled-but-not-played games now show PENDING)";
+const BUILD = "2026-04-29 v9 (Not Started vs Live + Kelly selector)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -105,6 +105,20 @@ $$(".tab").forEach((b) => {
 
 // ── Dashboard (left pane: most recent run) ───────────────────────────
 
+// Cache so the Kelly selector can re-render the tables without a roundtrip.
+let _dashCache = null;
+
+// User's Kelly fraction. Persisted in localStorage. Default = 0.5
+// (matches odds_compare's KELLY_FRACTION).
+const KELLY_KEY = "arbyx_kelly_fraction";
+function getKelly() {
+  const v = parseFloat(localStorage.getItem(KELLY_KEY));
+  return (Number.isFinite(v) && v > 0 && v <= 1) ? v : 0.5;
+}
+function setKelly(v) {
+  localStorage.setItem(KELLY_KEY, String(v));
+}
+
 async function loadDashboard() {
   const meta = $("#dashboard-meta");
   meta.innerHTML = `<span class="spinner"></span>Loading latest run + grading…`;
@@ -113,6 +127,7 @@ async function loadDashboard() {
   $("#dashboard-summary").innerHTML = "";
   $("#dashboard-play-section").hidden = true;
   $("#dashboard-all-section").hidden = true;
+  $("#kelly-bar").hidden = true;
 
   try {
     const j = await apiJSON("/api/latest");
@@ -121,7 +136,8 @@ async function loadDashboard() {
       $("#dashboard-empty").hidden = false;
       return;
     }
-    renderDashboard(j.archive);
+    _dashCache = j.archive;
+    renderDashboard(_dashCache);
   } catch (e) {
     meta.innerHTML = `<span class="error">${e.message}</span>`;
   }
@@ -145,13 +161,14 @@ function renderDashboard(arc) {
     const sgnCls  = r.roi_pct >= 0 ? "pos" : "neg";
     const wlpLine = `<b>${r.wins}</b> W / <b>${r.losses}</b> L / <b>${r.pushes}</b> P`;
     const extras  = [];
-    if (r.pending) extras.push(`${r.pending} pending`);
-    if (r.manual)  extras.push(`${r.manual} unresolved`);
+    if (r.in_progress) extras.push(`${r.in_progress} live`);
+    if (r.not_started) extras.push(`${r.not_started} not started`);
+    if (r.manual)      extras.push(`${r.manual} unresolved`);
     const extraStr = extras.length ? ` · ${extras.join(" · ")}` : "";
     const roiLine  = r.settled
       ? `ROI: <span class="${sgnCls}" style="font-size:1.3em">${fmtPct(r.roi_pct)}</span>
          · Win rate: <b>${fmtPct(r.win_rate)}</b>`
-      : "—";
+      : "<span class='muted'>No graded picks yet</span>";
     resultsHTML = `
       ${kvCell("Day's record", `${wlpLine}${extraStr}`, { full: true })}
       ${kvCell("Day's ROI", roiLine, { full: true })}`;
@@ -164,12 +181,17 @@ function renderDashboard(arc) {
     kvCell("Best EV", s.best_ev, { full: true }),
   ].join("");
 
+  // Show the Kelly selector now that we have data
+  const kelly = getKelly();
+  $("#kelly-bar").hidden = false;
+  syncKellyControls(kelly);
+
   // Play These (filtered actionable picks)
   const play = arc.play_these || [];
   $("#dashboard-play-count").textContent = `(${play.length})`;
   if (play.length) {
     $("#dashboard-play-section").hidden = false;
-    $("#dashboard-play-table").innerHTML = renderDashboardTable(play);
+    $("#dashboard-play-table").innerHTML = renderDashboardTable(play, kelly);
   }
 
   // All Plays (every +EV edge — broader pool)
@@ -177,23 +199,53 @@ function renderDashboard(arc) {
   $("#dashboard-all-count").textContent = `(${all.length})`;
   if (all.length) {
     $("#dashboard-all-section").hidden = false;
-    $("#dashboard-all-table").innerHTML = renderDashboardTable(all);
+    $("#dashboard-all-table").innerHTML = renderDashboardTable(all, kelly);
   }
 }
 
-// Compact table optimized for the left pane on narrow screens.
-// Columns: Sport · Game · Book · Pick · Odds · Bankroll % · EV % · Result
-function renderDashboardTable(picks) {
+// Recompute BR% column for both tables when the Kelly fraction changes.
+// Doesn't refetch — operates on the cached _dashCache.
+function applyKellyChange() {
+  if (!_dashCache) return;
+  const kelly = getKelly();
+  syncKellyControls(kelly);
+  const play = _dashCache.play_these || [];
+  const all  = _dashCache.all_plays  || [];
+  if (play.length) {
+    $("#dashboard-play-table").innerHTML = renderDashboardTable(play, kelly);
+  }
+  if (all.length) {
+    $("#dashboard-all-table").innerHTML = renderDashboardTable(all, kelly);
+  }
+}
+
+function syncKellyControls(kelly) {
+  $("#kelly-slider").value = Math.round(kelly * 100);
+  $("#kelly-value").textContent = `${kelly.toFixed(2)}×`;
+  document.querySelectorAll(".kelly-presets button").forEach((b) => {
+    b.classList.toggle("active",
+      Math.round(kelly * 100) === parseInt(b.dataset.kelly, 10));
+  });
+}
+
+// Compact table for the left pane.
+// BR % = full_kelly_pct × user-selected fraction. If full_kelly_pct is
+// missing (older archives without bankroll info), fall back to the stored
+// kelly_pct unscaled.
+function renderDashboardTable(picks, userKellyFraction) {
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
+    const br = (p.full_kelly_pct != null)
+      ? p.full_kelly_pct * userKellyFraction
+      : p.kelly_pct;
+    const brStr = (br != null) ? `${br.toFixed(2)}%` : "—";
     return `<tr>
       <td>${(p.sport || "").toUpperCase()}</td>
       <td>${p.game ?? ""}</td>
       <td class="${bookCls(p.book)}">${shortBook(p.book)}</td>
       <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num">${p.kelly_pct != null
-        ? `${p.kelly_pct.toFixed(2)}%` : "—"}</td>
+      <td class="num">${brStr}</td>
       <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${resultCell(p)}
     </tr>`;
@@ -203,6 +255,23 @@ function renderDashboardTable(picks) {
     <th>Odds</th><th>BR %</th><th>EV</th><th>Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
+
+// Wire the Kelly slider + presets
+const _kSlider = document.querySelector("#kelly-slider");
+if (_kSlider) {
+  _kSlider.addEventListener("input", () => {
+    const k = parseInt(_kSlider.value, 10) / 100;
+    setKelly(k);
+    applyKellyChange();
+  });
+}
+document.querySelectorAll(".kelly-presets button").forEach((b) => {
+  b.addEventListener("click", () => {
+    const k = parseInt(b.dataset.kelly, 10) / 100;
+    setKelly(k);
+    applyKellyChange();
+  });
+});
 
 function shortBook(book) {
   if (book === "DraftKings") return "DK";
@@ -527,8 +596,13 @@ function fmtBet(v) {
 
 function resultCell(p) {
   const r = p.result;
-  if (!r || r === "PENDING") {
-    return `<td class="muted">${r === "PENDING" ? "Pending" : "—"}</td>`;
+  if (!r) return `<td class="muted">—</td>`;
+  if (r === "NOT_STARTED") {
+    return `<td class="muted">📅 Not started</td>`;
+  }
+  if (r === "IN_PROGRESS" || r === "PENDING") {
+    // PENDING is legacy (pre-status-split archives). Treat as live too.
+    return `<td class="live"><span class="live-dot"></span>Live</td>`;
   }
   if (r === "MANUAL" || r === "NO_RESULT" || r === "UNKNOWN") {
     return `<td class="muted">—</td>`;

@@ -1601,17 +1601,24 @@ def run_backtest(picks: list[dict]) -> list[dict]:
 
         gd = datetime.strptime(game_dt, "%Y%m%d").date()
         if gd > today:
-            pick["result"] = "PENDING"
+            # Future game — no scoreboard query needed, definitely not started.
+            pick["result"] = "NOT_STARTED"
             continue
 
         # First check the original date including unfinished games. If the
-        # matchup IS on the schedule but hasn't completed → PENDING. This
-        # prevents the ±1 day fallback from grabbing yesterday's game when
-        # the same teams played in a series.
+        # matchup IS on the schedule but hasn't completed, distinguish:
+        #   • STATUS_SCHEDULED / *PRE_GAME* / *DELAYED* → NOT_STARTED
+        #   • Anything else (in-progress, halftime, etc.) → IN_PROGRESS
+        # Either way, skip the ±1 day fallback so we don't grade against
+        # yesterday's same-series game.
         same_day_all = fetch_espn_games(sport, gd.strftime("%Y%m%d"))
         same_day_match = _find_game_result(pick, same_day_all)
         if same_day_match is not None and not same_day_match.get("completed"):
-            pick["result"] = "PENDING"
+            status = (same_day_match.get("status") or "").upper()
+            if "SCHED" in status or "PRE" in status or "DELAY" in status:
+                pick["result"] = "NOT_STARTED"
+            else:
+                pick["result"] = "IN_PROGRESS"
             continue
 
         # Now look for a completed game. Try exact date first, then ±1 day
@@ -1718,12 +1725,12 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
 
         gd = datetime.strptime(game_dt, "%Y%m%d").date()
         if gd > today:
-            pick["result"] = "PENDING"
+            pick["result"] = "NOT_STARTED"
             continue
 
         # PENDING-aware: if the matchup is on today's schedule but hasn't
-        # completed, mark PENDING and skip the ±1 day fallback (which
-        # would otherwise grab yesterday's same-series game).
+        # completed, classify NOT_STARTED vs IN_PROGRESS and skip the
+        # ±1 day fallback (which would grab yesterday's same-series game).
         gd_str = gd.strftime("%Y%m%d")
         same_day_match = None
         if sport != "unknown" and sport in SCOREABLE:
@@ -1738,7 +1745,11 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
                     same_day_match = m
                     break
         if same_day_match is not None and not same_day_match.get("completed"):
-            pick["result"] = "PENDING"
+            status = (same_day_match.get("status") or "").upper()
+            if "SCHED" in status or "PRE" in status or "DELAY" in status:
+                pick["result"] = "NOT_STARTED"
+            else:
+                pick["result"] = "IN_PROGRESS"
             continue
 
         # Find matching ESPN game result

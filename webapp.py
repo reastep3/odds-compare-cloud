@@ -631,6 +631,15 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         "DraftKings": _num(summary.get("dk_bankroll")),
         "FanDuel":    _num(summary.get("fd_bankroll")),
     }
+    # The Kelly fraction the bot used when sizing the archived bets.
+    # Default 0.5 (half-Kelly). Reading from odds_compare keeps us in sync
+    # if the constant ever changes — divide stored kelly_pct by this to
+    # recover the unscaled "full Kelly" used by the math.
+    try:
+        from odds_compare import KELLY_FRACTION as _kf
+        kelly_fraction_runtime = float(_kf)
+    except Exception:
+        kelly_fraction_runtime = 0.5
 
     # Grade everything against ESPN. all_ev is graded too so "All Plays"
     # rows in the dashboard show their WIN/LOSS outcome.
@@ -643,9 +652,12 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         "name":     name,
         "an_only":  "_ANONLY" in name.upper(),
         "file_date": file_dt.isoformat(),
+        "kelly_fraction_runtime": kelly_fraction_runtime,
         "summary":  _shape_summary(summary),
-        "play_these":  [_shape_archive_pick(p, bankrolls)  for p in play],
-        "all_plays":   [_shape_archive_pick(p, bankrolls)  for p in all_ev],
+        "play_these":  [_shape_archive_pick(p, bankrolls,
+                                              kelly_fraction_runtime) for p in play],
+        "all_plays":   [_shape_archive_pick(p, bankrolls,
+                                              kelly_fraction_runtime) for p in all_ev],
         "promo_picks": [_shape_archive_promo(p) for p in promos],
         "player_props": [_shape_archive_prop(p) for p in props],
         "counts": {
@@ -677,6 +689,9 @@ def _safe_grade(picks: list[dict], grader, label: str) -> list[dict]:
         return picks
 
 
+_PENDING_STATUSES = {"PENDING", "NOT_STARTED", "IN_PROGRESS"}
+
+
 def _aggregate_archive_results(picks: list[dict]) -> dict[str, Any]:
     """W/L/P counts + bet-weighted ROI across all graded picks for one day."""
     settled = [p for p in picks
@@ -684,7 +699,9 @@ def _aggregate_archive_results(picks: list[dict]) -> dict[str, Any]:
     wins   = sum(1 for p in settled if p["result"] == "WIN")
     losses = sum(1 for p in settled if p["result"] == "LOSS")
     pushes = sum(1 for p in settled if p["result"] == "PUSH")
-    pending = sum(1 for p in picks if p.get("result") == "PENDING")
+    not_started = sum(1 for p in picks if p.get("result") == "NOT_STARTED")
+    in_progress = sum(1 for p in picks if p.get("result") == "IN_PROGRESS")
+    legacy_pend = sum(1 for p in picks if p.get("result") == "PENDING")
     manual  = sum(1 for p in picks
                    if p.get("result") in ("MANUAL", "NO_RESULT"))
     pnl = sum(p.get("pnl") or 0 for p in settled)
@@ -693,14 +710,17 @@ def _aggregate_archive_results(picks: list[dict]) -> dict[str, Any]:
     decided = wins + losses
     win_rate = (wins / decided * 100) if decided else 0
     return {
-        "wins":      wins,
-        "losses":    losses,
-        "pushes":    pushes,
-        "settled":   len(settled),
-        "pending":   pending,
-        "manual":    manual,
-        "roi_pct":   round(roi, 2),
-        "win_rate":  round(win_rate, 1),
+        "wins":        wins,
+        "losses":      losses,
+        "pushes":      pushes,
+        "settled":     len(settled),
+        # Backward-compat field summing all unfinished states
+        "pending":     not_started + in_progress + legacy_pend,
+        "not_started": not_started,
+        "in_progress": in_progress,
+        "manual":      manual,
+        "roi_pct":     round(roi, 2),
+        "win_rate":    round(win_rate, 1),
     }
 
 
@@ -760,19 +780,30 @@ def _round(v: Any, n: int = 2) -> Any:
 
 
 def _shape_archive_pick(p: dict[str, Any],
-                          bankrolls: dict[str, float | None] | None = None
+                          bankrolls: dict[str, float | None] | None = None,
+                          kelly_fraction_runtime: float = 0.5,
                           ) -> dict[str, Any]:
-    """kelly_pct is computed back from bet_amount + the bankroll for the
-    pick's book (read from the Summary tab). Bet size = bankroll × Kelly%
-    by definition, so this gives the bankroll-independent stake fraction
-    that the bot used at run time."""
+    """Per-pick shape with bankroll-independent stake info.
+
+    kelly_pct      — what the bot ACTUALLY staked at run time (= full Kelly
+                     × the runtime fraction, default 0.5). This is the
+                     ratio of bet_amount to bankroll, recovered from the
+                     Summary tab's bankroll field.
+    full_kelly_pct — the unscaled Kelly Criterion fraction (= kelly_pct /
+                     runtime fraction). Frontend multiplies this by the
+                     user's chosen Kelly fraction to recompute BR % live
+                     without re-fetching.
+    """
     bet  = p.get("bet_amount")
     book = p.get("book")
     bank = (bankrolls or {}).get(book)
-    kelly_pct = None
+    kelly_pct      = None
+    full_kelly_pct = None
     if (isinstance(bet, (int, float)) and bet > 0
             and isinstance(bank, (int, float)) and bank > 0):
         kelly_pct = round(bet / bank * 100, 3)
+        if kelly_fraction_runtime > 0:
+            full_kelly_pct = round(kelly_pct / kelly_fraction_runtime, 3)
     return {
         "sport":      p.get("sport"),
         "game":       p.get("game"),
@@ -783,7 +814,8 @@ def _shape_archive_pick(p: dict[str, Any],
         "line":       p.get("line"),
         "odds":       p.get("odds"),
         "ev_pct":     _round(p.get("ev_pct"), 2),
-        "kelly_pct":  kelly_pct,
+        "kelly_pct":      kelly_pct,
+        "full_kelly_pct": full_kelly_pct,
         "confidence": p.get("confidence"),
         "result":     p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
