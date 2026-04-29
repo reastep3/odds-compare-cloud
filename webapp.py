@@ -353,6 +353,69 @@ def build_app() -> FastAPI:
                                  media_type="application/javascript",
                                  headers=_NO_CACHE)
 
+        # Escape hatch: nuke any stuck PWA state. Visit this URL once if
+        # the app is showing stale UI after a deploy. Unregisters every
+        # service worker, deletes every cache, then redirects to /.
+        @api.get("/reset")
+        async def reset_pwa() -> Any:
+            from fastapi.responses import HTMLResponse
+            html = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>Arbyx — Reset</title>
+<style>
+body { background:#0F172A; color:#F1F5F9;
+       font-family:-apple-system,sans-serif;
+       padding:40px 20px; text-align:center; }
+.spin { display:inline-block; width:20px; height:20px;
+        border:3px solid #334155; border-top-color:#38BDF8;
+        border-radius:50%; animation:s 0.7s linear infinite; }
+@keyframes s { to { transform: rotate(360deg); } }
+ul { text-align:left; max-width:400px; margin:20px auto; font-size:13px;
+     color:#94A3B8; }
+li { margin:4px 0; }
+</style></head>
+<body>
+  <h2>Resetting Arbyx</h2>
+  <p><span class="spin"></span></p>
+  <ul id="log"></ul>
+  <p id="done" style="display:none">All clear. Redirecting…</p>
+  <script>
+  const log = document.getElementById("log");
+  const add = (m) => { const li = document.createElement("li");
+    li.textContent = m; log.appendChild(li); };
+  (async () => {
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) {
+          await r.unregister();
+          add("Unregistered SW: " + (r.scope || ""));
+        }
+        if (regs.length === 0) add("No service workers found.");
+      }
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        for (const k of keys) {
+          await caches.delete(k);
+          add("Deleted cache: " + k);
+        }
+        if (keys.length === 0) add("No caches found.");
+      }
+      try { localStorage.clear(); add("Cleared localStorage."); }
+      catch (_) {}
+    } catch (e) { add("Error: " + e.message); }
+    document.getElementById("done").style.display = "block";
+    setTimeout(() => {
+      // Cache-bust the redirect target so even the URL bar doesn't
+      // pull a cached HTML response.
+      window.location.replace("/?reset=" + Date.now());
+    }, 1500);
+  })();
+  </script>
+</body></html>"""
+            return HTMLResponse(content=html, headers=_NO_CACHE)
+
     return api
 
 
