@@ -131,6 +131,21 @@ def build_app() -> FastAPI:
     api = FastAPI(title="Odds Compare PWA",
                    docs_url=None, redoc_url=None)
 
+    # Cache-busting for the PWA shell — applies to /static/* (StaticFiles
+    # mount) plus any other text/JS responses we might add later. API
+    # responses are unaffected (they're already volatile by nature).
+    @api.middleware("http")
+    async def no_cache_for_shell(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if (path == "/" or path.startswith("/static/")
+                or path in ("/sw.js", "/manifest.json")):
+            response.headers["Cache-Control"] = (
+                "no-store, no-cache, must-revalidate, max-age=0")
+            response.headers["Pragma"]  = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     # ── Public ────────────────────────────────────────────────────────
 
     @api.get("/api/health")
@@ -306,6 +321,17 @@ def build_app() -> FastAPI:
 
     # ── Static + PWA wiring ───────────────────────────────────────────
 
+    # Headers that tell every layer (browser, any CDN/proxy, the SW
+    # itself) to never serve a stale copy of the app shell. The PWA's
+    # own SW is a no-op pass-through, but these belt-and-suspenders
+    # headers protect against ALL caching layers — important for
+    # rapid iteration during development.
+    _NO_CACHE = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma":        "no-cache",
+        "Expires":       "0",
+    }
+
     if _STATIC_DIR.is_dir():
         api.mount("/static",
                    StaticFiles(directory=str(_STATIC_DIR)),
@@ -313,16 +339,19 @@ def build_app() -> FastAPI:
 
         @api.get("/")
         async def root() -> FileResponse:
-            return FileResponse(str(_STATIC_DIR / "index.html"))
+            return FileResponse(str(_STATIC_DIR / "index.html"),
+                                headers=_NO_CACHE)
 
         @api.get("/manifest.json")
         async def manifest() -> FileResponse:
-            return FileResponse(str(_STATIC_DIR / "manifest.json"))
+            return FileResponse(str(_STATIC_DIR / "manifest.json"),
+                                headers=_NO_CACHE)
 
         @api.get("/sw.js")
         async def service_worker() -> FileResponse:
             return FileResponse(str(_STATIC_DIR / "sw.js"),
-                                 media_type="application/javascript")
+                                 media_type="application/javascript",
+                                 headers=_NO_CACHE)
 
     return api
 
