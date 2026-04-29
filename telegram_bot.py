@@ -2602,8 +2602,59 @@ def main():
                     "Install with: pip install 'python-telegram-bot[job-queue]'")
 
     log.info("Bot starting — listening for commands...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return app
+
+
+async def amain():
+    """Async entry point: runs the Telegram bot AND the FastAPI webapp
+    in the same asyncio loop so they share the process (one Fly machine,
+    one container). Long-polling stays primary; the HTTP server runs as
+    a concurrent task and shuts down on the same SIGTERM.
+    """
+    import asyncio
+    import uvicorn
+
+    tg_app = main()  # builds the Application but no longer blocks
+
+    # Initialize and start Telegram polling as background tasks.
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Bring up the FastAPI server in the same loop. Port 8080 is what
+    # fly.toml forwards 80/443 to.
+    try:
+        from webapp import api as webapp_api
+        config = uvicorn.Config(
+            webapp_api, host="0.0.0.0", port=8080,
+            log_level="info", access_log=False,
+        )
+        server = uvicorn.Server(config)
+        log.info("Web app starting on :8080")
+        try:
+            await server.serve()
+        finally:
+            log.info("Web app stopped — shutting down Telegram polling")
+    except Exception as e:
+        log.error(f"Web app crashed: {e}. Bot will keep polling.")
+        # If the webapp fails for any reason, keep the bot alive — falling
+        # back to a never-ending await keeps long-polling working.
+        await asyncio.Event().wait()
+    finally:
+        try:
+            await tg_app.updater.stop()
+        except Exception:
+            pass
+        try:
+            await tg_app.stop()
+        except Exception:
+            pass
+        try:
+            await tg_app.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(amain())

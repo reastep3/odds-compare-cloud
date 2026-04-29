@@ -25,5 +25,20 @@ primary_region = "iad"
   cpu_kind = "shared"
   cpus     = 1
 
-# No [http_service] block — the bot uses Telegram long-polling, so we don't
-# need to expose an HTTP port. Fly will keep the machine running regardless.
+# HTTP service for the PWA (Arbyx). The Telegram bot runs in the same
+# process via long-polling — both share one asyncio loop. The bot still
+# works even if the webapp crashes.
+[http_service]
+  internal_port       = 8080
+  force_https         = true
+  auto_stop_machines  = false   # keep the bot polling 24/7
+  auto_start_machines = true
+  min_machines_running = 1
+  processes           = ["app"]
+
+  [[http_service.checks]]
+    grace_period  = "10s"
+    interval      = "30s"
+    method        = "GET"
+    timeout       = "5s"
+    path          = "/api/health"

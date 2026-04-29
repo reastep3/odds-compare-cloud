@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY *.py ./
+COPY static/ ./static/
 
 # Mount points for persistent volume (overlaid by fly.toml at runtime)
 RUN mkdir -p /data/state /data/output
@@ -22,6 +23,8 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data/state \
     OUTPUT_DIR=/data/output
 
-# Default: run the Telegram bot in long-polling mode. The bot itself invokes
-# odds_compare.run_headless_fetch() when users send /run.
+# The Telegram bot AND the FastAPI webapp run in the same process,
+# sharing one asyncio loop. Long-polling stays primary; the HTTP server
+# listens on :8080 (which fly.toml forwards 80/443 to).
+EXPOSE 8080
 CMD ["python", "-u", "telegram_bot.py"]
