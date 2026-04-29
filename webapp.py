@@ -369,6 +369,12 @@ def _shape_run_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _shape_backtest_pick(p: dict[str, Any]) -> dict[str, Any]:
+    """Bankroll-independent pick shape for the PWA — no dollar fields.
+
+    Bet sizing is Kelly-fraction-of-bankroll, so absolute $ amounts vary
+    per user but the W/L outcome and EV% don't. Per-pick unit return is
+    derivable from odds + result if we ever want to display it.
+    """
     return {
         "sport":      p.get("sport"),
         "game":       p.get("game"),
@@ -378,8 +384,6 @@ def _shape_backtest_pick(p: dict[str, Any]) -> dict[str, Any]:
         "odds":       p.get("odds"),
         "ev_pct":     p.get("ev_pct"),
         "result":     p.get("result"),
-        "pnl":        p.get("pnl"),
-        "bet_amount": p.get("bet_amount"),
     }
 
 
@@ -581,27 +585,37 @@ def _shape_archive_prop(p: dict[str, Any]) -> dict[str, Any]:
 
 def _shape_backtest_result(result: dict[str, Any],
                              start_dt: date, end_dt: date) -> dict[str, Any]:
+    """Bankroll-independent backtest summary.
+
+    ROI = sum(pnl) / sum(wagered). Both numerator and denominator scale
+    linearly with bankroll (bet size = Kelly% × bankroll), so the ratio is
+    constant regardless of which user runs the backtest. Win rate, settled
+    count, and per-pick result are also bankroll-independent.
+    """
     picks = result.get("play_these_graded", []) or []
     settled = [p for p in picks
                 if p.get("result") in ("WIN", "LOSS", "PUSH")]
     wins   = sum(1 for p in settled if p["result"] == "WIN")
     losses = sum(1 for p in settled if p["result"] == "LOSS")
     pushes = sum(1 for p in settled if p["result"] == "PUSH")
-    pnl    = sum(p["pnl"] for p in settled) if settled else 0.0
-    bet    = sum(p["bet_amount"] for p in settled) if settled else 0.0
-    roi    = (pnl / bet * 100) if bet else 0.0
+    decided = wins + losses
+    win_rate = (wins / decided * 100) if decided else 0.0
+    # ROI is computed from the underlying $ figures but only the ratio is
+    # exposed — the absolute amounts depend on the running user's bankroll.
+    pnl = sum(p.get("pnl") or 0 for p in settled)
+    bet = sum(p.get("bet_amount") or 0 for p in settled)
+    roi = (pnl / bet * 100) if bet else 0.0
     return {
         "start": start_dt.isoformat(),
         "end":   end_dt.isoformat(),
         "summary": {
-            "settled":  len(settled),
-            "pending":  len(picks) - len(settled),
-            "wins":     wins,
-            "losses":   losses,
-            "pushes":   pushes,
-            "pnl":      round(pnl, 2),
-            "wagered":  round(bet, 2),
-            "roi_pct":  round(roi, 2),
+            "settled":   len(settled),
+            "pending":   len(picks) - len(settled),
+            "wins":      wins,
+            "losses":    losses,
+            "pushes":    pushes,
+            "win_rate":  round(win_rate, 1),
+            "roi_pct":   round(roi, 2),
         },
         "picks":         [_shape_backtest_pick(p) for p in picks],
         "excel_path":    (os.path.basename(result["excel_path"])

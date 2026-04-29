@@ -1,9 +1,17 @@
-// Arbyx — minimal service worker.
-// v1: NO caching of API responses (always fresh odds). Just a network-first
-// shell so "Add to Home Screen" works as a real installable PWA.
-// Static assets get cached so the app shell loads instantly on revisit.
+// Arbyx — service worker.
+//
+// Strategy:
+//   • Network-first for the app shell (HTML / JS / CSS) so deploys take
+//     effect on the very next page load. Cache is kept as offline fallback.
+//   • Cache-first for icons / manifest (these rarely change).
+//   • Bypass entirely for /api/* — odds + backtest results must always
+//     hit the live backend.
+//
+// IMPORTANT: bump CACHE name on every release that changes static assets.
+// On activate we delete every cache that doesn't match the current name,
+// which is what evicts stale shells.
 
-const CACHE = "arbyx-shell-v1";
+const CACHE = "arbyx-shell-v2";
 const SHELL = [
   "/",
   "/static/style.css",
@@ -27,22 +35,40 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  const url = new URL(event.request.url);
+  const req = event.request;
+  const url = new URL(req.url);
 
-  // Never cache API. Always go to network.
+  // API: never cache, always live.
   if (url.pathname.startsWith("/api/")) return;
 
-  // Static shell: cache-first with network fallback (and update cache).
-  event.respondWith(
-    caches.match(event.request).then((hit) => {
-      const fetchPromise = fetch(event.request).then((res) => {
+  // App shell (HTML / CSS / JS): network-first, fall back to cache offline.
+  const isShell =
+    url.pathname === "/" ||
+    url.pathname.endsWith(".html") ||
+    url.pathname.endsWith(".js")   ||
+    url.pathname.endsWith(".css");
+
+  if (isShell) {
+    event.respondWith(
+      fetch(req).then((res) => {
         if (res && res.status === 200 && res.type === "basic") {
           const clone = res.clone();
-          caches.open(CACHE).then((c) => c.put(event.request, clone));
+          caches.open(CACHE).then((c) => c.put(req, clone));
         }
         return res;
-      }).catch(() => hit);
-      return hit || fetchPromise;
-    })
+      }).catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // Everything else (icons, manifest): cache-first.
+  event.respondWith(
+    caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+      if (res && res.status === 200 && res.type === "basic") {
+        const clone = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, clone));
+      }
+      return res;
+    }))
   );
 });
