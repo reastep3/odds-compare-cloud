@@ -1405,18 +1405,38 @@ def _inject_book_events(an_events: list[dict],
 # Combined per-sport fetch (runs in its own thread)
 # ──────────────────────────────────────────────────────────────────────
 
-def _fetch_sport_all(sport: str) -> tuple[str, list[dict], int, int]:
+def _fetch_sport_all(sport: str) -> tuple[str, list[dict], int, int, str]:
     """
-    Fetch odds for one sport via The Odds API.
+    Fetch odds for one sport via The Odds API, falling back to Action
+    Network if the API returns nothing (quota exhausted, 429, error).
 
-    Returns (sport_name, events, pinnacle_count, total_books).
-    The Odds API returns DK + FD + Pinnacle + Bovada + BetMGM + more in
-    a single call, so no separate scraping or injection needed.
+    Returns (sport_name, events, pinnacle_count, total_books, source) where
+    source is "api" (Odds API), "fallback_an" (Action Network), or "none"
+    (both empty). The Odds API normally returns DK + FD + Pinnacle + Bovada
+    + BetMGM + more in a single call; AN covers DK + FD + a few others but
+    no Pinnacle for most sports, so fair-prob blending degrades on fallback.
     """
-    events, status = fetch_odds_api(sport)
+    events, _ = fetch_odds_api(sport)
+    source = "api"
 
     if not events:
-        return sport.upper(), [], 0, 0
+        # Empty result — quota exhausted, 429, or transient error. Try AN.
+        print(f"  [OddsAPI/{sport}] empty result — trying Action Network fallback")
+        try:
+            an_session = make_session()
+            an_events, _ = fetch_action_network(sport, an_session, verbose=False)
+            if an_events:
+                events = an_events
+                source = "fallback_an"
+                print(f"  [AN-fallback/{sport}] {len(events)} events")
+            else:
+                source = "none"
+        except Exception as e:
+            print(f"  [AN-fallback/{sport}] error: {e}")
+            source = "none"
+
+    if not events:
+        return sport.upper(), [], 0, 0, source
 
     # Count Pinnacle coverage for diagnostics
     pinn_ct = sum(1 for ev in events
@@ -1424,7 +1444,7 @@ def _fetch_sport_all(sport: str) -> tuple[str, list[dict], int, int]:
     total_books = max(
         (len(ev.get("bookmakers", [])) for ev in events), default=0)
 
-    return sport.upper(), events, pinn_ct, total_books
+    return sport.upper(), events, pinn_ct, total_books, source
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1853,7 +1873,8 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 player_prop_edges: list[dict] = None,
                 parlay_pool: list = None,
                 script_dir: str = None,
-                promo_pool: list = None):
+                promo_pool: list = None,
+                an_only: bool = False):
     wb = openpyxl.Workbook()
 
     # Load keys from previous run for "New Picks" seen-tracking
@@ -1894,36 +1915,58 @@ def write_excel(edges: list[dict], dk_bankroll: float,
     ws = wb.active
     ws.title = "Summary"
 
-    ws["A1"] = "ODDS COMPARE — +EV EDGE FINDER"
-    ws["A1"].font = Font(bold=True, size=16, color="2F5496")
-    ws["A2"] = f"Generated: {datetime.now(EASTERN).strftime('%Y-%m-%d %H:%M %Z')}"
-    ws["A2"].font = Font(italic=True, color="666666")
-    ws["A3"] = "Source: Action Network + Pinnacle (scraped — no API key)"
-    ws["A3"].font = Font(italic=True, color="888888")
+    if an_only:
+        ws["A1"] = ("⚠ ACTION NETWORK ONLY — Odds API quota exhausted. "
+                    "Pinnacle blending degraded; consider sizing down.")
+        ws["A1"].font = Font(bold=True, size=14, color="9C0006")
+        ws["A1"].fill = PatternFill(
+            start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        ws["A1"].alignment = Alignment(horizontal="left", vertical="center",
+                                       wrap_text=True)
+        ws.merge_cells("A1:G1")
+        ws.row_dimensions[1].height = 36
+        ws["A2"] = "ODDS COMPARE — +EV EDGE FINDER"
+        ws["A2"].font = Font(bold=True, size=16, color="2F5496")
+        ws["A3"] = f"Generated: {datetime.now(EASTERN).strftime('%Y-%m-%d %H:%M %Z')}"
+        ws["A3"].font = Font(italic=True, color="666666")
+        ws["A4"] = "Source: Action Network (fallback — Pinnacle missing on most sports)"
+        ws["A4"].font = Font(italic=True, bold=True, color="9C0006")
+        _summary_row_offset = 1
+    else:
+        ws["A1"] = "ODDS COMPARE — +EV EDGE FINDER"
+        ws["A1"].font = Font(bold=True, size=16, color="2F5496")
+        ws["A2"] = f"Generated: {datetime.now(EASTERN).strftime('%Y-%m-%d %H:%M %Z')}"
+        ws["A2"].font = Font(italic=True, color="666666")
+        ws["A3"] = "Source: The Odds API (primary) + Pinnacle blending"
+        ws["A3"].font = Font(italic=True, color="888888")
+        _summary_row_offset = 0
 
-    ws["A4"] = "DraftKings Bankroll:"
-    ws["A4"].font = Font(bold=True, size=13)
-    ws["B4"] = dk_bankroll
-    ws["B4"].number_format = '$#,##0.00'
-    ws["B4"].font = Font(bold=True, size=13, color="2F5496")
+    def _r(n: int) -> int:
+        return n + _summary_row_offset
 
-    ws["A5"] = "FanDuel Bankroll:"
-    ws["A5"].font = Font(bold=True, size=13)
-    ws["B5"] = fd_bankroll
-    ws["B5"].number_format = '$#,##0.00'
-    ws["B5"].font = Font(bold=True, size=13, color="2F5496")
+    ws[f"A{_r(4)}"] = "DraftKings Bankroll:"
+    ws[f"A{_r(4)}"].font = Font(bold=True, size=13)
+    ws[f"B{_r(4)}"] = dk_bankroll
+    ws[f"B{_r(4)}"].number_format = '$#,##0.00'
+    ws[f"B{_r(4)}"].font = Font(bold=True, size=13, color="2F5496")
 
-    ws["A6"] = "Kelly Fraction:"
-    ws["A6"].font = Font(bold=True)
-    ws["B6"] = f"{KELLY_FRACTION * 100}%"
+    ws[f"A{_r(5)}"] = "FanDuel Bankroll:"
+    ws[f"A{_r(5)}"].font = Font(bold=True, size=13)
+    ws[f"B{_r(5)}"] = fd_bankroll
+    ws[f"B{_r(5)}"].number_format = '$#,##0.00'
+    ws[f"B{_r(5)}"].font = Font(bold=True, size=13, color="2F5496")
 
-    ws["A7"] = "Min EV Threshold:"
-    ws["A7"].font = Font(bold=True)
-    ws["B7"] = f"{MIN_EV_PERCENT}%"
+    ws[f"A{_r(6)}"] = "Kelly Fraction:"
+    ws[f"A{_r(6)}"].font = Font(bold=True)
+    ws[f"B{_r(6)}"] = f"{KELLY_FRACTION * 100}%"
 
-    ws["A8"] = "Total +EV Bets Found:"
-    ws["A8"].font = Font(bold=True)
-    ws["B8"] = len(edges)
+    ws[f"A{_r(7)}"] = "Min EV Threshold:"
+    ws[f"A{_r(7)}"].font = Font(bold=True)
+    ws[f"B{_r(7)}"] = f"{MIN_EV_PERCENT}%"
+
+    ws[f"A{_r(8)}"] = "Total +EV Bets Found:"
+    ws[f"A{_r(8)}"].font = Font(bold=True)
+    ws[f"B{_r(8)}"] = len(edges)
 
     dk_edges = [e for e in edges if e["book"] == "DraftKings"]
     fd_edges = [e for e in edges if e["book"] == "FanDuel"]
@@ -1933,27 +1976,27 @@ def write_excel(edges: list[dict], dk_bankroll: float,
         * e["kelly_pct"] / 100
         for e in edges
     ) if edges else 0
-    ws["A9"] = "Total Capital Deployed:"
-    ws["A9"].font = Font(bold=True)
-    ws["B9"] = total_wagered
-    ws["B9"].number_format = '$#,##0.00'
+    ws[f"A{_r(9)}"] = "Total Capital Deployed:"
+    ws[f"A{_r(9)}"].font = Font(bold=True)
+    ws[f"B{_r(9)}"] = total_wagered
+    ws[f"B{_r(9)}"].number_format = '$#,##0.00'
 
     pinnacle_count = sum(1 for e in edges if e.get("pinnacle_anchored"))
-    ws["A10"] = "Pinnacle-Anchored Edges:"
-    ws["A10"].font = Font(bold=True)
-    ws["B10"] = f"{pinnacle_count} / {len(edges)}"
+    ws[f"A{_r(10)}"] = "Pinnacle-Anchored Edges:"
+    ws[f"A{_r(10)}"].font = Font(bold=True)
+    ws[f"B{_r(10)}"] = f"{pinnacle_count} / {len(edges)}"
 
-    ws["A11"] = "DraftKings Edges:"
-    ws["A11"].font = Font(bold=True)
-    ws["B11"] = len(dk_edges)
-    ws["A12"] = "FanDuel Edges:"
-    ws["A12"].font = Font(bold=True)
-    ws["B12"] = len(fd_edges)
+    ws[f"A{_r(11)}"] = "DraftKings Edges:"
+    ws[f"A{_r(11)}"].font = Font(bold=True)
+    ws[f"B{_r(11)}"] = len(dk_edges)
+    ws[f"A{_r(12)}"] = "FanDuel Edges:"
+    ws[f"A{_r(12)}"].font = Font(bold=True)
+    ws[f"B{_r(12)}"] = len(fd_edges)
 
     if edges:
-        ws["A13"] = "Best EV:"
-        ws["A13"].font = Font(bold=True)
-        ws["B13"] = (
+        ws[f"A{_r(13)}"] = "Best EV:"
+        ws[f"A{_r(13)}"].font = Font(bold=True)
+        ws[f"B{_r(13)}"] = (
             f"{edges[0]['ev_pct']}% — {edges[0]['game']} ({edges[0]['book']})"
         )
 
@@ -6237,7 +6280,7 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
     print(f"DraftKings Bankroll: ${dk_bankroll:,.2f}")
     print(f"FanDuel Bankroll:    ${fd_bankroll:,.2f}")
     print(f"\nFetching {len(AN_SPORTS)} sports in parallel "
-          f"(Action Network + Pinnacle + Bovada)...\n")
+          f"(Odds API → AN fallback)...\n")
 
     # Parallel fetch
     all_edges      = []
@@ -6246,6 +6289,9 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
     total_games    = 0
     pinn_anchored  = 0
     bovada_matched = 0
+    api_count      = 0
+    an_count       = 0
+    sport_sources: dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_fetch_sport_all, sport): sport
@@ -6253,7 +6299,8 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
         for future in as_completed(futures):
             sport = futures[future]
             try:
-                sport_name, events, pinn_m, bov_m = future.result()
+                sport_name, events, pinn_m, bov_m, source = future.result()
+                sport_sources[sport_name] = source
                 if events:
                     edges = find_edges(events, parlay_pool=parlay_pool,
                                        promo_pool=promo_pool)
@@ -6261,9 +6308,15 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
                     total_games    += len(events)
                     pinn_anchored  += pinn_m
                     bovada_matched += bov_m
+                    if source == "api":
+                        api_count += 1
+                    elif source == "fallback_an":
+                        an_count += 1
                     extras = []
                     if pinn_m: extras.append(f"Pinnacle×{pinn_m}")
                     if bov_m:  extras.append(f"Bovada×{bov_m}")
+                    if source == "fallback_an":
+                        extras.append("AN-fallback")
                     note = f"  [{', '.join(extras)}]" if extras else ""
                     print(f"  [{sport_name:<6}] {len(events):>3} games"
                           f" → {len(edges):>3} +EV edges{note}")
@@ -6271,6 +6324,15 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
                 print(f"  [{sport}] Error: {e}")
 
     all_edges.sort(key=lambda x: x["ev_pct"], reverse=True)
+
+    # AN-only run: every sport with data fell back to Action Network.
+    # Triggers the _ANONLY filename suffix and Summary-tab banner.
+    sports_with_data = api_count + an_count
+    an_only = (sports_with_data > 0 and api_count == 0 and an_count > 0)
+    if an_only:
+        output_path = output_path.replace(".xlsx", "_ANONLY.xlsx")
+        print(f"\n⚠ AN-ONLY RUN — every sport fell back to Action Network "
+              f"(Odds API quota likely exhausted)")
 
     # Fetch player props
     print(f"\nFetching player props (MLB HR + PGA Golf + O/U Props)...")
@@ -6297,6 +6359,10 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
             "total_games":    total_games,
             "pinn_anchored":  pinn_anchored,
             "bovada_matched": bovada_matched,
+            "an_only":        an_only,
+            "api_count":      api_count,
+            "an_count":       an_count,
+            "sport_sources":  sport_sources,
         },
     }
 
@@ -6320,7 +6386,7 @@ def run_headless_live() -> list[dict]:
         for future in as_completed(futures):
             sport = futures[future]
             try:
-                sport_name, events, _, _ = future.result()
+                sport_name, events, _, _, _ = future.result()
                 if not events:
                     continue
                 edges = find_edges(events, parlay_pool=None, live_only=True)
@@ -6382,7 +6448,8 @@ def run_headless_finalize(fetched: dict,
         write_excel(all_edges, dk_bankroll, fd_bankroll, output_path,
                     promos, hr_edges, golf_edges, player_prop_edges,
                     parlay_pool=parlay_pool, script_dir=script_dir,
-                    promo_pool=promo_pool)
+                    promo_pool=promo_pool,
+                    an_only=counters.get("an_only", False))
 
     # Build play_edges for the bot
     play_edges = [e for e in all_edges if _qualifies(e)]
@@ -6418,6 +6485,9 @@ def run_headless_finalize(fetched: dict,
             "pinn_anchored":  counters["pinn_anchored"],
             "bovada_matched": counters["bovada_matched"],
             "total_edges":    len(all_edges),
+            "an_only":        counters.get("an_only", False),
+            "an_count":       counters.get("an_count", 0),
+            "api_count":      counters.get("api_count", 0),
         },
     }
 
@@ -6655,7 +6725,7 @@ def main():
     book_count = len(AN_BOOK_IDS) + 2   # AN books + Pinnacle + Bovada
     print(f"Consensus sources:   {book_count} books max per game")
     print(f"\nFetching {len(AN_SPORTS)} sports in parallel "
-          f"(Action Network + Pinnacle + Bovada)...\n")
+          f"(Odds API → AN fallback)...\n")
 
     # ── Parallel fetch ────────────────────────────────────────────────
     all_edges      = []
@@ -6664,6 +6734,8 @@ def main():
     total_games    = 0
     pinn_anchored  = 0
     bovada_matched = 0
+    api_count      = 0
+    an_count       = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_fetch_sport_all, sport): sport
@@ -6671,7 +6743,7 @@ def main():
         for future in as_completed(futures):
             sport = futures[future]
             try:
-                sport_name, events, pinn_m, bov_m = future.result()
+                sport_name, events, pinn_m, bov_m, source = future.result()
                 if events:
                     edges = find_edges(events, parlay_pool=parlay_pool,
                                        promo_pool=promo_pool)
@@ -6679,20 +6751,30 @@ def main():
                     total_games    += len(events)
                     pinn_anchored  += pinn_m
                     bovada_matched += bov_m
+                    if source == "api":
+                        api_count += 1
+                    elif source == "fallback_an":
+                        an_count += 1
                     extras = []
                     if pinn_m: extras.append(f"Pinnacle×{pinn_m}")
                     if bov_m:  extras.append(f"Bovada×{bov_m}")
+                    if source == "fallback_an":
+                        extras.append("AN-fallback")
                     note = f"  [{', '.join(extras)}]" if extras else ""
                     print(f"  [{sport_name:<6}] {len(events):>3} games"
                           f" → {len(edges):>3} +EV edges{note}")
                 elif not events:
-                    # fetch_action_network already prints why if games
-                    # existed but were filtered — only print if truly 0
                     pass
             except Exception as e:
                 print(f"  [{sport}] Error: {e}")
 
     all_edges.sort(key=lambda x: x["ev_pct"], reverse=True)
+
+    sports_with_data = api_count + an_count
+    an_only = (sports_with_data > 0 and api_count == 0 and an_count > 0)
+    if an_only:
+        output_path = output_path.replace(".xlsx", "_ANONLY.xlsx")
+        print(f"\n⚠ AN-ONLY RUN — every sport fell back to Action Network")
 
     # ── Fetch player props: HR, Golf, Strikeouts/TB/Pts/Reb/Ast ────────
     print(f"\nFetching player props (MLB HR + PGA Golf + O/U Props)...")
@@ -6766,7 +6848,7 @@ def main():
     write_excel(all_edges, dk_bankroll, fd_bankroll, output_path,
                 promos, hr_edges, golf_edges, player_prop_edges,
                 parlay_pool=parlay_pool, script_dir=script_dir,
-                promo_pool=promo_pool)
+                promo_pool=promo_pool, an_only=an_only)
 
     if all_edges:
         print(f"\nTop 5 edges:")

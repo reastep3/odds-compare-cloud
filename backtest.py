@@ -324,6 +324,58 @@ def prompt_date_range() -> tuple[date, date] | None:
 
 # ── Archive scanning ───────────────────────────────────────────────────────────
 
+# Filenames written by odds_compare get an "_ANONLY" suffix when every sport
+# fell back to Action Network on that run (Odds API quota exhausted).
+# Backtest can include or exclude these to keep skill measurement clean.
+AN_ONLY_MODES = {"exclude", "include", "only"}
+
+
+def _is_an_only_file(path: str) -> bool:
+    """True if the archive filename has the _ANONLY suffix."""
+    return "_ANONLY" in os.path.basename(path).upper()
+
+
+def _discover_archive_files(start_dt: date, end_dt: date,
+                             an_only_mode: str = "exclude"
+                             ) -> list[tuple[date, str]]:
+    """
+    Scan archive/ + script dir for ev_edges_*.xlsx in date range.
+
+    an_only_mode:
+      • "exclude" (default) — skip files marked _ANONLY
+      • "include"           — return everything
+      • "only"              — return only _ANONLY files
+    """
+    if an_only_mode not in AN_ONLY_MODES:
+        an_only_mode = "exclude"
+
+    patterns = [
+        os.path.join(ARCHIVE_DIR, "ev_edges_*.xlsx"),
+        os.path.join(SCRIPT_DIR,  "ev_edges_*.xlsx"),
+    ]
+    all_files: list[str] = []
+    seen_base: set[str]  = set()
+    for pat in patterns:
+        for f in glob.glob(pat):
+            b = os.path.basename(f)
+            if b not in seen_base:
+                seen_base.add(b)
+                all_files.append(f)
+
+    in_range: list[tuple[date, str]] = []
+    for f in sorted(all_files):
+        fd = _file_date(f)
+        if fd is None or not (start_dt <= fd <= end_dt):
+            continue
+        is_an = _is_an_only_file(f)
+        if an_only_mode == "exclude" and is_an:
+            continue
+        if an_only_mode == "only" and not is_an:
+            continue
+        in_range.append((fd, f))
+    return in_range
+
+
 def _file_date(path: str) -> date | None:
     """Extract the generation date from ev_edges_YYYYMMDD_HHMM.xlsx."""
     m = re.search(r"ev_edges_(\d{8})_\d{4}", os.path.basename(path))
@@ -712,29 +764,13 @@ def _dedup_promo_picks(raw: list[dict]) -> list[dict]:
     return result
 
 
-def load_archive_promo_picks(start_dt: date, end_dt: date) -> list[dict]:
+def load_archive_promo_picks(start_dt: date, end_dt: date,
+                              an_only_mode: str = "exclude") -> list[dict]:
     """
     Scan archive/ for ev_edges_*.xlsx in range and read the Promo Picks section
     from each "Play These" tab.  Deduplicates to first appearance only.
     """
-    patterns = [
-        os.path.join(ARCHIVE_DIR, "ev_edges_*.xlsx"),
-        os.path.join(SCRIPT_DIR,  "ev_edges_*.xlsx"),
-    ]
-    all_files: list[str] = []
-    seen_base: set[str]  = set()
-    for pat in patterns:
-        for f in glob.glob(pat):
-            b = os.path.basename(f)
-            if b not in seen_base:
-                seen_base.add(b)
-                all_files.append(f)
-
-    in_range = []
-    for f in sorted(all_files):
-        fd = _file_date(f)
-        if fd is not None and start_dt <= fd <= end_dt:
-            in_range.append((fd, f))
+    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
     if not in_range:
         print("  No promo picks found in range.")
@@ -756,29 +792,13 @@ def load_archive_promo_picks(start_dt: date, end_dt: date) -> list[dict]:
     return result
 
 
-def load_archive_picks(start_dt: date, end_dt: date) -> list[dict]:
+def load_archive_picks(start_dt: date, end_dt: date,
+                        an_only_mode: str = "exclude") -> list[dict]:
     """
     Scan archive/ (and script dir) for ev_edges_*.xlsx within the date range.
     Returns all raw pick rows, then deduplicates to first appearance.
     """
-    patterns = [
-        os.path.join(ARCHIVE_DIR, "ev_edges_*.xlsx"),
-        os.path.join(SCRIPT_DIR,  "ev_edges_*.xlsx"),
-    ]
-    all_files: list[str] = []
-    seen_base: set[str]  = set()
-    for pat in patterns:
-        for f in glob.glob(pat):
-            b = os.path.basename(f)
-            if b not in seen_base:
-                seen_base.add(b)
-                all_files.append(f)
-
-    in_range = []
-    for f in sorted(all_files):
-        fd = _file_date(f)
-        if fd is not None and start_dt <= fd <= end_dt:
-            in_range.append((fd, f))
+    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
     if not in_range:
         print(f"  No archive files found between {start_dt} and {end_dt}.")
@@ -935,26 +955,13 @@ def _dedup_picks(raw: list[dict]) -> list[dict]:
     return result
 
 
-def load_archive_ev_edges(start_dt: date, end_dt: date) -> list[dict]:
+def load_archive_ev_edges(start_dt: date, end_dt: date,
+                            an_only_mode: str = "exclude") -> list[dict]:
     """
     Load all +EV picks from the "EV Edges" tab across archive files in range.
     Deduplicates to first appearance only.
     """
-    patterns = [
-        os.path.join(ARCHIVE_DIR, "ev_edges_*.xlsx"),
-        os.path.join(SCRIPT_DIR,  "ev_edges_*.xlsx"),
-    ]
-    all_files: list[str] = []
-    seen_base: set[str]  = set()
-    for pat in patterns:
-        for f in glob.glob(pat):
-            b = os.path.basename(f)
-            if b not in seen_base:
-                seen_base.add(b)
-                all_files.append(f)
-
-    in_range = [(fd, f) for f in sorted(all_files)
-                if (fd := _file_date(f)) is not None and start_dt <= fd <= end_dt]
+    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
     if not in_range:
         return []
@@ -1131,23 +1138,10 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
     return props
 
 
-def load_archive_props(start_dt: date, end_dt: date) -> list[dict]:
+def load_archive_props(start_dt: date, end_dt: date,
+                        an_only_mode: str = "exclude") -> list[dict]:
     """Load and deduplicate player-prop edges from Odds Comparison tabs."""
-    patterns = [
-        os.path.join(ARCHIVE_DIR, "ev_edges_*.xlsx"),
-        os.path.join(SCRIPT_DIR,  "ev_edges_*.xlsx"),
-    ]
-    all_files: list[str] = []
-    seen_base: set[str]  = set()
-    for pat in patterns:
-        for f in glob.glob(pat):
-            b = os.path.basename(f)
-            if b not in seen_base:
-                seen_base.add(b)
-                all_files.append(f)
-
-    in_range = [(fd, f) for f in sorted(all_files)
-                if (fd := _file_date(f)) is not None and start_dt <= fd <= end_dt]
+    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
     if not in_range:
         return []
@@ -3108,17 +3102,23 @@ def weekly_digest_text(start_dt: date, end_dt: date) -> str:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def run_full_backtest(start_dt: date, end_dt: date) -> dict:
+def run_full_backtest(start_dt: date, end_dt: date,
+                       an_only_mode: str = "exclude") -> dict:
     """Load, grade, and write the full Excel backtest report.
+
+    an_only_mode controls inclusion of _ANONLY archive files (see
+    AN_ONLY_MODES). Default "exclude" keeps skill measurement clean.
 
     Returns a dict with:
         primary_picks      — graded EV Edges (or Play These fallback); drives Excel
         play_these_graded  — graded Play These subset
         excel_path         — absolute path to the written .xlsx, or None if no picks
     """
+    print(f"  AN-only sheets: {an_only_mode}")
+
     # ── All +EV Picks (primary dataset — EV Edges tab) ────────────────────────
     print("─── All +EV Picks (EV Edges tab) ────────────────────────")
-    ev_raw    = load_archive_ev_edges(start_dt, end_dt)
+    ev_raw    = load_archive_ev_edges(start_dt, end_dt, an_only_mode)
     ev_graded = run_backtest(ev_raw) if ev_raw else []
     if ev_graded:
         ev_settled_list = analyze(ev_graded, label="All +EV Picks")
@@ -3128,7 +3128,7 @@ def run_full_backtest(start_dt: date, end_dt: date) -> dict:
 
     # ── Play These (filtered subset) ──────────────────────────────────────────
     print("\n─── Play These (filtered picks) ─────────────────────────")
-    picks  = load_archive_picks(start_dt, end_dt)
+    picks  = load_archive_picks(start_dt, end_dt, an_only_mode)
     graded = run_backtest(picks) if picks else []
     if graded:
         pt_settled_list = analyze(graded, label="Play These (filtered)")
@@ -3145,7 +3145,7 @@ def run_full_backtest(start_dt: date, end_dt: date) -> dict:
 
     # ── Promo Picks (separate P&L tracking) ──────────────────────────────────
     print("\n─── Promo Picks (Play These — promo section) ────────────")
-    promo_raw    = load_archive_promo_picks(start_dt, end_dt)
+    promo_raw    = load_archive_promo_picks(start_dt, end_dt, an_only_mode)
     promo_graded = run_backtest_promo(promo_raw) if promo_raw else []
     if promo_graded:
         promo_settled = [p for p in promo_graded
@@ -3162,7 +3162,7 @@ def run_full_backtest(start_dt: date, end_dt: date) -> dict:
 
     # ── Player Props ──────────────────────────────────────────────────────────
     print("\n─── Player Props (Odds Comparison tab) ──────────────────")
-    prop_raw    = load_archive_props(start_dt, end_dt)
+    prop_raw    = load_archive_props(start_dt, end_dt, an_only_mode)
     prop_graded = run_backtest(prop_raw) if prop_raw else []
     if prop_graded:
         prop_settled = [p for p in prop_graded if p.get("result") in ("WIN","LOSS","PUSH")]
@@ -3211,6 +3211,17 @@ def run_full_backtest(start_dt: date, end_dt: date) -> dict:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Odds Compare backtest engine — grade past picks vs results.")
+    parser.add_argument(
+        "--an-only", choices=sorted(AN_ONLY_MODES), default="exclude",
+        help=("How to handle archive sheets generated when the Odds API was "
+              "exhausted and the bot fell back to Action Network "
+              "(filename suffix _ANONLY). 'exclude' (default) skips them, "
+              "'include' counts them, 'only' uses them exclusively."))
+    args = parser.parse_args()
+
     print("=" * 62)
     print("  ODDS COMPARE — BACKTEST ENGINE")
     print("  Source: Play These + EV Edges  |  Results: ESPN (free)")
@@ -3230,7 +3241,7 @@ def main():
             print("No archive or ev_edges files found. Run odds_compare.py first.")
             return
 
-    run_full_backtest(start_dt, end_dt)
+    run_full_backtest(start_dt, end_dt, an_only_mode=args.an_only)
 
 
 if __name__ == "__main__":
