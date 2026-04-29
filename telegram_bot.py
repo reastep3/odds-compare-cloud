@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 
 # ── Conversation states ──────────────────────────────────────────────
 ASK_DK_BANKROLL, ASK_FD_BANKROLL, ASK_PROMOS, ASK_GAME_PICK = range(4)
-ASK_BT_PERIOD, ASK_BT_START, ASK_BT_END = range(10, 13)
+ASK_BT_PERIOD, ASK_BT_START, ASK_BT_END, ASK_BT_AN = range(10, 14)
 ASK_BOOKS = 20
 ASK_RUN_SINGLE_BOOK = 21
 ASK_PROMO_GAMESPEC = 22
@@ -518,12 +518,18 @@ def format_summary(result: dict, user_books: list[str],
     if "FanDuel" in user_books:
         edge_parts.append(f"FD: {fd_ct}")
 
-    lines = [
+    lines = []
+    if s.get("an_only"):
+        lines.append("⚠ <b>AN-ONLY RUN</b> — Odds API quota exhausted, "
+                     "fell back to Action Network. Pinnacle blending "
+                     "degraded; consider sizing down.")
+        lines.append("")
+    lines.extend([
         f"<b>ODDS COMPARE</b>  {now}",
         f"----------------------------",
         f"{s['total_games']} games | {s['total_edges']} +EV edges",
         " | ".join(edge_parts),
-    ]
+    ])
     if not skip_mode:
         lines.append("")
         if "DraftKings" in user_books:
@@ -1647,6 +1653,7 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
             "pinn_anchored":  counters["pinn_anchored"],
             "bovada_matched": counters["bovada_matched"],
             "total_edges":    len(all_edges_filt),
+            "an_only":        counters.get("an_only", False),
         },
     }
     await context.bot.send_message(
@@ -2229,6 +2236,29 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ASK_BT_PERIOD
 
 
+_BT_AN_INCLUDE = "Include AN-only"
+_BT_AN_EXCLUDE = "Exclude AN-only (default)"
+_BT_AN_ONLY    = "Only AN-only"
+
+
+def _bt_an_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[_BT_AN_EXCLUDE], [_BT_AN_INCLUDE], [_BT_AN_ONLY]],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
+
+
+async def _ask_bt_an_only(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Include sheets generated when the bot fell back to Action Network "
+        "(Odds API quota exhausted)? AN-only days have noisier fair-prob "
+        "math, so they're excluded by default.",
+        reply_markup=_bt_an_keyboard(),
+    )
+    return ASK_BT_AN
+
+
 async def recv_bt_period(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     choice = _parse_bt_period(update.message.text)
     today = date.today()
@@ -2247,7 +2277,7 @@ async def recv_bt_period(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data["bt_start"] = today - timedelta(days=choice)
     context.user_data["bt_end"]   = today
-    return await _kick_backtest(update, context)
+    return await _ask_bt_an_only(update, context)
 
 
 async def recv_bt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2268,6 +2298,22 @@ async def recv_bt_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("Invalid date. Use YYYY-MM-DD format:")
         return ASK_BT_END
     context.user_data["bt_end"] = end
+    return await _ask_bt_an_only(update, context)
+
+
+async def recv_bt_an(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    if text == _BT_AN_INCLUDE:
+        mode = "include"
+    elif text == _BT_AN_ONLY:
+        mode = "only"
+    elif text == _BT_AN_EXCLUDE:
+        mode = "exclude"
+    else:
+        await update.message.reply_text(
+            "Tap one of the options.", reply_markup=_bt_an_keyboard())
+        return ASK_BT_AN
+    context.user_data["bt_an_only_mode"] = mode
     return await _kick_backtest(update, context)
 
 
@@ -2280,17 +2326,21 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     start = context.user_data["bt_start"]
     end = context.user_data["bt_end"]
+    an_only_mode = context.user_data.get("bt_an_only_mode", "exclude")
     user_books = context.user_data.get("books", ["DraftKings", "FanDuel"])
 
+    an_note = "" if an_only_mode == "exclude" else f" (AN-only: {an_only_mode})"
     await update.message.reply_text(
-        f"Running backtest {start} to {end}...\n"
-        f"Grading picks against ESPN — this may take a minute."
+        f"Running backtest {start} to {end}{an_note}...\n"
+        f"Grading picks against ESPN — this may take a minute.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
     async with _run_lock:
         context.bot_data["running"] = True
         try:
-            result = await asyncio.to_thread(_run_backtest_wrapper, start, end)
+            result = await asyncio.to_thread(
+                _run_backtest_wrapper, start, end, an_only_mode)
         except Exception as e:
             context.bot_data["running"] = False
             await context.bot.send_message(chat_id, f"Backtest failed: {e}")
@@ -2319,9 +2369,10 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-def _run_backtest_wrapper(start_dt: date, end_dt: date) -> dict:
+def _run_backtest_wrapper(start_dt: date, end_dt: date,
+                           an_only_mode: str = "exclude") -> dict:
     from backtest import run_full_backtest
-    return run_full_backtest(start_dt, end_dt)
+    return run_full_backtest(start_dt, end_dt, an_only_mode=an_only_mode)
 
 
 def format_backtest_results(picks: list[dict], start_dt: date, end_dt: date,
@@ -2494,6 +2545,9 @@ def main():
             ],
             ASK_BT_END: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recv_bt_end),
+            ],
+            ASK_BT_AN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_bt_an),
             ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
