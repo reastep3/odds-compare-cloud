@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v3 (in-app archive viewer + ROI-only backtest)";
+const BUILD = "2026-04-29 v4 (cache-bust escape hatch)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
