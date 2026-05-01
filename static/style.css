@@ -470,13 +470,20 @@ h3 .count {
   table tbody tr td.cell-rank::before { content: "#"; margin-right: 4px; }
   /* Hide entirely empty cells (e.g., no Pinnacle flag). */
   table tbody tr td:empty { display: none; }
-  /* Stake cell stacks $/% within its right-aligned slot (already two
-     spans inside) — the existing flex column on .stake-cell handles that. */
+  /* Stake cell on mobile: lay $/% out horizontally inside the flex td
+     and use `order` to push the bold dollar amount to the right edge,
+     keeping it visually aligned with the bold numbers on every other
+     row (Odds, EV, Result). The muted percent slots in just left of
+     the dollar amount.                                                  */
   .stake-cell .stake-amt, .stake-cell .stake-pct {
     display: inline;
   }
+  .stake-cell .stake-amt {
+    order: 2;
+  }
   .stake-cell .stake-pct {
-    margin-left: 6px;
+    order: 1;
+    margin-right: 8px;
     font-size: 12px;
   }
 }
