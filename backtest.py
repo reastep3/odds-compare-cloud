@@ -179,6 +179,10 @@ _SPORT_NORM: dict[str, str] = {
     "cricket":                          "cricket",
     "ipl":                              "cricket",
     "indian premier league":            "cricket",
+    # Tennis — TennisExplorer-graded, covers both ATP and WTA singles
+    "tennis":                           "tennis",
+    "atp":                              "tennis",
+    "wta":                              "tennis",
     # Handle already-normalised keys passed through
     **{k: k for k in ESPN_SPORT_MAP},
 }
@@ -196,6 +200,11 @@ SQUIGGLE_SPORTS = {"afl"}
 # Sports graded by scraping box.live (free, public, server-rendered HTML)
 BOXLIVE_SPORTS = {"boxing"}
 
+# Sports graded by scraping tennisexplorer.com (server-rendered, free,
+# date-queryable via ?type=all&year=Y&month=M&day=D). Doubles entries are
+# filtered out since the bot only bets singles.
+TENNISEXPLORER_SPORTS = {"tennis"}
+
 # Sports graded via ESPN's cricket endpoint, which uses NUMERIC league IDs
 # rather than slugs. Map normalized internal sport key → ESPN league ID.
 # To find an ID: check `https://site.api.espn.com/apis/site/v2/sports/cricket`
@@ -208,6 +217,7 @@ ESPN_CRICKET_LEAGUES: dict[str, int] = {
 SCOREABLE = (set(ESPN_SPORT_MAP.keys())
              | SQUIGGLE_SPORTS
              | BOXLIVE_SPORTS
+             | TENNISEXPLORER_SPORTS
              | set(ESPN_CRICKET_LEAGUES.keys()))
 
 # "Play These" column positions (1-based). Stable across old and new sheet layouts.
@@ -1263,6 +1273,10 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
         games = _fetch_boxlive_games(date_str)
         _espn_all_cache[cache_key] = games
         return games
+    if sport in TENNISEXPLORER_SPORTS:
+        games = _fetch_tennisexplorer_games(date_str)
+        _espn_all_cache[cache_key] = games
+        return games
     if sport in ESPN_CRICKET_LEAGUES:
         games = _fetch_espn_cricket_games(ESPN_CRICKET_LEAGUES[sport], date_str)
         _espn_all_cache[cache_key] = games
@@ -1641,6 +1655,138 @@ def _parse_boxlive_title(title_html: str, date_str: str) -> dict | None:
     }
 
 
+# ── TennisExplorer (Tennis) ───────────────────────────────────────────
+# Server-rendered HTML, free, date-queryable. Each match is two
+# consecutive <tr id="rN"> + <tr id="rNb"> rows under a "result" table.
+# Player names are formatted as "Lastname I." (e.g., "Sinner J.") which
+# matches the Odds API's full names ("Jannik Sinner") via word-overlap
+# on the shared last name.
+_TENNISEXPLORER_BASE = "https://www.tennisexplorer.com/results/"
+_tennisexplorer_cache: dict[str, list[dict]] = {}
+
+
+def _fetch_tennisexplorer_games(date_str: str) -> list[dict]:
+    """Scrape TennisExplorer's daily results page and return ATP + WTA
+    singles matches in the standard ESPN result shape. Both tour types
+    come back in one request via type=all (faster than two calls).
+
+    Order between Odds API ("home"/"away") and TE ("first listed" vs
+    "second listed") may differ, so we emit BOTH orderings as separate
+    result entries — same trick as the boxing scraper.
+    """
+    if date_str in _tennisexplorer_cache:
+        return _tennisexplorer_cache[date_str]
+    if len(date_str) != 8:
+        return []
+    url = (f"{_TENNISEXPLORER_BASE}?type=all"
+           f"&year={date_str[:4]}&month={date_str[4:6]}&day={date_str[6:]}")
+    try:
+        resp = _espn_session.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"  [TennisExplorer] HTTP {resp.status_code}")
+            _tennisexplorer_cache[date_str] = []
+            return []
+        html = resp.text
+    except Exception as e:
+        print(f"  [TennisExplorer] error: {e}")
+        return []
+
+    # Pair up consecutive <tr id="rN"> (player A row) and <tr id="rNb">
+    # (player B row). The "rN" row carries the time + first player + their
+    # set count + per-set scores; the "rNb" row has the second player +
+    # their set count.
+    matches: list[dict] = []
+    # Match ID + class on first row carries useful metadata; we just need
+    # to find pairs where the second row is the matching "Nb" id.
+    row_pat = re.compile(
+        r'<tr id="r(\d+)(b?)"[^>]*>(.*?)</tr>', re.DOTALL)
+    rows = list(row_pat.finditer(html))
+    by_id: dict[str, dict[str, str]] = {}
+    for m in rows:
+        rid, suffix, body = m.group(1), m.group(2), m.group(3)
+        slot = "second" if suffix == "b" else "first"
+        by_id.setdefault(rid, {})[slot] = body
+
+    for rid, slots in by_id.items():
+        if "first" not in slots or "second" not in slots:
+            continue
+        m = _parse_tennisexplorer_pair(slots["first"], slots["second"])
+        if m:
+            matches.append(m)
+
+    games: list[dict] = []
+    for m in matches:
+        a, b = m["player_a"], m["player_b"]
+        winner = m["winner"]
+        completed = m["completed"]
+        for away, home in ((a, b), (b, a)):
+            a_won = (winner == away) if completed else False
+            h_won = (winner == home) if completed else False
+            games.append({
+                "home_team":  home,
+                "home_abbr":  "",
+                "home_short": home.split()[0] if home else "",  # last name
+                "home_score": 1 if h_won else 0,
+                "away_team":  away,
+                "away_abbr":  "",
+                "away_short": away.split()[0] if away else "",
+                "away_score": 1 if a_won else 0,
+                "winner":     winner,
+                "total":      1,
+                "event_id":   "",
+                "completed":  completed,
+                "status":     "STATUS_FINAL" if completed else "STATUS_SCHEDULED",
+            })
+    _tennisexplorer_cache[date_str] = games
+    return games
+
+
+def _parse_tennisexplorer_pair(first_html: str, second_html: str) -> dict | None:
+    """Parse one (rN, rNb) row pair into {player_a, player_b, winner, completed}."""
+    # Extract player names from the <a href="/player/...">NAME</a> link.
+    a_match = re.search(r'<a href="/player/[^"]+">\s*([^<]+?)\s*</a>', first_html)
+    b_match = re.search(r'<a href="/player/[^"]+">\s*([^<]+?)\s*</a>', second_html)
+    if not a_match or not b_match:
+        return None
+    player_a = re.sub(r'\s+', ' ', a_match.group(1)).strip()
+    player_b = re.sub(r'\s+', ' ', b_match.group(1)).strip()
+    if not player_a or not player_b:
+        return None
+    # Skip doubles: "Arevalo M./Pavic M." style names contain a slash.
+    if "/" in player_a or "/" in player_b:
+        return None
+
+    # Sets won is in the FIRST <td class="result"> of each row.
+    a_sets = _parse_te_result_cell(first_html)
+    b_sets = _parse_te_result_cell(second_html)
+    if a_sets is None or b_sets is None:
+        # Not yet completed — no result cell or it's empty.
+        return {"player_a": player_a, "player_b": player_b,
+                "winner": "", "completed": False}
+    if a_sets == b_sets:
+        # Tie / retirement / walkover with no clear winner — leave ungraded.
+        return {"player_a": player_a, "player_b": player_b,
+                "winner": "", "completed": False}
+    winner = player_a if a_sets > b_sets else player_b
+    return {"player_a": player_a, "player_b": player_b,
+            "winner": winner, "completed": True}
+
+
+def _parse_te_result_cell(row_html: str) -> int | None:
+    """The first <td class="result">N</td> in a player row holds set count."""
+    m = re.search(r'<td class="result"[^>]*>\s*(\d+)\s*</td>', row_html)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
 def _fetch_boxlive_games(date_str: str) -> list[dict]:
     """Filter parsed box.live fights to one date and emit results in the
     standard ESPN shape (home_team/away_team/scores/winner). The Odds API
@@ -1790,6 +1936,48 @@ def _team_match_score(pick_name: str, side: str, result: dict) -> float:
     return best
 
 
+def _name_tokens(name: str) -> set[str]:
+    """Lowercase, diacritic-stripped, non-initial word tokens of a name.
+    'Sinner J.' → {'sinner'}; 'Sara Sorribes Tormo' → {'sara','sorribes',
+    'tormo'}; 'Karolína Plíšková' → {'karolina','pliskova'}. Used by the
+    tennis-specific matcher where char-level fuzzy is too permissive
+    (e.g. 'Alexander Zverev' would otherwise match 'Alexandrescou Y.')."""
+    import unicodedata
+    out = set()
+    # NFKD splits accented chars into base + combining marks; we drop the
+    # combining marks so 'í' → 'i', 'š' → 's', etc.
+    folded = unicodedata.normalize("NFKD", name)
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    for t in folded.split():
+        clean = t.lower().rstrip(".")
+        if len(clean) > 1:   # drop initials like 'J.'
+            out.add(clean)
+    return out
+
+
+def _tennis_token_score(pick_name: str, side: str, result: dict) -> float:
+    """For tennis: ratio of shared name tokens between pick and result side
+    over the smaller token set. Requires at least one full last-name token
+    to match — initials and prefixes can't trigger a false positive."""
+    p_tokens = _name_tokens(pick_name)
+    if not p_tokens:
+        return 0.0
+    best = 0.0
+    for key in (f"{side}_team", f"{side}_short", f"{side}_abbr"):
+        val = result.get(key, "")
+        if not val:
+            continue
+        r_tokens = _name_tokens(val)
+        if not r_tokens:
+            continue
+        shared = p_tokens & r_tokens
+        if shared:
+            score = len(shared) / min(len(p_tokens), len(r_tokens))
+            if score > best:
+                best = score
+    return best
+
+
 def _find_game_result(pick: dict, results: list[dict]) -> dict | None:
     """
     Match pick's game string "AWAY @ HOME" against ESPN results.
@@ -1798,6 +1986,11 @@ def _find_game_result(pick: dict, results: list[dict]) -> dict | None:
     BOTH sides score ≥ 0.40 AND their average ≥ 0.50.  This is more
     permissive than requiring average ≥ 0.55 while still preventing
     false positives (one side matching perfectly but wrong game).
+
+    Tennis uses a stricter token-based matcher because the standard fuzzy
+    falsely matches names that share a long prefix (e.g. 'Alexander Zverev'
+    vs 'Alexandrescou Y.' — both start with 'Alex'). Token-overlap scoring
+    requires a full word in common, not just substring overlap.
     """
     parts = pick["game"].split("@")
     if len(parts) != 2:
@@ -1805,15 +1998,21 @@ def _find_game_result(pick: dict, results: list[dict]) -> dict | None:
     away_pick = parts[0].strip()
     home_pick = parts[1].strip()
 
+    sport = (pick.get("sport") or "").lower()
+    use_tennis_match = sport == "tennis"
+    score_fn = _tennis_token_score if use_tennis_match else _team_match_score
+    side_thresh = 0.5 if use_tennis_match else 0.40
+    avg_thresh  = 0.5 if use_tennis_match else 0.50
+
     best_match = None
     best_score = 0.0
 
     for r in results:
-        away_s = _team_match_score(away_pick, "away", r)
-        home_s = _team_match_score(home_pick, "home", r)
+        away_s = score_fn(away_pick, "away", r)
+        home_s = score_fn(home_pick, "home", r)
 
         # Both sides must independently look plausible
-        if away_s < 0.40 or home_s < 0.40:
+        if away_s < side_thresh or home_s < side_thresh:
             continue
 
         score = (away_s + home_s) / 2
@@ -1821,18 +2020,21 @@ def _find_game_result(pick: dict, results: list[dict]) -> dict | None:
             best_score = score
             best_match = r
 
-    return best_match if best_score >= 0.50 else None
+    return best_match if best_score >= avg_thresh else None
 
 
-def _match_side(pick_name: str, result: dict) -> str | None:
+def _match_side(pick_name: str, result: dict, sport: str = "") -> str | None:
     """
     Return 'home' or 'away' depending on which team pick_name refers to.
-    Uses both character-level and word-level similarity.
+    Uses both character-level and word-level similarity. Tennis switches
+    to the token-based matcher for the same false-positive reasons as
+    _find_game_result.
     """
-    home_score = _team_match_score(pick_name, "home", result)
-    away_score = _team_match_score(pick_name, "away", result)
+    score_fn = _tennis_token_score if sport.lower() == "tennis" else _team_match_score
+    threshold = 0.5 if sport.lower() == "tennis" else 0.45
+    home_score = score_fn(pick_name, "home", result)
+    away_score = score_fn(pick_name, "away", result)
 
-    threshold = 0.45
     if home_score >= threshold and home_score >= away_score:
         return "home"
     if away_score >= threshold:
@@ -1847,13 +2049,14 @@ def grade_pick(pick: dict, result: dict) -> str:
     market  = pick["market"]
     outcome = pick["pick"]
     line    = pick.get("line")
+    sport   = pick.get("sport", "")
 
     if market == "H2H":
         if outcome.lower() == "draw":
             return "WIN" if result["home_score"] == result["away_score"] else "LOSS"
         if result["home_score"] == result["away_score"]:
             return "PUSH"
-        side = _match_side(outcome, result)
+        side = _match_side(outcome, result, sport)
         if side is None:
             return "UNKNOWN"
         my_score  = result[f"{side}_score"]
@@ -1863,7 +2066,7 @@ def grade_pick(pick: dict, result: dict) -> str:
     elif market == "SPREADS":
         if line is None:
             return "UNKNOWN"
-        side = _match_side(outcome, result)
+        side = _match_side(outcome, result, sport)
         if side is None:
             return "UNKNOWN"
         my_score  = result[f"{side}_score"]
