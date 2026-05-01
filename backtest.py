@@ -170,6 +170,15 @@ _SPORT_NORM: dict[str, str] = {
     # WNBA
     "wnba":                             "wnba",
     "women's national basketball association": "wnba",
+    # AFL (Squiggle-graded)
+    "afl":                              "afl",
+    "australian football league":       "afl",
+    "aussie rules":                     "afl",
+    # Cricket — currently IPL only (ESPN-cricket-graded). Other tournaments
+    # would need their own ESPN league ID added to ESPN_CRICKET_LEAGUES.
+    "cricket":                          "cricket",
+    "ipl":                              "cricket",
+    "indian premier league":            "cricket",
     # Handle already-normalised keys passed through
     **{k: k for k in ESPN_SPORT_MAP},
 }
@@ -180,8 +189,22 @@ def _normalise_sport(raw: str) -> str:
     return _SPORT_NORM.get(raw.lower().strip(), raw.lower().strip())
 
 
-# Sports that can be auto-graded via score
-SCOREABLE = set(ESPN_SPORT_MAP.keys())
+# ── Non-ESPN result sources ──────────────────────────────────────────
+# Sports graded via Squiggle (api.squiggle.com.au — free, no key, AFL only)
+SQUIGGLE_SPORTS = {"afl"}
+
+# Sports graded via ESPN's cricket endpoint, which uses NUMERIC league IDs
+# rather than slugs. Map normalized internal sport key → ESPN league ID.
+# To find an ID: check `https://site.api.espn.com/apis/site/v2/sports/cricket`
+# for the active league listing. 8048 = IPL 2026 (rolls each year).
+ESPN_CRICKET_LEAGUES: dict[str, int] = {
+    "cricket": 8048,   # IPL — covers cricket_ipl picks
+}
+
+# Sports auto-graded by some result source (ESPN, Squiggle, ESPN cricket, etc.)
+SCOREABLE = (set(ESPN_SPORT_MAP.keys())
+             | SQUIGGLE_SPORTS
+             | set(ESPN_CRICKET_LEAGUES.keys()))
 
 # "Play These" column positions (1-based). Stable across old and new sheet layouts.
 _COL_SPORT      = 2
@@ -1209,17 +1232,33 @@ _espn_session.headers.update({
 
 def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
     """
-    Fetch ALL games from ESPN for one sport + date (YYYYMMDD), regardless
-    of status. Each result dict includes a "completed" bool so callers can
-    distinguish between "graded a final game" vs "found a scheduled or
-    in-progress game" (used to mark picks as PENDING instead of mis-grading
-    them against an adjacent-day game).
+    Fetch ALL games for one sport + date (YYYYMMDD), regardless of status.
+    Each result dict includes a "completed" bool so callers can distinguish
+    between "graded a final game" vs "found a scheduled or in-progress game"
+    (used to mark picks as PENDING instead of mis-grading them against an
+    adjacent-day game).
+
+    Despite the name, this is the central dispatcher across result sources:
+    ESPN's main API is the default, but Squiggle (AFL) and ESPN's numeric-
+    cricket-league endpoint take over for sports ESPN's main API doesn't
+    cover. All branches return the same dict shape so downstream matching
+    and grading code is source-agnostic.
 
     Cached per (sport, date) under _espn_all_cache.
     """
     cache_key = f"{sport}|{date_str}"
     if cache_key in _espn_all_cache:
         return _espn_all_cache[cache_key]
+
+    # Non-ESPN result sources first.
+    if sport in SQUIGGLE_SPORTS:
+        games = _fetch_squiggle_games(date_str)
+        _espn_all_cache[cache_key] = games
+        return games
+    if sport in ESPN_CRICKET_LEAGUES:
+        games = _fetch_espn_cricket_games(ESPN_CRICKET_LEAGUES[sport], date_str)
+        _espn_all_cache[cache_key] = games
+        return games
 
     espn_path = ESPN_SPORT_MAP.get(sport)
     if not espn_path:
@@ -1286,6 +1325,196 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
         })
 
     _espn_all_cache[cache_key] = games
+    time.sleep(0.15)
+    return games
+
+
+# ── Squiggle (AFL) ────────────────────────────────────────────────────
+# Free, no auth, see https://api.squiggle.com.au/. Their etiquette policy
+# requires identifying contact via the User-Agent header.
+_SQUIGGLE_BASE = "https://api.squiggle.com.au/"
+_SQUIGGLE_HEADERS = {
+    "User-Agent": "arbyx-odds-compare/1.0 (https://github.com/reastep3/odds-compare-cloud)",
+}
+_squiggle_year_cache: dict[int, list[dict]] = {}
+
+
+def _squiggle_games_for_year(year: int) -> list[dict]:
+    """Fetch + cache the entire AFL season's games (a few hundred KB).
+    Then date-filtering is just an in-memory scan.
+
+    NOTE: Squiggle's q=games;year=YYYY query uses semicolons that MUST
+    NOT be percent-encoded — passing via requests' params dict breaks
+    the API and returns the docs HTML page. The URL is built by hand.
+    """
+    if year in _squiggle_year_cache:
+        return _squiggle_year_cache[year]
+    url = f"{_SQUIGGLE_BASE}?q=games;year={year}"
+    try:
+        resp = _espn_session.get(url, headers=_SQUIGGLE_HEADERS, timeout=20)
+        if resp.status_code != 200:
+            print(f"  [Squiggle] HTTP {resp.status_code}")
+            _squiggle_year_cache[year] = []
+            return []
+        games = resp.json().get("games", []) or []
+    except Exception as e:
+        print(f"  [Squiggle] error: {e}")
+        games = []
+    _squiggle_year_cache[year] = games
+    return games
+
+
+def _fetch_squiggle_games(date_str: str) -> list[dict]:
+    """
+    Squiggle returns one row per game with hteam/ateam/hscore/ascore/winner/
+    complete/timestr. We normalize to the same shape ESPN returns so the
+    downstream matcher and grader stay source-agnostic.
+    """
+    if len(date_str) != 8:
+        return []
+    year  = int(date_str[:4])
+    month = int(date_str[4:6])
+    day   = int(date_str[6:])
+    target = f"{year:04d}-{month:02d}-{day:02d}"
+
+    games = []
+    for g in _squiggle_games_for_year(year):
+        # Squiggle date format: "2026-05-01 19:50:00" (local Aussie time).
+        # Match on the date prefix only.
+        gd = (g.get("date") or "")[:10]
+        if gd != target:
+            continue
+        complete_pct = int(g.get("complete") or 0)
+        completed    = complete_pct >= 100
+        # Squiggle marks live games with complete < 100 and a numeric
+        # timestr (e.g. "Q3 12:34"). Status string for downstream:
+        if completed:
+            status = "STATUS_FINAL"
+        elif complete_pct > 0:
+            status = "STATUS_IN_PROGRESS"
+        else:
+            status = "STATUS_SCHEDULED"
+
+        home = (g.get("hteam") or "").strip()
+        away = (g.get("ateam") or "").strip()
+        hsc  = int(g.get("hscore") or 0)
+        asc  = int(g.get("ascore") or 0)
+        winner_team = ""
+        if completed:
+            w = (g.get("winner") or "").strip()
+            winner_team = w if w else (home if hsc > asc else
+                                       (away if asc > hsc else ""))
+        games.append({
+            "home_team":  home,
+            "home_abbr":  "",
+            "home_short": "",
+            "home_score": hsc,
+            "away_team":  away,
+            "away_abbr":  "",
+            "away_short": "",
+            "away_score": asc,
+            "winner":     winner_team,
+            "total":      hsc + asc,
+            "event_id":   str(g.get("id") or ""),
+            "completed":  completed,
+            "status":     status,
+        })
+    return games
+
+
+# ── ESPN cricket (numeric league ID, IPL = 8048) ──────────────────────
+
+def _fetch_espn_cricket_games(league_id: int, date_str: str) -> list[dict]:
+    """
+    ESPN's cricket scoreboard uses cricinfo numeric series IDs in place of
+    a slug (e.g. .../sports/cricket/8048/scoreboard for IPL 2026).
+    Status semantics differ from the team-sports endpoint: completed
+    games carry `description="Result"` and/or `detail="Final"` rather
+    than `completed=True` / `name="STATUS_FINAL"`. Total runs scored
+    sums both innings.
+    """
+    url = f"{ESPN_BASE}/cricket/{league_id}/scoreboard?dates={date_str}&limit=100"
+    try:
+        resp = _espn_session.get(url, timeout=15)
+        if resp.status_code != 200:
+            return []
+        events = resp.json().get("events", [])
+    except Exception:
+        return []
+
+    games = []
+    for event in events:
+        comp        = event.get("competitions", [{}])[0]
+        status_obj  = comp.get("status", {}).get("type", {})
+        status_name = status_obj.get("name") or ""
+        description = (status_obj.get("description") or "").lower()
+        detail      = (status_obj.get("detail") or "").lower()
+        # Completion: ESPN cricket marks final games via description="Result"
+        # or detail starting with "final"/"complete". Falls back to the
+        # standard completed flag for safety.
+        completed = bool(
+            status_obj.get("completed")
+            or description in ("result", "final", "complete")
+            or detail.startswith("final")
+            or detail.startswith("complete")
+            or "won by" in description
+            or "won by" in detail
+        )
+
+        teams: dict[str, dict] = {}
+        for competitor in comp.get("competitors", []):
+            team_info = competitor.get("team", {})
+            ha = competitor.get("homeAway", "")
+            # Cricket scores: ESPN often uses "225/6" strings — extract
+            # the run total. Some events expose linescores per innings.
+            raw_score = competitor.get("score", "0")
+            runs = 0
+            if isinstance(raw_score, (int, float)):
+                runs = int(raw_score)
+            else:
+                # "225/6" → 225, "225/6 d" → 225
+                head = str(raw_score).split("/", 1)[0].strip()
+                try:
+                    runs = int(head)
+                except ValueError:
+                    runs = 0
+            # ESPN cricket returns winner as a STRING ("true"/"false"),
+            # not a JSON bool — bool("false") is True, so we string-check.
+            raw_winner = competitor.get("winner", False)
+            is_winner  = (raw_winner is True
+                          or str(raw_winner).strip().lower() == "true")
+            teams[ha] = {
+                "name":   team_info.get("displayName", ""),
+                "abbr":   team_info.get("abbreviation", ""),
+                "short":  team_info.get("shortDisplayName", ""),
+                "score":  runs,
+                "winner": is_winner,
+            }
+
+        if "home" not in teams or "away" not in teams:
+            continue
+
+        winner_team = ""
+        if completed:
+            winner_team = (teams["home"]["name"] if teams["home"]["winner"]
+                           else teams["away"]["name"])
+
+        games.append({
+            "home_team":  teams["home"]["name"],
+            "home_abbr":  teams["home"]["abbr"],
+            "home_short": teams["home"]["short"],
+            "home_score": teams["home"]["score"],
+            "away_team":  teams["away"]["name"],
+            "away_abbr":  teams["away"]["abbr"],
+            "away_short": teams["away"]["short"],
+            "away_score": teams["away"]["score"],
+            "winner":     winner_team,
+            "total":      teams["home"]["score"] + teams["away"]["score"],
+            "event_id":   event.get("id", ""),
+            "completed":  completed,
+            "status":     status_name,
+        })
+
     time.sleep(0.15)
     return games
 
