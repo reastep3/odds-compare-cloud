@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=10">
+  <link rel="stylesheet" href="/static/style.css?v=11">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -47,7 +47,17 @@
       <div class="card" id="dashboard-card">
         <div class="dashboard-header">
           <h2>Latest Run</h2>
-          <button id="dashboard-refresh" class="ghost-btn small">↻</button>
+          <div class="dashboard-header-tools">
+            <select id="tz-select" class="tz-select" title="Display timezone">
+              <option value="auto">Auto</option>
+              <option value="America/New_York">ET</option>
+              <option value="America/Chicago">CT</option>
+              <option value="America/Denver">MT</option>
+              <option value="America/Los_Angeles">PT</option>
+              <option value="UTC">UTC</option>
+            </select>
+            <button id="dashboard-refresh" class="ghost-btn small">↻</button>
+          </div>
         </div>
         <p id="dashboard-meta" class="muted">Loading…</p>
         <div id="dashboard-anonly-banner" class="banner warn" hidden>
@@ -243,6 +253,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

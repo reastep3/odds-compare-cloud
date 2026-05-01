@@ -797,13 +797,20 @@ def _shape_archive_pick(p: dict[str, Any],
     bet  = p.get("bet_amount")
     book = p.get("book")
     bank = (bankrolls or {}).get(book)
+    # Prefer the file-stored Kelly% (always present, even on /run_skip
+    # archives where bankroll=0 makes bet/bankroll undefined). Fall back
+    # to deriving it from bet/bankroll for older archives that didn't
+    # round-trip the Kelly column through the readers.
+    file_kelly = p.get("kelly_pct")
     kelly_pct      = None
     full_kelly_pct = None
-    if (isinstance(bet, (int, float)) and bet > 0
+    if isinstance(file_kelly, (int, float)) and file_kelly >= 0:
+        kelly_pct = round(float(file_kelly), 3)
+    elif (isinstance(bet, (int, float)) and bet > 0
             and isinstance(bank, (int, float)) and bank > 0):
         kelly_pct = round(bet / bank * 100, 3)
-        if kelly_fraction_runtime > 0:
-            full_kelly_pct = round(kelly_pct / kelly_fraction_runtime, 3)
+    if kelly_pct is not None and kelly_fraction_runtime > 0:
+        full_kelly_pct = round(kelly_pct / kelly_fraction_runtime, 3)
     return {
         "sport":      p.get("sport"),
         "game":       p.get("game"),
