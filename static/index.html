@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=10">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -68,6 +68,24 @@
           <button data-kelly="50" class="active">½</button>
           <button data-kelly="75">¾</button>
           <button data-kelly="100">Full</button>
+        </div>
+      </div>
+
+      <!-- Bankroll inputs — drive real-time $ stake column in the tables.
+           Sync (via localStorage) with the run-card inputs in the right pane. -->
+      <div class="bankroll-bar" id="bankroll-bar" hidden>
+        <label>Bankroll</label>
+        <div class="br-input-wrap">
+          <span class="br-tag book-DK">DK</span>
+          <span class="br-prefix">$</span>
+          <input type="number" id="dash-dk-br"
+                 inputmode="decimal" min="0" step="1" value="100">
+        </div>
+        <div class="br-input-wrap">
+          <span class="br-tag book-FD">FD</span>
+          <span class="br-prefix">$</span>
+          <input type="number" id="dash-fd-br"
+                 inputmode="decimal" min="0" step="1" value="100">
         </div>
       </div>
 
@@ -225,6 +243,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

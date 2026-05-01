@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-04-29 v9 (Not Started vs Live + Kelly selector)";
+const BUILD = "2026-05-01 v10 (Real-time $ stake from per-book bankrolls)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -119,6 +119,26 @@ function setKelly(v) {
   localStorage.setItem(KELLY_KEY, String(v));
 }
 
+// User's per-book bankroll. Persisted in localStorage so it survives
+// page reloads and is shared between the dashboard inputs (left pane)
+// and the run-card inputs (right pane).
+const DK_BR_KEY = "arbyx_dk_bankroll";
+const FD_BR_KEY = "arbyx_fd_bankroll";
+function _getBR(key) {
+  const v = parseFloat(localStorage.getItem(key));
+  return Number.isFinite(v) && v >= 0 ? v : 100;
+}
+function getDkBR() { return _getBR(DK_BR_KEY); }
+function getFdBR() { return _getBR(FD_BR_KEY); }
+function setDkBR(v) { localStorage.setItem(DK_BR_KEY, String(v)); }
+function setFdBR(v) { localStorage.setItem(FD_BR_KEY, String(v)); }
+// Pick the right bankroll for an edge based on which book it's on.
+function bankrollFor(book) {
+  if (book === "DraftKings") return getDkBR();
+  if (book === "FanDuel")    return getFdBR();
+  return 0;
+}
+
 async function loadDashboard() {
   const meta = $("#dashboard-meta");
   meta.innerHTML = `<span class="spinner"></span>Loading latest run + grading…`;
@@ -128,6 +148,7 @@ async function loadDashboard() {
   $("#dashboard-play-section").hidden = true;
   $("#dashboard-all-section").hidden = true;
   $("#kelly-bar").hidden = true;
+  $("#bankroll-bar").hidden = true;
 
   try {
     const j = await apiJSON("/api/latest");
@@ -181,10 +202,12 @@ function renderDashboard(arc) {
     kvCell("Best EV", s.best_ev, { full: true }),
   ].join("");
 
-  // Show the Kelly selector now that we have data
+  // Show the Kelly + bankroll selectors now that we have data
   const kelly = getKelly();
   $("#kelly-bar").hidden = false;
+  $("#bankroll-bar").hidden = false;
   syncKellyControls(kelly);
+  syncBankrollControls();
 
   // Play These (filtered actionable picks)
   const play = arc.play_these || [];
@@ -203,12 +226,13 @@ function renderDashboard(arc) {
   }
 }
 
-// Recompute BR% column for both tables when the Kelly fraction changes.
-// Doesn't refetch — operates on the cached _dashCache.
-function applyKellyChange() {
+// Recompute the stake column for both tables when the Kelly fraction
+// or either bankroll changes. Doesn't refetch — operates on _dashCache.
+function applyBettingChange() {
   if (!_dashCache) return;
   const kelly = getKelly();
   syncKellyControls(kelly);
+  syncBankrollControls();
   const play = _dashCache.play_these || [];
   const all  = _dashCache.all_plays  || [];
   if (play.length) {
@@ -228,31 +252,62 @@ function syncKellyControls(kelly) {
   });
 }
 
+// Push the current localStorage bankrolls into all input fields. Used
+// on dashboard render and after one input changes so the other input
+// (run-card vs dashboard) stays in lockstep.
+function syncBankrollControls() {
+  const dk = getDkBR();
+  const fd = getFdBR();
+  for (const id of ["dash-dk-br", "dk-br"]) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el) el.value = dk;
+  }
+  for (const id of ["dash-fd-br", "fd-br"]) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el) el.value = fd;
+  }
+}
+
+function fmtMoneyShort(x) {
+  if (!Number.isFinite(x)) return "—";
+  return x >= 100 ? `$${x.toFixed(0)}` : `$${x.toFixed(2)}`;
+}
+
 // Compact table for the left pane.
-// BR % = full_kelly_pct × user-selected fraction. If full_kelly_pct is
-// missing (older archives without bankroll info), fall back to the stored
-// kelly_pct unscaled.
+// Stake column: bankroll × Kelly% (per-book). Falls back to BR% only
+// when the user has no bankroll set for that book, or when the archive
+// predates the full_kelly_pct field.
 function renderDashboardTable(picks, userKellyFraction) {
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
     const br = (p.full_kelly_pct != null)
       ? p.full_kelly_pct * userKellyFraction
       : p.kelly_pct;
-    const brStr = (br != null) ? `${br.toFixed(2)}%` : "—";
+    const bankroll = bankrollFor(p.book);
+    let stakeCell;
+    if (br == null) {
+      stakeCell = "—";
+    } else if (bankroll > 0) {
+      const dollars = bankroll * (br / 100);
+      stakeCell = `<span class="stake-amt">${fmtMoneyShort(dollars)}</span>` +
+                  `<span class="stake-pct">${br.toFixed(2)}%</span>`;
+    } else {
+      stakeCell = `${br.toFixed(2)}%`;
+    }
     return `<tr>
       <td>${(p.sport || "").toUpperCase()}</td>
       <td>${p.game ?? ""}</td>
       <td class="${bookCls(p.book)}">${shortBook(p.book)}</td>
       <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num">${brStr}</td>
+      <td class="num stake-cell">${stakeCell}</td>
       <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${resultCell(p)}
     </tr>`;
   }).join("");
   return `<thead><tr>
     <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
-    <th>Odds</th><th>BR %</th><th>EV</th><th>Result</th>
+    <th>Odds</th><th>Stake</th><th>EV</th><th>Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
 
@@ -262,16 +317,41 @@ if (_kSlider) {
   _kSlider.addEventListener("input", () => {
     const k = parseInt(_kSlider.value, 10) / 100;
     setKelly(k);
-    applyKellyChange();
+    applyBettingChange();
   });
 }
 document.querySelectorAll(".kelly-presets button").forEach((b) => {
   b.addEventListener("click", () => {
     const k = parseInt(b.dataset.kelly, 10) / 100;
     setKelly(k);
-    applyKellyChange();
+    applyBettingChange();
   });
 });
+
+// Wire the bankroll inputs (both the dashboard pair and the run-card
+// pair). Any change updates localStorage, then re-renders the tables
+// and mirrors the value into the other input.
+function _wireBR(inputId, setter) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const v = parseFloat(el.value);
+    setter(Number.isFinite(v) && v >= 0 ? v : 0);
+    applyBettingChange();
+  });
+}
+_wireBR("dash-dk-br", setDkBR);
+_wireBR("dash-fd-br", setFdBR);
+_wireBR("dk-br",      setDkBR);
+_wireBR("fd-br",      setFdBR);
+// Populate the run-card inputs from localStorage on first load so they
+// match whatever the user last entered (instead of the hardcoded 100).
+{
+  const _dkRun = document.getElementById("dk-br");
+  const _fdRun = document.getElementById("fd-br");
+  if (_dkRun) _dkRun.value = getDkBR();
+  if (_fdRun) _fdRun.value = getFdBR();
+}
 
 function shortBook(book) {
   if (book === "DraftKings") return "DK";
