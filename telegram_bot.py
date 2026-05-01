@@ -2164,37 +2164,25 @@ async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_daily_backtest(context: ContextTypes.DEFAULT_TYPE):
-    """Scheduled job: run a backtest over the past 7 days every night at
-    3 AM ET. Acts as a safety net so picks get graded against
-    box.live / TennisExplorer / Squiggle while their pages still expose
-    the results — boxlive's first-page window is only ~3 weeks. The
-    7-day rolling window also catches games that finished late (East
-    Coast night games, postponements, double-headers).
-
-    Silent on success (shows up in /data/output/backtest_*.xlsx and the
-    dashboard's archive list). Admin gets a DM only if the run errors
-    out so a quiet failure doesn't leave the grading silently stale.
+    """Scheduled job: run a one-day backtest at 3 AM ET covering the day
+    that just finished. Pure data-storage — writes
+    /data/output/backtest_<yesterday>_<yesterday>.xlsx and stays silent
+    on Telegram. The weekly Sunday digest is the only message users see;
+    failure here is logged to the bot output, not DM'd, so the admin
+    chat doesn't get noise.
     """
-    end_dt   = date.today() - timedelta(days=1)
-    start_dt = end_dt - timedelta(days=6)
-    log.info(f"[daily-backtest] Job firing for {start_dt} .. {end_dt}")
+    yday = date.today() - timedelta(days=1)
+    log.info(f"[daily-backtest] Job firing for {yday}")
     try:
         from backtest import run_full_backtest
         result = await asyncio.to_thread(
-            run_full_backtest, start_dt, end_dt, "exclude")
+            run_full_backtest, yday, yday, "exclude")
         n = len(result.get("primary_picks") or [])
         path = result.get("excel_path")
         log.info(f"[daily-backtest] Done — {n} picks graded, "
                  f"output: {os.path.basename(path) if path else 'no picks'}")
-    except Exception as e:
+    except Exception:
         log.exception("[daily-backtest] Run failed")
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"⚠️ Daily backtest failed: {e}",
-            )
-        except Exception:
-            pass
 
 
 async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
@@ -2652,17 +2640,18 @@ def main():
         )
         log.info("Weekly P&L digest scheduled — Sundays 10:00 AM ET.")
 
-        # Daily backtest fallback — 3:00 AM ET. Late evening games on
-        # the West Coast are all final by 2 AM ET, and box.live /
-        # TennisExplorer publish results within minutes of full time,
-        # so 3 AM safely catches everything from yesterday's slate.
+        # Daily one-day backtest — 3:00 AM ET, silent (no Telegram).
+        # Just persists yesterday's graded results to /data/output for
+        # the dashboard archive. Late evening West Coast games are all
+        # final by 2 AM ET and the scrape sources publish within
+        # minutes of full time, so 3 AM safely catches everything.
         app.job_queue.run_daily(
             send_daily_backtest,
             time=dtime(hour=3, minute=0,
                        tzinfo=ZoneInfo("America/New_York")),
             name="daily_backtest",
         )
-        log.info("Daily backtest scheduled — 3:00 AM ET (7-day window).")
+        log.info("Daily backtest scheduled — 3:00 AM ET (yesterday only, silent).")
     else:
         log.warning("JobQueue unavailable — weekly digest disabled. "
                     "Install with: pip install 'python-telegram-bot[job-queue]'")
