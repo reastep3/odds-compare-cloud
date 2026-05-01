@@ -158,8 +158,14 @@ PROMO_SPORT_KEYWORDS = {
     "ncaab": "ncaab", "cbb":      "ncaab",
     "ncaaf": "ncaaf", "cfb":      "ncaaf",
     "soccer": "soccer", "epl":    "soccer",
+    "laliga": "soccer", "bundesliga": "soccer",
     "ufc": "ufc",   "mma":        "ufc",
     "pga": "pga",   "golf":       "pga",
+    "wnba": "wnba",
+    "afl": "afl",
+    "boxing": "boxing",
+    "cricket": "cricket", "ipl": "cricket",
+    "tennis": "tennis", "atp": "tennis", "wta": "tennis",
 }
 
 # Two-word sport phrases checked with one-token lookahead.
@@ -169,6 +175,14 @@ PROMO_SPORT_PHRASES = {
     "college basketball": "ncaab",
     "college football":   "ncaaf",
     "american football":  "nfl",
+    "champions league":   "soccer",
+    "europa league":      "soccer",
+    "serie a":            "soccer",
+    "ligue 1":            "soccer",
+    "liga mx":            "soccer",
+    "la liga":            "soccer",
+    "aussie rules":       "afl",
+    "australian rules":   "afl",
 }
 
 PROMO_MARKET_KEYWORDS = {
@@ -177,6 +191,12 @@ PROMO_MARKET_KEYWORDS = {
     "totals": "totals", "total": "totals", "ou": "totals", "o/u": "totals",
     "hr": "hr", "homerun": "hr", "homeruns": "hr",
     "strikeouts": "strikeouts", "ks": "strikeouts",
+    "hits": "hits",
+    "rbi": "rbis", "rbis": "rbis",
+    "threes": "threes", "3pt": "threes", "3ptm": "threes",
+    "pra": "pra",
+    "dd": "dd", "doubledouble": "dd",
+    "sog": "sog", "shotsongoal": "sog",
 }
 
 # Natural-language filler tokens that carry no semantic weight for the
