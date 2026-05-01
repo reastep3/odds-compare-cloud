@@ -394,3 +394,89 @@ h3 .count {
   .summary-grid { grid-template-columns: 1fr; }
   .build-stamp { font-size: 9px; }
 }
+
+/* ── Mobile card-stack layout ─────────────────────────────────────────
+   On narrow viewports the multi-column tables are unusable — they force
+   horizontal scrolling within already-narrow columns. We collapse each
+   <tr> into a vertical card with [label]: [value] rows. The cell labels
+   come from `data-label="..."` attributes added by the renderers, so
+   any table picks this treatment up automatically by matching the
+   selector. Sport and Game cells get header-styling treatment instead
+   of label-prefix treatment because they're self-explanatory.        */
+@media (max-width: 640px) {
+  .table-wrap { max-height: none; overflow-x: visible; }
+  table { width: 100%; display: block; }
+  table thead { display: none; }
+  table tbody, table tbody tr { display: block; }
+  table tbody tr {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+  }
+  /* Hide divider stripes between rows (visual noise inside cards) */
+  table tbody tr td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 3px 0;
+    border: none;
+    white-space: normal;
+    text-align: right;
+    font-size: 14px;
+  }
+  /* The label that prefixes each value, drawn from data-label */
+  table tbody tr td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: 12px;
+    flex-shrink: 0;
+    text-align: left;
+  }
+  /* Sport: small uppercase tag spanning full width, no label prefix.
+     The cell's text IS the label here. */
+  table tbody tr td.cell-sport {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    padding-bottom: 2px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    justify-content: flex-start;
+  }
+  table tbody tr td.cell-sport::before { display: none; }
+  /* Game: large bold headline at top of card, no label prefix. */
+  table tbody tr td.cell-game {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    justify-content: flex-start;
+    padding-bottom: 6px;
+  }
+  table tbody tr td.cell-game::before { display: none; }
+  /* Rank column (run-edges table): also full-width label-less. */
+  table tbody tr td.cell-rank {
+    font-size: 11px;
+    color: var(--muted);
+    justify-content: flex-start;
+  }
+  table tbody tr td.cell-rank::before { content: "#"; margin-right: 4px; }
+  /* Hide entirely empty cells (e.g., no Pinnacle flag). */
+  table tbody tr td:empty { display: none; }
+  /* Stake cell stacks $/% within its right-aligned slot (already two
+     spans inside) — the existing flex column on .stake-cell handles that. */
+  .stake-cell .stake-amt, .stake-cell .stake-pct {
+    display: inline;
+  }
+  .stake-cell .stake-pct {
+    margin-left: 6px;
+    font-size: 12px;
+  }
+}
