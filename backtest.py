@@ -193,6 +193,9 @@ def _normalise_sport(raw: str) -> str:
 # Sports graded via Squiggle (api.squiggle.com.au — free, no key, AFL only)
 SQUIGGLE_SPORTS = {"afl"}
 
+# Sports graded by scraping box.live (free, public, server-rendered HTML)
+BOXLIVE_SPORTS = {"boxing"}
+
 # Sports graded via ESPN's cricket endpoint, which uses NUMERIC league IDs
 # rather than slugs. Map normalized internal sport key → ESPN league ID.
 # To find an ID: check `https://site.api.espn.com/apis/site/v2/sports/cricket`
@@ -201,9 +204,10 @@ ESPN_CRICKET_LEAGUES: dict[str, int] = {
     "cricket": 8048,   # IPL — covers cricket_ipl picks
 }
 
-# Sports auto-graded by some result source (ESPN, Squiggle, ESPN cricket, etc.)
+# Sports auto-graded by some result source (ESPN, Squiggle, box.live, etc.)
 SCOREABLE = (set(ESPN_SPORT_MAP.keys())
              | SQUIGGLE_SPORTS
+             | BOXLIVE_SPORTS
              | set(ESPN_CRICKET_LEAGUES.keys()))
 
 # "Play These" column positions (1-based). Stable across old and new sheet layouts.
@@ -1255,6 +1259,10 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
         games = _fetch_squiggle_games(date_str)
         _espn_all_cache[cache_key] = games
         return games
+    if sport in BOXLIVE_SPORTS:
+        games = _fetch_boxlive_games(date_str)
+        _espn_all_cache[cache_key] = games
+        return games
     if sport in ESPN_CRICKET_LEAGUES:
         games = _fetch_espn_cricket_games(ESPN_CRICKET_LEAGUES[sport], date_str)
         _espn_all_cache[cache_key] = games
@@ -1516,6 +1524,154 @@ def _fetch_espn_cricket_games(league_id: int, date_str: str) -> list[dict]:
         })
 
     time.sleep(0.15)
+    return games
+
+
+# ── box.live (Boxing) ─────────────────────────────────────────────────
+# Free, public, server-rendered HTML. The `text-schedule__row` /
+# `text-schedule__undercard` blocks are the parser-friendly ones — each
+# has the format:
+#   {fighter A last name}
+#   <span class="...text-winner...">METHOD</span>
+#   vs
+#   <span class="...text-primary...">METHOD</span>
+#   {fighter B last name}
+# The text-winner span sits next to whichever fighter won (left or right).
+_BOXLIVE_URL = "https://box.live/fight-results/"
+_BOXLIVE_TTL = 1800   # 30 min — page covers ~3 weeks of results
+_boxlive_cache: list[dict] | None = None
+_boxlive_cache_time: float = 0.0
+
+
+def _fetch_boxlive_results() -> list[dict]:
+    """Scrape and parse the box.live fight-results page once per TTL.
+    Returns a flat list of fight dicts: {date_str, fighter_a, fighter_b,
+    winner, method, completed}. Date filtering happens in the caller."""
+    global _boxlive_cache, _boxlive_cache_time
+    now = time.time()
+    if _boxlive_cache is not None and (now - _boxlive_cache_time) < _BOXLIVE_TTL:
+        return _boxlive_cache
+    try:
+        resp = _espn_session.get(
+            _BOXLIVE_URL,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"  [box.live] HTTP {resp.status_code}")
+            _boxlive_cache = []
+            _boxlive_cache_time = now
+            return []
+        html = resp.text
+    except Exception as e:
+        print(f"  [box.live] error: {e}")
+        return []
+
+    fights: list[dict] = []
+    # Section delimiter: a date heading (h3 or h4) immediately preceding a
+    # text-schedule div. Parse each section between consecutive headings.
+    date_pattern = re.compile(
+        r'<h[34][^>]*>\s*(\w+,\s+\d+\s+\w+\s+20\d\d)\s*</h[34]>',
+        re.IGNORECASE,
+    )
+    matches = list(date_pattern.finditer(html))
+    for i, m in enumerate(matches):
+        try:
+            dt = datetime.strptime(m.group(1).strip(), "%A, %d %B %Y")
+        except ValueError:
+            continue
+        date_yyyymmdd = dt.strftime("%Y%m%d")
+        section_start = m.end()
+        section_end   = matches[i + 1].start() if i + 1 < len(matches) else len(html)
+        section_html  = html[section_start:section_end]
+        # Only the text-schedule (compact list) parser is reliable; the
+        # schedule-card layout is used for upcoming PPV bouts.
+        if "text-schedule" not in section_html:
+            continue
+        for title_html in re.findall(
+                r'text-schedule__fight-title[^>]*>(.*?)</h5>',
+                section_html, re.DOTALL):
+            f = _parse_boxlive_title(title_html, date_yyyymmdd)
+            if f:
+                fights.append(f)
+        for under_html in re.findall(
+                r'text-schedule__undercard[^>]*>\s*<h6[^>]*>(.*?)</h6>',
+                section_html, re.DOTALL):
+            f = _parse_boxlive_title(under_html, date_yyyymmdd)
+            if f:
+                fights.append(f)
+
+    _boxlive_cache = fights
+    _boxlive_cache_time = now
+    return fights
+
+
+def _parse_boxlive_title(title_html: str, date_str: str) -> dict | None:
+    """Parse one fight title block. The two <span> elements between the
+    fighter names carry the result method; `text-winner` class identifies
+    the winning side."""
+    spans = list(re.finditer(
+        r'<span class="([^"]*)"[^>]*>\s*([^<]*?)\s*</span>',
+        title_html, re.DOTALL))
+    if len(spans) < 2:
+        return None
+    fighter_a = re.sub(r'<[^>]+>', '', title_html[:spans[0].start()]).strip()
+    fighter_b = re.sub(r'<[^>]+>', '', title_html[spans[1].end():]).strip()
+    fighter_a = re.sub(r'\s+', ' ', fighter_a)
+    fighter_b = re.sub(r'\s+', ' ', fighter_b)
+    if not fighter_a or not fighter_b:
+        return None
+    a_class = spans[0].group(1)
+    b_class = spans[1].group(1)
+    if "text-winner" in a_class:
+        winner = fighter_a
+    elif "text-winner" in b_class:
+        winner = fighter_b
+    else:
+        winner = ""
+    completed = bool(winner)
+    method = (spans[0].group(2) or spans[1].group(2)).strip()
+    return {
+        "date_str":  date_str,
+        "fighter_a": fighter_a,
+        "fighter_b": fighter_b,
+        "winner":    winner,
+        "method":    method,
+        "completed": completed,
+    }
+
+
+def _fetch_boxlive_games(date_str: str) -> list[dict]:
+    """Filter parsed box.live fights to one date and emit results in the
+    standard ESPN shape (home_team/away_team/scores/winner). The Odds API
+    and box.live can disagree on which fighter is "home" vs "away", so we
+    emit BOTH orderings — _find_game_result will pick whichever matches
+    the pick's "Away @ Home" convention."""
+    games: list[dict] = []
+    for f in _fetch_boxlive_results():
+        if f["date_str"] != date_str:
+            continue
+        a, b = f["fighter_a"], f["fighter_b"]
+        winner = f["winner"]
+        completed = f["completed"]
+        for away, home in ((a, b), (b, a)):
+            a_won = (winner == away) if completed else False
+            h_won = (winner == home) if completed else False
+            games.append({
+                "home_team":  home,
+                "home_abbr":  "",
+                "home_short": home.split()[-1] if home else "",
+                "home_score": 1 if h_won else 0,
+                "away_team":  away,
+                "away_abbr":  "",
+                "away_short": away.split()[-1] if away else "",
+                "away_score": 1 if a_won else 0,
+                "winner":     winner,
+                "total":      1,
+                "event_id":   "",
+                "completed":  completed,
+                "status":     "STATUS_FINAL" if completed else "STATUS_SCHEDULED",
+            })
     return games
 
 
