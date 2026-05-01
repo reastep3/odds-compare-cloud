@@ -1304,51 +1304,115 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
 
     games = []
     for event in events:
-        comp        = event.get("competitions", [{}])[0]
-        status_obj  = comp.get("status", {}).get("type", {})
-        status_name = status_obj.get("name", "")
-        completed   = status_obj.get("completed", False) \
-                      or status_name in _FINAL
+        # Iterate ALL competitions, not just [0]. Team sports have one
+        # competition per event (the game), but combat sports (UFC, MMA)
+        # pack the entire fight card under one event with N competitions
+        # — taking [0] silently dropped 11/12 fights per night.
+        for comp in event.get("competitions", []):
+            status_obj  = comp.get("status", {}).get("type", {})
+            status_name = status_obj.get("name", "")
+            completed   = status_obj.get("completed", False) \
+                          or status_name in _FINAL
 
-        teams: dict[str, dict] = {}
-        for competitor in comp.get("competitors", []):
-            team_info = competitor.get("team", {})
-            ha = competitor.get("homeAway", "")
-            teams[ha] = {
-                "name":       team_info.get("displayName", ""),
-                "abbr":       team_info.get("abbreviation", ""),
-                "short":      team_info.get("shortDisplayName", ""),
-                "score":      int(competitor.get("score", 0) or 0),
-                "winner":     bool(competitor.get("winner", False)),
-            }
+            # MMA / boxing competitors carry homeAway: None instead of
+            # "home" / "away". Fall back to ESPN's `order` field
+            # (1 = first listed, 2 = second listed) — emit both
+            # orderings later so it doesn't matter which side the pick
+            # named.
+            slots: list[dict] = []
+            for competitor in comp.get("competitors", []):
+                team_info = competitor.get("team", {}) or {}
+                ha = competitor.get("homeAway") or ""
+                # ESPN MMA competitors return winner as a Python bool;
+                # cricket returns it as a "true"/"false" STRING. Handle
+                # both safely.
+                raw_w = competitor.get("winner", False)
+                is_winner = (raw_w is True
+                             or str(raw_w).strip().lower() == "true")
+                slot = {
+                    "name":   team_info.get("displayName", ""),
+                    "abbr":   team_info.get("abbreviation", ""),
+                    "short":  team_info.get("shortDisplayName", ""),
+                    "score":  int(competitor.get("score", 0) or 0),
+                    "winner": is_winner,
+                    "ha":     ha,
+                    "order":  competitor.get("order", 0),
+                }
+                slots.append(slot)
 
-        if "home" not in teams or "away" not in teams:
-            continue
+            # Need exactly two competitors to make a head-to-head game.
+            if len(slots) != 2:
+                continue
 
-        winner_team = ""
-        if completed:
-            winner_team = (teams["home"]["name"] if teams["home"]["winner"]
-                           else teams["away"]["name"])
+            # Team sport: ESPN tells us which is home and which is away.
+            home_slot = away_slot = None
+            for s in slots:
+                if s["ha"] == "home": home_slot = s
+                elif s["ha"] == "away": away_slot = s
+            if home_slot and away_slot:
+                winner_team = ""
+                if completed:
+                    winner_team = (home_slot["name"] if home_slot["winner"]
+                                   else away_slot["name"])
+                games.append(_build_game_dict(home_slot, away_slot,
+                                              winner_team, completed,
+                                              status_name, event.get("id", "")))
+                continue
 
-        games.append({
-            "home_team":  teams["home"]["name"],
-            "home_abbr":  teams["home"]["abbr"],
-            "home_short": teams["home"]["short"],
-            "home_score": teams["home"]["score"],
-            "away_team":  teams["away"]["name"],
-            "away_abbr":  teams["away"]["abbr"],
-            "away_short": teams["away"]["short"],
-            "away_score": teams["away"]["score"],
-            "winner":     winner_team,
-            "total":      teams["home"]["score"] + teams["away"]["score"],
-            "event_id":   event.get("id", ""),
-            "completed":  completed,
-            "status":     status_name,
-        })
+            # Combat sport (no homeAway): fall back to `order`. Emit
+            # BOTH orderings so the pick's "Away @ Home" string can
+            # match either way. ESPN's score field is 0 for combat
+            # sports (no points scored), so we synthesize 1/0 from the
+            # winner flag — otherwise grade_pick would see equal scores
+            # and PUSH every fight.
+            slots.sort(key=lambda s: s.get("order") or 0)
+            a, b = slots[0], slots[1]
+            winner_name = ""
+            if completed:
+                if a["winner"]: winner_name = a["name"]
+                elif b["winner"]: winner_name = b["name"]
+            for away_s, home_s in ((a, b), (b, a)):
+                a_won = bool(away_s["winner"]) and completed
+                h_won = bool(home_s["winner"]) and completed
+                games.append({
+                    "home_team":  home_s["name"],
+                    "home_abbr":  home_s["abbr"],
+                    "home_short": home_s["short"],
+                    "home_score": 1 if h_won else 0,
+                    "away_team":  away_s["name"],
+                    "away_abbr":  away_s["abbr"],
+                    "away_short": away_s["short"],
+                    "away_score": 1 if a_won else 0,
+                    "winner":     winner_name,
+                    "total":      1 if completed else 0,
+                    "event_id":   event.get("id", ""),
+                    "completed":  completed,
+                    "status":     status_name,
+                })
 
     _espn_all_cache[cache_key] = games
     time.sleep(0.15)
     return games
+
+
+def _build_game_dict(home_slot: dict, away_slot: dict, winner_team: str,
+                     completed: bool, status_name: str, event_id: str) -> dict:
+    """Assemble the standard ESPN-shape game dict from two competitor slots."""
+    return {
+        "home_team":  home_slot["name"],
+        "home_abbr":  home_slot["abbr"],
+        "home_short": home_slot["short"],
+        "home_score": home_slot["score"],
+        "away_team":  away_slot["name"],
+        "away_abbr":  away_slot["abbr"],
+        "away_short": away_slot["short"],
+        "away_score": away_slot["score"],
+        "winner":     winner_team,
+        "total":      home_slot["score"] + away_slot["score"],
+        "event_id":   event_id,
+        "completed":  completed,
+        "status":     status_name,
+    }
 
 
 # ── Squiggle (AFL) ────────────────────────────────────────────────────
