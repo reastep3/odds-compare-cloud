@@ -1321,7 +1321,12 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
             # named.
             slots: list[dict] = []
             for competitor in comp.get("competitors", []):
-                team_info = competitor.get("team", {}) or {}
+                # Team sports populate `team`; combat sports (UFC/MMA)
+                # populate `athlete` instead (same field shape: fullName,
+                # displayName, shortName).
+                info = (competitor.get("team")
+                        or competitor.get("athlete")
+                        or {})
                 ha = competitor.get("homeAway") or ""
                 # ESPN MMA competitors return winner as a Python bool;
                 # cricket returns it as a "true"/"false" STRING. Handle
@@ -1329,10 +1334,13 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
                 raw_w = competitor.get("winner", False)
                 is_winner = (raw_w is True
                              or str(raw_w).strip().lower() == "true")
+                # Athlete records don't have abbreviation/shortDisplayName,
+                # but they do have shortName ("J. Siraj") — handy as a
+                # fuzzy-match alias.
                 slot = {
-                    "name":   team_info.get("displayName", ""),
-                    "abbr":   team_info.get("abbreviation", ""),
-                    "short":  team_info.get("shortDisplayName", ""),
+                    "name":   info.get("displayName") or info.get("fullName") or "",
+                    "abbr":   info.get("abbreviation", ""),
+                    "short":  info.get("shortDisplayName") or info.get("shortName") or "",
                     "score":  int(competitor.get("score", 0) or 0),
                     "winner": is_winner,
                     "ha":     ha,
