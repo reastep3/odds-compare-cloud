@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-01 v10 (Real-time $ stake from per-book bankrolls)";
+const BUILD = "2026-05-01 v11 (Run-skip picks visible + TZ selector)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -117,6 +117,19 @@ function getKelly() {
 }
 function setKelly(v) {
   localStorage.setItem(KELLY_KEY, String(v));
+}
+
+// Display timezone. Filenames encode UTC ('cause Fly machines run UTC),
+// so we always parse as UTC and convert at render time. "auto" defers
+// to the browser's resolved timezone.
+const TZ_KEY = "arbyx_timezone";
+function getTZ() {
+  return localStorage.getItem(TZ_KEY) || "auto";
+}
+function setTZ(v) { localStorage.setItem(TZ_KEY, v); }
+function tzOptions() {
+  const tz = getTZ();
+  return tz === "auto" ? {} : { timeZone: tz };
 }
 
 // User's per-book bankroll. Persisted in localStorage so it survives
@@ -364,6 +377,24 @@ function shortBook(book) {
 const _dashRefresh = document.querySelector("#dashboard-refresh");
 if (_dashRefresh) _dashRefresh.addEventListener("click", loadDashboard);
 
+// Timezone dropdown — populate from localStorage and re-render the
+// dashboard meta line + archive list when changed. Game-time strings
+// inside picks are pre-baked in ET by the bot, so we only need to
+// re-render the filename-derived headers.
+{
+  const _tz = document.getElementById("tz-select");
+  if (_tz) {
+    _tz.value = getTZ();
+    _tz.addEventListener("change", () => {
+      setTZ(_tz.value);
+      if (_dashCache) renderDashboard(_dashCache);
+      // Re-render archive list if it's been loaded already.
+      const archList = document.getElementById("archives-list");
+      if (archList && archList.childElementCount > 0) loadArchives();
+    });
+  }
+}
+
 // ── Run scan ─────────────────────────────────────────────────────────
 
 function setStatus(el, msg, kind) {
@@ -389,14 +420,19 @@ function prettyArchiveName(filename, mtimeSec) {
     return { primary: filename, secondary: "", isAnOnly: false };
   }
   const [, y, mo, d, hh, mm] = m;
-  // Use the parsed time-in-filename (UTC-naive — it's local time from
-  // the machine that generated it). Build a JS Date for formatting.
-  const dt = new Date(+y, +mo - 1, +d, +hh, +mm);
-  const sameYear = dt.getFullYear() === new Date().getFullYear();
+  // Filenames are written by Fly's UTC-clock container, so parse the
+  // timestamp as UTC and let toLocale*String handle the display TZ.
+  const dt = new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mm));
+  const tzOpt = tzOptions();
+  const sameYear = (
+    new Date().toLocaleDateString("en-US", { ...tzOpt, year: "numeric" })
+    === dt.toLocaleDateString("en-US", { ...tzOpt, year: "numeric" })
+  );
   const dateOpts = sameYear
-    ? { month: "short", day: "numeric" }
-    : { month: "short", day: "numeric", year: "numeric" };
-  const timeOpts = { hour: "numeric", minute: "2-digit" };
+    ? { ...tzOpt, month: "short", day: "numeric" }
+    : { ...tzOpt, month: "short", day: "numeric", year: "numeric" };
+  const timeOpts = { ...tzOpt, hour: "numeric", minute: "2-digit",
+                     timeZoneName: "short" };
   const datePart = dt.toLocaleDateString(undefined, dateOpts);
   const timePart = dt.toLocaleTimeString(undefined, timeOpts);
   return {

@@ -501,7 +501,12 @@ def _read_play_these(filepath: str, file_dt: date) -> list[dict]:
         market = raw_market.strip().upper()
         if market not in VALID_MARKETS:
             continue
-        if not isinstance(raw_bet_amt, (int, float)) or raw_bet_amt <= 0:
+        # Allow bet_amt=0 (the run may have been /run_skip which sets
+        # bankroll=0). The market filter above already rejects header,
+        # banner, and totals rows, so we don't need bet_amt as a row
+        # validity guard. The bet column must still be numeric (None
+        # in totals/banner rows).
+        if not isinstance(raw_bet_amt, (int, float)) or raw_bet_amt < 0:
             continue
 
         def _s(v): return str(v).strip() if v is not None else ""
@@ -518,6 +523,7 @@ def _read_play_these(filepath: str, file_dt: date) -> list[dict]:
         odds_raw  = row_vals[_COL_ODDS - 1]
         ev_raw    = row_vals[_COL_EV - 1]
         conf      = _s(row_vals[_COL_CONFIDENCE - 1])
+        kelly_raw = row_vals[_COL_KELLY - 1] if len(row_vals) >= _COL_KELLY else None
         bet_amt   = float(raw_bet_amt)
         potential = row_vals[_COL_POTENTIAL - 1]
 
@@ -559,6 +565,7 @@ def _read_play_these(filepath: str, file_dt: date) -> list[dict]:
             "decimal":     round(decimal, 4) if decimal else None,
             "ev_pct":      _f(ev_raw) or 0.0,
             "confidence":  conf,
+            "kelly_pct":   _f(kelly_raw),
             "bet_amount":  bet_amt,
             "potential":   _f(potential),
             "source_file": os.path.basename(filepath),
@@ -875,7 +882,9 @@ def _read_ev_edges(filepath: str, file_dt: date) -> list[dict]:
         market = raw_market.strip().upper()
         if market not in VALID_MARKETS:
             continue
-        if not isinstance(raw_bet_amt, (int, float)) or raw_bet_amt <= 0:
+        # Allow bet_amt=0 (the run may have been /run_skip with bankroll=0).
+        # The market filter above is already enough to reject non-data rows.
+        if not isinstance(raw_bet_amt, (int, float)) or raw_bet_amt < 0:
             continue
 
         def _s(v): return str(v).strip() if v is not None else ""
@@ -892,6 +901,7 @@ def _read_ev_edges(filepath: str, file_dt: date) -> list[dict]:
         odds_raw  = row_vals[_EV_COL_ODDS - 1]
         dec_raw   = row_vals[_EV_COL_DECIMAL - 1]
         ev_raw    = row_vals[_EV_COL_EV_PCT - 1]
+        kelly_raw = row_vals[_EV_COL_KELLY - 1] if len(row_vals) >= _EV_COL_KELLY else None
         bet_amt   = float(raw_bet_amt)
         potential = row_vals[_EV_COL_POTENTIAL - 1]
         num_books_raw = row_vals[_EV_COL_NUM_BOOKS - 1] \
@@ -937,6 +947,7 @@ def _read_ev_edges(filepath: str, file_dt: date) -> list[dict]:
             "decimal":     round(decimal, 4) if decimal else None,
             "ev_pct":      _f(ev_raw) or 0.0,
             "confidence":  "",           # EV Edges has no confidence label
+            "kelly_pct":   _f(kelly_raw),
             "bet_amount":  bet_amt,
             "potential":   _f(potential),
             "num_books":   int(num_books_raw) if num_books_raw else 0,

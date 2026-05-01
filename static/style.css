@@ -69,6 +69,20 @@ header {
   margin-bottom: 4px;
 }
 .dashboard-header h2 { margin: 0; }
+.dashboard-header-tools {
+  display: flex; align-items: center; gap: 8px;
+}
+.tz-select {
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.tz-select:hover { border-color: var(--primary); }
 .ghost-btn.small { padding: 4px 10px; font-size: 13px; }
 
 /* In-progress (live) game indicator */
