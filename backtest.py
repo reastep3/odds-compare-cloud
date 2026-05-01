@@ -66,6 +66,7 @@ ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "archive")
 ESPN_SPORT_MAP = {
     "nba":    "basketball/nba",
     "ncaab":  "basketball/mens-college-basketball",
+    "wnba":   "basketball/wnba",
     "nfl":    "football/nfl",
     "ncaaf":  "football/college-football",
     "mlb":    "baseball/mlb",
@@ -83,6 +84,12 @@ ESPN_SPORT_MAP = {
     "bundesliga":    "soccer/ger.1",   # German Bundesliga
     "champions":     "soccer/uefa.champions",
     "europa":        "soccer/uefa.europa",
+    "conference":    "soccer/uefa.europa.conf",
+    "ligamx":        "soccer/mex.1",
+    # AFL / Boxing / Cricket / Tennis are not auto-graded via ESPN — they
+    # surface in the picks output but skip backtest grading. (ESPN's
+    # AFL coverage is intermittent and tennis/cricket use different slug
+    # conventions per tournament.)
 }
 
 # Normalise raw AN league names → ESPN_SPORT_MAP keys.
@@ -149,11 +156,20 @@ _SPORT_NORM: dict[str, str] = {
     "german bundesliga":                "bundesliga",
     "germany - bundesliga":             "bundesliga",
     "ger.1":                            "bundesliga",
-    # Soccer — Champions League / Europa
+    # Soccer — Champions League / Europa / Conference
     "champions league":                 "champions",
     "uefa champions league":            "champions",
     "europa league":                    "europa",
     "uefa europa league":               "europa",
+    "conference league":                "conference",
+    "uefa europa conference league":    "conference",
+    # Soccer — Liga MX
+    "liga mx":                          "ligamx",
+    "mexico liga mx":                   "ligamx",
+    "mex.1":                            "ligamx",
+    # WNBA
+    "wnba":                             "wnba",
+    "women's national basketball association": "wnba",
     # Handle already-normalised keys passed through
     **{k: k for k in ESPN_SPORT_MAP},
 }
@@ -583,8 +599,17 @@ def _extract_sport_from_promo(promo_desc: str) -> str | None:
         ("la liga",            "laliga"),
         ("champions league",   "champions"),
         ("europa league",      "europa"),
+        ("conference league",  "conference"),
+        ("liga mx",            "ligamx"),
         ("mls",                "mls"),
         ("soccer",             "soccer"),
+        ("wnba",               "wnba"),
+        ("afl",                "afl"),
+        ("aussie rules",       "afl"),
+        ("boxing",             "boxing"),
+        ("cricket",            "cricket"),
+        ("ipl",                "cricket"),
+        ("tennis",             "tennis"),
     ]:
         if needle in desc:
             return sport

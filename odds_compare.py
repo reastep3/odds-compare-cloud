@@ -130,8 +130,14 @@ AN_BOOK_IDS: dict[int, str] = {
 # Normalised book keys we actually bet on (must match _book_key() output)
 TARGET_BOOKS = {"draftkings", "fanduel"}
 
-# v2 scoreboard sport slugs (LOWERCASE required).
-# If a sport returns nothing, check actionnetwork.com DevTools for the slug.
+# Master sport iteration list. Drives _fetch_sport_all() across the full
+# scan. A sport in this list MUST have an ODDS_API_SPORTS entry; the
+# legacy AN/Pinnacle/Bovada/DK/FD-direct lookups below are optional and
+# only used if the Odds API fetch returns empty for that sport.
+#
+# Slug naming: lowercase, internal codes (not API keys). Legacy original
+# 8 (nba, ncaab, nfl, ncaaf, mlb, nhl, ufc, soccer) kept for AN-fallback
+# slug compatibility. New entries below them are API-only.
 AN_SPORTS = [
     "nba",
     "ncaab",
@@ -140,7 +146,13 @@ AN_SPORTS = [
     "mlb",
     "nhl",
     "ufc",       # was "MMA" — v2 uses "ufc"
-    "soccer",    # MLS + international; filter by league name in Excel
+    "soccer",    # multi-league: see ODDS_API_SPORTS["soccer"]
+    # ── API-only additions (no AN fallback configured) ────────────────
+    "wnba",      # WNBA — season starts mid-May
+    "afl",       # Australian Rules Football
+    "boxing",    # Major boxing matches
+    "cricket",   # IPL + other major cricket tournaments
+    "tennis",    # ATP/WTA — sport key resolved dynamically per-tournament
 ]
 
 ACTION_NETWORK_BASE = "https://api.actionnetwork.com/web/v2"
@@ -151,16 +163,46 @@ ACTION_NETWORK_BASE = "https://api.actionnetwork.com/web/v2"
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# Map internal sport codes → The Odds API sport keys
+# Map internal sport codes → The Odds API sport keys.
+#
+# Special values:
+#   "_dynamic_active:<prefix>"  → at fetch time, hit /sports?all=true and
+#                                 use every active sport key starting with
+#                                 <prefix>. Used for sports with rotating
+#                                 per-tournament keys (tennis, golf majors).
 ODDS_API_SPORTS: dict[str, str | list[str]] = {
-    "nba":    "basketball_nba",
-    "ncaab":  "basketball_ncaab",
-    "nfl":    "americanfootball_nfl",
-    "ncaaf":  "americanfootball_ncaaf",
-    "mlb":    "baseball_mlb",
-    "nhl":    "icehockey_nhl",
-    "ufc":    "mma_mixed_martial_arts",
-    "soccer": ["soccer_usa_mls"],
+    # US team sports
+    "nba":     "basketball_nba",
+    "ncaab":   "basketball_ncaab",
+    "wnba":    "basketball_wnba",
+    "nfl":     "americanfootball_nfl",
+    "ncaaf":   "americanfootball_ncaaf",
+    "mlb":     "baseball_mlb",
+    "nhl":     "icehockey_nhl",
+    "ufc":     "mma_mixed_martial_arts",
+    # Soccer — top European + American leagues. Add/remove as the
+    # calendar dictates. A league with no in-season fixtures returns
+    # an empty list at no credit cost.
+    "soccer": [
+        "soccer_usa_mls",
+        "soccer_epl",
+        "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
+        "soccer_uefa_europa_conference_league",
+        "soccer_spain_la_liga",
+        "soccer_italy_serie_a",
+        "soccer_germany_bundesliga",
+        "soccer_france_ligue_one",
+        "soccer_mexico_ligamx",
+    ],
+    # Other sports
+    "afl":     "aussierules_afl",
+    "boxing":  "boxing_boxing",
+    "cricket": ["cricket_ipl"],
+    # Tennis: the Odds API uses one key per tournament (e.g.
+    # tennis_atp_french_open). Resolved at fetch time so the active
+    # ATP/WTA events on tour are picked up automatically.
+    "tennis":  "_dynamic_active:tennis_",
 }
 
 # Books to request from The Odds API
@@ -169,17 +211,32 @@ ODDS_API_BOOKMAKERS = (
     "caesars,betrivers,espnbet,bet365,lowvig,betonlineag"
 )
 
-# Player prop market keys by sport
+# Player prop market keys by sport.
+#
+# Each per-event call costs `(unique markets returned) × regions` credits,
+# so adding markets here multiplies prop-fetch cost. The picks below are
+# the markets with historically softest pricing on DK/FD vs Pinnacle —
+# i.e. the highest +EV per credit spent.
 ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
     # (api_market_key, internal_market_key, display_name)
     "nba": [
-        ("player_points",   "pts", "Points"),
-        ("player_rebounds",  "reb", "Rebounds"),
-        ("player_assists",   "ast", "Assists"),
+        ("player_points",                    "pts",         "Points"),
+        ("player_rebounds",                  "reb",         "Rebounds"),
+        ("player_assists",                   "ast",         "Assists"),
+        ("player_threes",                    "threes",      "3-Pointers"),
+        ("player_points_rebounds_assists",   "pra",         "Pts+Reb+Ast"),
+        ("player_double_double",             "dd",          "Double-Double"),
     ],
     "mlb": [
-        ("pitcher_strikeouts", "strikeouts", "Strikeouts"),
-        ("batter_total_bases", "total_bases", "Total Bases"),
+        ("pitcher_strikeouts",  "strikeouts",  "Strikeouts"),
+        ("batter_total_bases",  "total_bases", "Total Bases"),
+        ("batter_home_runs",    "hr",          "Anytime HR"),
+        ("batter_hits",         "hits",        "Hits"),
+        ("batter_rbis",         "rbis",        "RBIs"),
+    ],
+    "nhl": [
+        ("player_shots_on_goal", "sog",     "Shots on Goal"),
+        ("player_points",        "nhl_pts", "Points"),
     ],
 }
 
@@ -394,6 +451,52 @@ def make_session() -> requests.Session:
 # The Odds API — primary data source
 # ──────────────────────────────────────────────────────────────────────
 
+_DYNAMIC_ACTIVE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_DYNAMIC_ACTIVE_TTL = 3600   # seconds — refresh active tournaments hourly
+
+
+def _resolve_dynamic_active_keys(prefix: str) -> list[str]:
+    """
+    Resolve a `_dynamic_active:<prefix>` token to the currently-active
+    Odds API sport keys whose `key` field starts with `prefix`.
+
+    Used for sports where The Odds API exposes one key per tournament
+    (tennis, golf majors). Cached for an hour to avoid hammering the
+    free /sports endpoint on parallel sport-fetch threads.
+    """
+    from bot_config import ODDS_API_KEY
+
+    cached = _DYNAMIC_ACTIVE_CACHE.get(prefix)
+    if cached and (time.time() - cached[0]) < _DYNAMIC_ACTIVE_TTL:
+        return cached[1]
+
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports",
+            params={"apiKey": ODDS_API_KEY, "all": "false"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            print(f"  [OddsAPI/dynamic:{prefix}] sports list HTTP {r.status_code}")
+            return []
+        sports_list = r.json()
+    except Exception as e:
+        print(f"  [OddsAPI/dynamic:{prefix}] sports list error: {e}")
+        return []
+
+    keys = [s.get("key") for s in sports_list
+            if isinstance(s, dict)
+            and isinstance(s.get("key"), str)
+            and s["key"].startswith(prefix)
+            and s.get("active", True)]
+    keys = [k for k in keys if k]
+    _DYNAMIC_ACTIVE_CACHE[prefix] = (time.time(), keys)
+    if keys:
+        print(f"  [OddsAPI/dynamic:{prefix}] resolved {len(keys)} active "
+              f"key(s): {', '.join(keys)}")
+    return keys
+
+
 def fetch_odds_api(sport: str, session: requests.Session | None = None,
                    ) -> tuple[list[dict], dict]:
     """
@@ -410,7 +513,14 @@ def fetch_odds_api(sport: str, session: requests.Session | None = None,
         return [], {}
 
     if isinstance(api_keys, str):
-        api_keys = [api_keys]
+        # Dynamic resolver: e.g. "_dynamic_active:tennis_"
+        if api_keys.startswith("_dynamic_active:"):
+            prefix = api_keys.split(":", 1)[1]
+            api_keys = _resolve_dynamic_active_keys(prefix)
+            if not api_keys:
+                return [], {}
+        else:
+            api_keys = [api_keys]
 
     all_events: list[dict] = []
     status_summary: dict[str, int] = {}
@@ -536,8 +646,16 @@ def fetch_odds_api_props(sport: str) -> list[dict]:
 
                 for oc in mkt.get("outcomes", []):
                     player = oc.get("description", "")
-                    side_name = oc.get("name", "").lower()
-                    if side_name not in ("over", "under"):
+                    raw_side = oc.get("name", "").lower()
+                    # Yes/No markets (anytime HR, double-double, anytime TD)
+                    # use the same vig-removal math as Over/Under, so we map
+                    # Yes→over and No→under to flow through the existing
+                    # pair-and-devig pipeline unchanged.
+                    if raw_side in ("over", "yes"):
+                        side_name = "over"
+                    elif raw_side in ("under", "no"):
+                        side_name = "under"
+                    else:
                         continue
                     try:
                         odds = int(oc.get("price", 0))
@@ -5522,7 +5640,11 @@ def find_player_prop_edges(props: list[dict]) -> list[dict]:
                 ev = calc_ev(fair_prob, dec)
                 if ev >= MIN_EV_PERCENT:
                     kelly      = kelly_bet(fair_prob, dec)
-                    side_label = "O" if side == "over" else "U"
+                    # Binary Yes/No markets (anytime HR, double-double) come
+                    # through with line=None — label them Y/N rather than O/U.
+                    is_binary  = line is None
+                    side_label = (("Y" if side == "over" else "N") if is_binary
+                                  else ("O" if side == "over" else "U"))
                     edges.append({
                         "sport":             pair["sport"],
                         "game":              game,
@@ -5831,16 +5953,21 @@ def apply_profit_boost(decimal_odds: float, boost_pct: float) -> float:
 
 # Valid sport labels that promos can target
 PROMO_SPORTS = {
-    "all":    "All Sports",
-    "nba":    "NBA",
-    "mlb":    "MLB",
-    "nhl":    "NHL",
-    "nfl":    "NFL",
-    "ncaab":  "NCAAB",
-    "ncaaf":  "NCAAF",
-    "soccer": "Soccer",
-    "ufc":    "UFC",
-    "pga":    "PGA Tour",
+    "all":     "All Sports",
+    "nba":     "NBA",
+    "mlb":     "MLB",
+    "nhl":     "NHL",
+    "nfl":     "NFL",
+    "ncaab":   "NCAAB",
+    "ncaaf":   "NCAAF",
+    "soccer":  "Soccer",
+    "ufc":     "UFC",
+    "pga":     "PGA Tour",
+    "wnba":    "WNBA",
+    "afl":     "AFL",
+    "boxing":  "Boxing",
+    "cricket": "Cricket",
+    "tennis":  "Tennis",
 }
 
 # Valid market labels
@@ -5849,12 +5976,23 @@ PROMO_MARKETS = {
     "h2h":         "Moneyline",
     "spreads":     "Spreads",
     "totals":      "Totals",
+    # MLB props
     "hr":          "Anytime HR",
     "strikeouts":  "Strikeouts",
     "total_bases": "Total Bases",
+    "hits":        "Hits",
+    "rbis":        "RBIs",
+    # NBA props
     "pts":         "NBA Points",
     "reb":         "NBA Rebounds",
     "ast":         "NBA Assists",
+    "threes":      "NBA 3-Pointers",
+    "pra":         "NBA Pts+Reb+Ast",
+    "dd":          "NBA Double-Double",
+    # NHL props
+    "sog":         "NHL Shots on Goal",
+    "nhl_pts":     "NHL Points",
+    # Golf props
     "golf_top5":   "Golf Top 5 Finish",
     "golf_top10":  "Golf Top 10 Finish",
     "golf_top20":  "Golf Top 20 Finish",
@@ -6191,7 +6329,16 @@ _LEAGUE_TO_SPORT = {
     "mls": "soccer", "ligue1": "soccer", "epl": "soccer",
     "laliga": "soccer", "bundesliga": "soccer", "seriea": "soccer",
     "soccer": "soccer",
+    "championsleague": "soccer", "uefachampions": "soccer",
+    "europaleague": "soccer", "uefaeuropa": "soccer",
+    "ligamx": "soccer",
     "pga": "pga",
+    # New API-only sports
+    "wnba": "wnba",
+    "afl": "afl", "aussierules": "afl",
+    "boxing": "boxing",
+    "cricket": "cricket", "ipl": "cricket",
+    "tennis": "tennis", "atp": "tennis", "wta": "tennis",
 }
 
 # Golf market internal keys (for quick membership tests)
