@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-01 v11 (Run-skip picks visible + TZ selector)";
+const BUILD = "2026-05-01 v12 (Mobile card-stack layout)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -308,13 +308,13 @@ function renderDashboardTable(picks, userKellyFraction) {
       stakeCell = `${br.toFixed(2)}%`;
     }
     return `<tr>
-      <td>${(p.sport || "").toUpperCase()}</td>
-      <td>${p.game ?? ""}</td>
-      <td class="${bookCls(p.book)}">${shortBook(p.book)}</td>
-      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
-      <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num stake-cell">${stakeCell}</td>
-      <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${shortBook(p.book)}</td>
+      <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      <td data-label="Stake" class="num stake-cell">${stakeCell}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -462,16 +462,16 @@ function renderEdges(edges) {
                    : e.book === "FanDuel"   ? "book-FD" : "";
     const ev = Number(e.ev_pct ?? 0);
     return `<tr>
-      <td class="num">${i + 1}</td>
-      <td>${e.sport ?? ""}</td>
-      <td>${e.game ?? ""}</td>
-      <td class="${bookCls}">${e.book ?? ""}</td>
-      <td>${e.market ?? ""}</td>
-      <td>${e.outcome ?? ""}${e.line != null ? ` (${e.line})` : ""}</td>
-      <td class="num">${fmtAmerican(e.odds)}</td>
-      <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev)}</td>
-      <td class="num">${fmtPct(e.kelly_pct, 2)}</td>
-      <td>${e.pinnacle_anchored ? "📌" : ""}</td>
+      <td data-label="#" class="num cell-rank">${i + 1}</td>
+      <td data-label="Sport" class="cell-sport">${e.sport ?? ""}</td>
+      <td data-label="Game" class="cell-game">${e.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls}">${e.book ?? ""}</td>
+      <td data-label="Mkt">${e.market ?? ""}</td>
+      <td data-label="Pick">${e.outcome ?? ""}${e.line != null ? ` (${e.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(e.odds)}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev)}</td>
+      <td data-label="Kelly" class="num">${fmtPct(e.kelly_pct, 2)}</td>
+      <td data-label="Sharp">${e.pinnacle_anchored ? "📌 Pinnacle" : ""}</td>
     </tr>`;
   }).join("");
   $("#run-edges-table").innerHTML = `
@@ -712,36 +712,36 @@ function fmtBet(v) {
 
 function resultCell(p) {
   const r = p.result;
-  if (!r) return `<td class="muted">—</td>`;
+  if (!r) return `<td data-label="Result" class="muted">—</td>`;
   if (r === "NOT_STARTED") {
-    return `<td class="muted">📅 Not started</td>`;
+    return `<td data-label="Result" class="muted">📅 Not started</td>`;
   }
   if (r === "IN_PROGRESS" || r === "PENDING") {
     // PENDING is legacy (pre-status-split archives). Treat as live too.
-    return `<td class="live"><span class="live-dot"></span>Live</td>`;
+    return `<td data-label="Result" class="live"><span class="live-dot"></span>Live</td>`;
   }
   if (r === "MANUAL" || r === "NO_RESULT" || r === "UNKNOWN") {
-    return `<td class="muted">—</td>`;
+    return `<td data-label="Result" class="muted">—</td>`;
   }
   const cls = r === "WIN" ? "pos" : r === "LOSS" ? "neg" : "";
   const u   = p.unit_return_pct;
   const ret = (u !== null && u !== undefined)
     ? ` <span class="muted">${u >= 0 ? "+" : ""}${u.toFixed(1)}%</span>`
     : "";
-  return `<td class="${cls}"><b>${r}</b>${ret}</td>`;
+  return `<td data-label="Result" class="${cls}"><b>${r}</b>${ret}</td>`;
 }
 
 function renderPlayTheseTable(picks) {
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
     return `<tr>
-      <td>${(p.sport || "").toUpperCase()}</td>
-      <td>${p.game ?? ""}</td>
-      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
-      <td>${p.market ?? ""}</td>
-      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
-      <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td data-label="Mkt">${p.market ?? ""}</td>
+      <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -757,13 +757,13 @@ function renderPromoTable(promos) {
   const rows = promos.map((p) => {
     const boostEv = Number(p.boost_ev ?? p.orig_ev ?? 0);
     return `<tr>
-      <td>${(p.sport || "").toUpperCase()}</td>
-      <td>${p.game ?? ""}</td>
-      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
-      <td>${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
-      <td class="num">${fmtAmerican(p.orig_odds)}</td>
-      <td class="num">${p.boost_odds_str || fmtAmerican(p.boost_odds)}</td>
-      <td class="num ${boostEv > 0 ? "pos" : "neg"}">${fmtPct(boostEv, 1)}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.orig_odds)}</td>
+      <td data-label="Boost" class="num">${p.boost_odds_str || fmtAmerican(p.boost_odds)}</td>
+      <td data-label="EV" class="num ${boostEv > 0 ? "pos" : "neg"}">${fmtPct(boostEv, 1)}</td>
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -779,13 +779,13 @@ function renderPropsTable(props) {
   const rows = props.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
     return `<tr>
-      <td>${(p.sport || "").toUpperCase()}</td>
-      <td>${p.game ?? ""}</td>
-      <td>${p.player ?? ""}</td>
-      <td>${(p.market || "").toUpperCase()}</td>
-      <td>${(p.side || "").toUpperCase()}${p.line != null ? ` ${p.line}` : ""}</td>
-      <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num ${ev > 0 ? "pos" : "neg"}">${fmtPct(ev, 1)}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Player">${p.player ?? ""}</td>
+      <td data-label="Mkt">${(p.market || "").toUpperCase()}</td>
+      <td data-label="Side">${(p.side || "").toUpperCase()}${p.line != null ? ` ${p.line}` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : "neg"}">${fmtPct(ev, 1)}</td>
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -828,13 +828,13 @@ function renderBacktest(j) {
               : p.result === "LOSS" ? "neg" : "";
     const ev  = Number(p.ev_pct ?? 0);
     return `<tr>
-      <td>${(p.sport || "").toUpperCase()}</td>
-      <td>${p.game ?? ""}</td>
-      <td class="${bookCls(p.book)}">${p.book ?? ""}</td>
-      <td>${p.pick ?? ""}</td>
-      <td class="num">${fmtAmerican(p.odds)}</td>
-      <td class="num ${ev > 0 ? "pos" : ""}">${fmtPct(ev, 1)}</td>
-      <td class="${cls}"><b>${p.result}</b></td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td data-label="Pick">${p.pick ?? ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : ""}">${fmtPct(ev, 1)}</td>
+      <td data-label="Result" class="${cls}"><b>${p.result}</b></td>
     </tr>`;
   }).join("");
   $("#bt-table").innerHTML = `
