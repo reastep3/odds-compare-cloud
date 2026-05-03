@@ -20,6 +20,9 @@ Endpoints:
   POST /api/run_live              — auth; live in-progress edges, returns JSON
   GET  /api/archives              — auth; list ev_edges_*.xlsx with metadata
   GET  /api/archives/{name}       — auth; download one archive
+  GET  /api/backtest_archives     — auth; list backtest_*.xlsx with metadata
+  GET  /api/backtest_archives/{name}          — auth; download one report
+  GET  /api/backtest_archives/{name}/contents — auth; render report as JSON
   POST /api/backtest              — auth; run backtest, returns JSON
 
 Static frontend:
@@ -70,6 +73,9 @@ _TOKEN_TTL_SECONDS = 30 * 24 * 3600   # 30 days
 _OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", os.path.dirname(
     os.path.abspath(__file__)))
 _ARCHIVE_DIR = os.path.join(_OUTPUT_DIR, "archive")
+# Older backtest_*.xlsx files get auto-moved here by run_full_backtest.
+# The latest report sits at the top level alongside ev_edges_*.xlsx.
+_BT_ARCHIVE_DIR = os.path.join(_OUTPUT_DIR, "Backtest Archives")
 
 # Where static frontend files live.
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -325,6 +331,67 @@ def build_app() -> FastAPI:
         contents = await asyncio.to_thread(_load_archive_contents, path, name)
         return {"archive": contents}
 
+    @api.get("/api/backtest_archives")
+    async def list_backtest_archives(
+        _user: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """List backtest_*.xlsx reports from /data/output and Backtest Archives/.
+
+        The 3 AM ET daily job writes one of these per day; ad-hoc /backtest
+        runs add more. Newest first by mtime, dedup by basename.
+        """
+        items: list[dict[str, Any]] = []
+        for pat in (os.path.join(_BT_ARCHIVE_DIR, "backtest_*.xlsx"),
+                    os.path.join(_OUTPUT_DIR,     "backtest_*.xlsx")):
+            for path in glob.glob(pat):
+                name = os.path.basename(path)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                start_d, end_d = _bt_dates_from_name(name)
+                items.append({
+                    "name":  name,
+                    "size":  st.st_size,
+                    "mtime": int(st.st_mtime),
+                    "start": start_d.isoformat() if start_d else None,
+                    "end":   end_d.isoformat()   if end_d   else None,
+                })
+        items.sort(key=lambda x: x["mtime"], reverse=True)
+        seen: set[str] = set()
+        uniq = []
+        for it in items:
+            if it["name"] in seen:
+                continue
+            seen.add(it["name"])
+            uniq.append(it)
+        return {"archives": uniq, "count": len(uniq)}
+
+    @api.get("/api/backtest_archives/{name}")
+    async def download_backtest_archive(
+        name: str, _user: str = Depends(current_user),
+    ) -> FileResponse:
+        path = _resolve_backtest_archive(name)
+        return FileResponse(
+            path,
+            filename=name,
+            media_type=("application/vnd.openxmlformats-"
+                        "officedocument.spreadsheetml.sheet"))
+
+    @api.get("/api/backtest_archives/{name}/contents")
+    async def backtest_archive_contents(
+        name: str, _user: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Render a backtest report's Summary + All Picks tabs as JSON.
+
+        Pure read of what's in the .xlsx — no re-grading, since the report
+        was already graded against ESPN when written. That keeps the view
+        cheap and means stale ESPN data can't change the historical numbers.
+        """
+        path = _resolve_backtest_archive(name)
+        import asyncio
+        return await asyncio.to_thread(_load_backtest_contents, path, name)
+
     @api.post("/api/backtest")
     async def backtest_run(
         req: Request, _user: str = Depends(current_user),
@@ -544,6 +611,33 @@ def _file_date_from_name(name: str) -> date | None:
         return datetime.strptime(m.group(1), "%Y%m%d").date()
     except ValueError:
         return None
+
+
+def _resolve_backtest_archive(name: str) -> str:
+    """Validate name + return the absolute path. Raises 400/404."""
+    if "/" in name or ".." in name or not name.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Invalid archive name")
+    if not name.startswith("backtest_"):
+        raise HTTPException(status_code=400, detail="Invalid archive name")
+    for parent in (_BT_ARCHIVE_DIR, _OUTPUT_DIR):
+        cand = os.path.join(parent, name)
+        if os.path.isfile(cand):
+            return cand
+    raise HTTPException(status_code=404, detail="Backtest report not found")
+
+
+def _bt_dates_from_name(name: str) -> tuple[date | None, date | None]:
+    """Pull (start, end) out of backtest_<YYYY-MM-DD>_<YYYY-MM-DD>.xlsx."""
+    import re
+    m = re.search(
+        r"^backtest_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.xlsx$", name)
+    if not m:
+        return (None, None)
+    try:
+        return (date.fromisoformat(m.group(1)),
+                date.fromisoformat(m.group(2)))
+    except ValueError:
+        return (None, None)
 
 
 def _read_summary_tab(path: str) -> dict[str, Any]:
@@ -862,6 +956,246 @@ def _shape_archive_prop(p: dict[str, Any]) -> dict[str, Any]:
         "ev_pct":    p.get("ev_pct"),
         "result":    p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
+    }
+
+
+# ── Backtest archive viewer helpers ────────────────────────────────────
+
+def _read_bt_summary_tab(path: str) -> dict[str, Any]:
+    """Read the headline numbers from a backtest report's Summary tab.
+
+    The writer (write_backtest_excel in backtest.py) lays out labels in
+    column A and values in column B. We label-match in the same way as
+    _read_summary_tab so the reader survives row reshuffles.
+    """
+    import openpyxl
+    out: dict[str, Any] = {
+        "generated":     None,
+        "date_range":    None,
+        "total_picks":   None,
+        "settled":       None,
+        "pending":       None,
+        "manual":        None,
+        "wins":          None,
+        "losses":        None,
+        "pushes":        None,
+        "win_rate":      None,
+        "total_wagered": None,
+        "total_pnl":     None,
+        "roi":           None,
+    }
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return out
+    if "Summary" not in wb.sheetnames:
+        wb.close()
+        return out
+    ws = wb["Summary"]
+
+    def _at(addr: str) -> Any:
+        return ws[addr].value
+
+    out["date_range"] = _at("A2")
+    out["generated"]  = _at("A3")
+
+    label_map = {
+        "Total Unique Picks":        "total_picks",
+        "Settled (W / L / P)":       "settled",
+        "Pending (future games)":    "pending",
+        "Manual / Unresolved":       "manual",
+        "Wins":                      "wins",
+        "Losses":                    "losses",
+        "Pushes":                    "pushes",
+        "Win Rate (excl. pushes)":   "win_rate",
+        "Total Wagered":             "total_wagered",
+        "Total P&L":                 "total_pnl",
+        "ROI":                       "roi",
+    }
+    for r in range(2, 25):
+        a = _at(f"A{r}")
+        if not isinstance(a, str):
+            continue
+        a = a.strip()
+        if a in label_map:
+            out[label_map[a]] = _at(f"B{r}")
+
+    wb.close()
+    return out
+
+
+def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
+    """Read every row of the All Picks tab.
+
+    Column layout (set by write_backtest_excel):
+      1  #          5  Game     9  Line    13 Bet Amt
+      2  File Date  6  Book     10 Odds    14 Seen
+      3  Game Date  7  Market   11 EV %    15 Persistent
+      4  Sport      8  Pick     12 Conf.   16 Result    17 P&L
+    """
+    import openpyxl
+    if not os.path.isfile(path):
+        return []
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return []
+    if "All Picks" not in wb.sheetnames:
+        wb.close()
+        return []
+    ws = wb["All Picks"]
+    picks: list[dict[str, Any]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[0] is None:
+            continue
+        picks.append({
+            "file_date":  _bt_cell_str(row[1]),
+            "game_date":  _bt_cell_str(row[2]),
+            "sport":      _bt_cell_str(row[3]),
+            "game":       _bt_cell_str(row[4]),
+            "book":       _bt_cell_str(row[5]),
+            "market":     _bt_cell_str(row[6]),
+            "pick":       _bt_cell_str(row[7]),
+            "line":       row[8],
+            "odds":       row[9],
+            "ev_pct":     row[10],
+            "confidence": _bt_cell_str(row[11]),
+            "bet_amount": row[12],
+            "result":     (_bt_cell_str(row[15]) or "").upper() or None,
+            "pnl":        row[16],
+        })
+    wb.close()
+    return picks
+
+
+def _bt_cell_str(v: Any) -> str | None:
+    if v is None:
+        return None
+    return str(v).strip() or None
+
+
+def _bt_unit_return_pct(p: dict[str, Any]) -> float | None:
+    """% return on a unit stake — bankroll-independent.
+
+    Re-derived from American odds since the .xlsx doesn't store decimals.
+    """
+    res = p.get("result")
+    if res == "PUSH":
+        return 0.0
+    if res == "LOSS":
+        return -100.0
+    if res != "WIN":
+        return None
+    o = p.get("odds")
+    if not isinstance(o, (int, float)):
+        return None
+    if o > 0:
+        return round(o, 2) * 1.0
+    if o < 0:
+        return round(100.0 * 100.0 / abs(o), 2)
+    return None
+
+
+def _shape_bt_pick(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "file_date":  p.get("file_date"),
+        "game_date":  p.get("game_date"),
+        "sport":      p.get("sport"),
+        "game":       p.get("game"),
+        "book":       p.get("book"),
+        "market":     p.get("market"),
+        "pick":       p.get("pick"),
+        "line":       p.get("line"),
+        "odds":       p.get("odds"),
+        "ev_pct":     _round(p.get("ev_pct"), 2),
+        "confidence": p.get("confidence"),
+        "result":     p.get("result"),
+        "unit_return_pct": _bt_unit_return_pct(p),
+    }
+
+
+def _shape_bt_summary(s: dict[str, Any]) -> dict[str, Any]:
+    """Coerce openpyxl cell values to JSON-safe primitives."""
+    def _num(v):
+        return v if isinstance(v, (int, float)) else None
+    def _str(v):
+        return None if v is None else str(v)
+    gen = _str(s.get("generated"))
+    if gen and gen.lower().startswith("generated:"):
+        gen = gen.split(":", 1)[1].strip()
+    rng = _str(s.get("date_range"))
+    if rng and rng.lower().startswith("date range:"):
+        rng = rng.split(":", 1)[1].strip()
+    return {
+        "generated":     gen,
+        "date_range":    rng,
+        "total_picks":   _num(s.get("total_picks")),
+        "settled":       _num(s.get("settled")),
+        "pending":       _num(s.get("pending")),
+        "manual":        _num(s.get("manual")),
+        "wins":          _num(s.get("wins")),
+        "losses":        _num(s.get("losses")),
+        "pushes":        _num(s.get("pushes")),
+        "win_rate":      _str(s.get("win_rate")),
+        "total_wagered": (round(s["total_wagered"], 2)
+                          if isinstance(s.get("total_wagered"), (int, float))
+                          else None),
+        "total_pnl":     (round(s["total_pnl"], 2)
+                          if isinstance(s.get("total_pnl"), (int, float))
+                          else None),
+        "roi":           _str(s.get("roi")),
+    }
+
+
+def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
+    """Read a backtest report's Summary + All Picks tabs into JSON.
+
+    No re-grading — results are read straight from the file as written.
+    """
+    summary = _read_bt_summary_tab(path)
+    picks   = _read_bt_all_picks(path)
+    start_d, end_d = _bt_dates_from_name(name)
+
+    by_sport: dict[str, list] = {}
+    for p in picks:
+        sport = (p.get("sport") or "").upper() or "OTHER"
+        by_sport.setdefault(sport, []).append(p)
+
+    sport_breakdown = []
+    for sport, sg in sorted(by_sport.items()):
+        settled = [x for x in sg
+                    if (x.get("result") or "") in ("WIN", "LOSS", "PUSH")]
+        wins = sum(1 for x in settled if x["result"] == "WIN")
+        loss = sum(1 for x in settled if x["result"] == "LOSS")
+        pnl  = sum((x.get("pnl") or 0) for x in settled)
+        bet  = sum((x.get("bet_amount") or 0) for x in settled)
+        roi  = (pnl / bet * 100) if bet else 0
+        decided = wins + loss
+        sport_breakdown.append({
+            "sport":    sport,
+            "picks":    len(sg),
+            "settled":  len(settled),
+            "wins":     wins,
+            "losses":   loss,
+            "win_rate": round(wins / decided * 100, 1) if decided else None,
+            "roi_pct":  round(roi, 2) if bet else None,
+        })
+    sport_breakdown.sort(key=lambda x: (x["roi_pct"] is None,
+                                         -(x["roi_pct"] or 0)))
+
+    return {
+        "name":  name,
+        "start": start_d.isoformat() if start_d else None,
+        "end":   end_d.isoformat()   if end_d   else None,
+        "summary": _shape_bt_summary(summary),
+        "picks":   [_shape_bt_pick(p) for p in picks],
+        "by_sport": sport_breakdown,
+        "counts": {
+            "total":   len(picks),
+            "settled": sum(1 for p in picks
+                            if (p.get("result") or "")
+                                in ("WIN", "LOSS", "PUSH")),
+        },
     }
 
 
