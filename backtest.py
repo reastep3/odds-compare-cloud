@@ -790,7 +790,12 @@ def _read_promo_picks(filepath: str, file_dt: date) -> list[dict]:
                 prop_side = side_label
                 is_prop   = bool(player)   # need a non-empty player name
                 if is_prop:
-                    pkey = PROP_DISPLAY_TO_KEY.get(market.lower())
+                    # Writer emits the market uppercased and underscored
+                    # ("TOTAL_BASES"); the PROP_DISPLAY_TO_KEY lookup uses
+                    # spaced/lowercased keys ("total bases"). Try both.
+                    mkey = market.lower()
+                    pkey = (PROP_DISPLAY_TO_KEY.get(mkey)
+                            or PROP_DISPLAY_TO_KEY.get(mkey.replace("_", " ")))
                     if pkey:
                         market_final = pkey
                 break
