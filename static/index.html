@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=13">
+  <link rel="stylesheet" href="/static/style.css?v=14">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -161,51 +161,102 @@
 
     <!-- Archives tab -->
     <section data-panel="archives" class="panel">
-      <!-- List view -->
-      <div id="archives-list-view">
-        <div class="card">
-          <h2>Archives</h2>
-          <p class="muted">Past <code>ev_edges_*.xlsx</code> reports. Newest first. Tap any to view inside the app.</p>
-          <button id="archives-refresh" class="secondary-btn">↻ Refresh</button>
-          <div id="archives-list" class="list"></div>
+      <!-- Sub-toggle: switch between EV scan archives and backtest reports.
+           Run is the default since that's what the Run tab feeds. -->
+      <div class="sub-toggle">
+        <button data-arch-mode="run" class="active">Run reports</button>
+        <button data-arch-mode="backtest">Backtest reports</button>
+      </div>
+
+      <!-- ─── RUN ARCHIVES (ev_edges_*.xlsx) ───────────────────── -->
+      <div data-arch-view="run">
+        <!-- List view -->
+        <div id="archives-list-view">
+          <div class="card">
+            <h2>Run reports</h2>
+            <p class="muted">Past <code>ev_edges_*.xlsx</code> reports. Newest first. Tap any to view inside the app.</p>
+            <button id="archives-refresh" class="secondary-btn">↻ Refresh</button>
+            <div id="archives-list" class="list"></div>
+          </div>
+        </div>
+
+        <!-- Detail view -->
+        <div id="archives-detail-view" hidden>
+          <div class="card">
+            <button id="archive-back" class="ghost-btn">← Archives</button>
+            <h2 id="archive-title" style="margin-top: 10px;"></h2>
+            <p id="archive-subtitle" class="muted"></p>
+            <div id="archive-anonly-banner" class="banner warn" hidden>
+              ⚠ AN-ONLY RUN — Pinnacle blending degraded; size-down baseline.
+            </div>
+            <div id="archive-summary-grid" class="summary-grid"></div>
+            <div class="archive-actions">
+              <a id="archive-download-link" class="ghost-btn" href="#">⬇ Download .xlsx</a>
+            </div>
+          </div>
+
+          <!-- Section: Play These -->
+          <div id="archive-play-section" class="card" hidden>
+            <h3>Play These <span class="count" id="archive-play-count"></span></h3>
+            <div class="table-wrap"><table id="archive-play-table"></table></div>
+          </div>
+
+          <!-- Section: Promo Picks -->
+          <div id="archive-promo-section" class="card" hidden>
+            <h3>Promo Picks <span class="count" id="archive-promo-count"></span></h3>
+            <div class="table-wrap"><table id="archive-promo-table"></table></div>
+          </div>
+
+          <!-- Section: Player Props -->
+          <div id="archive-props-section" class="card" hidden>
+            <h3>Player Props <span class="count" id="archive-props-count"></span></h3>
+            <div class="table-wrap"><table id="archive-props-table"></table></div>
+          </div>
+
+          <div id="archive-empty-state" class="card" hidden>
+            <p class="muted">This archive is empty — no Play These picks, promos, or props.</p>
+          </div>
         </div>
       </div>
 
-      <!-- Detail view -->
-      <div id="archives-detail-view" hidden>
-        <div class="card">
-          <button id="archive-back" class="ghost-btn">← Archives</button>
-          <h2 id="archive-title" style="margin-top: 10px;"></h2>
-          <p id="archive-subtitle" class="muted"></p>
-          <div id="archive-anonly-banner" class="banner warn" hidden>
-            ⚠ AN-ONLY RUN — Pinnacle blending degraded; size-down baseline.
-          </div>
-          <div id="archive-summary-grid" class="summary-grid"></div>
-          <div class="archive-actions">
-            <a id="archive-download-link" class="ghost-btn" href="#">⬇ Download .xlsx</a>
+      <!-- ─── BACKTEST ARCHIVES (backtest_*.xlsx) ──────────────── -->
+      <div data-arch-view="backtest" hidden>
+        <!-- List view -->
+        <div id="bt-archives-list-view">
+          <div class="card">
+            <h2>Backtest reports</h2>
+            <p class="muted">Past <code>backtest_*.xlsx</code> reports. The 3 AM ET daily job
+              writes one per day; ad-hoc <b>Backtest</b> runs add more. Newest first.</p>
+            <button id="bt-archives-refresh" class="secondary-btn">↻ Refresh</button>
+            <div id="bt-archives-list" class="list"></div>
           </div>
         </div>
 
-        <!-- Section: Play These -->
-        <div id="archive-play-section" class="card" hidden>
-          <h3>Play These <span class="count" id="archive-play-count"></span></h3>
-          <div class="table-wrap"><table id="archive-play-table"></table></div>
-        </div>
+        <!-- Detail view -->
+        <div id="bt-archives-detail-view" hidden>
+          <div class="card">
+            <button id="bt-archive-back" class="ghost-btn">← Backtest reports</button>
+            <h2 id="bt-archive-title" style="margin-top: 10px;"></h2>
+            <p id="bt-archive-subtitle" class="muted"></p>
+            <div id="bt-archive-summary-grid" class="summary-grid"></div>
+            <div class="archive-actions">
+              <a id="bt-archive-download-link" class="ghost-btn" href="#">⬇ Download .xlsx</a>
+            </div>
+          </div>
 
-        <!-- Section: Promo Picks -->
-        <div id="archive-promo-section" class="card" hidden>
-          <h3>Promo Picks <span class="count" id="archive-promo-count"></span></h3>
-          <div class="table-wrap"><table id="archive-promo-table"></table></div>
-        </div>
+          <div id="bt-archive-by-sport-section" class="card" hidden>
+            <h3>By sport</h3>
+            <div class="table-wrap"><table id="bt-archive-by-sport-table"></table></div>
+          </div>
 
-        <!-- Section: Player Props -->
-        <div id="archive-props-section" class="card" hidden>
-          <h3>Player Props <span class="count" id="archive-props-count"></span></h3>
-          <div class="table-wrap"><table id="archive-props-table"></table></div>
-        </div>
+          <div id="bt-archive-picks-section" class="card" hidden>
+            <h3>All picks <span class="count" id="bt-archive-picks-count"></span></h3>
+            <div class="table-wrap"><table id="bt-archive-picks-table"></table></div>
+          </div>
 
-        <div id="archive-empty-state" class="card" hidden>
-          <p class="muted">This archive is empty — no Play These picks, promos, or props.</p>
+          <div id="bt-archive-empty-state" class="card" hidden>
+            <p class="muted">This report contains no picks.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -253,6 +304,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js?v=13"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

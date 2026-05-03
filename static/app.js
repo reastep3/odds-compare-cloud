@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-01 v13 (Mobile stake cell: $ to the right)";
+const BUILD = "2026-05-03 v14 (Backtest archives in Archives tab)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -97,8 +97,13 @@ $$(".tab").forEach((b) => {
     if (b.dataset.tab === "archives") {
       // Always reset to list view on tab entry — feels more predictable
       // than landing back on a stale detail view.
-      archiveListView(true);
-      loadArchives();
+      if (_archMode === "backtest") {
+        btArchiveListView(true);
+        loadBacktestArchives();
+      } else {
+        archiveListView(true);
+        loadArchives();
+      }
     }
   });
 });
@@ -793,6 +798,249 @@ function renderPropsTable(props) {
     <thead><tr>
       <th>Sport</th><th>Game</th><th>Player</th><th>Mkt</th>
       <th>Side</th><th>Odds</th><th>EV</th><th>Result</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+}
+
+// ── Archives sub-toggle (Run vs Backtest reports) ───────────────────
+
+let _archMode = "run";
+
+$$("button[data-arch-mode]").forEach((b) => {
+  b.addEventListener("click", () => {
+    const mode = b.dataset.archMode;
+    if (mode === _archMode) return;
+    _archMode = mode;
+    $$("button[data-arch-mode]").forEach((x) =>
+      x.classList.toggle("active", x === b));
+    $$("[data-arch-view]").forEach((v) =>
+      v.hidden = v.dataset.archView !== mode);
+    if (mode === "backtest") {
+      btArchiveListView(true);
+      loadBacktestArchives();
+    } else {
+      archiveListView(true);
+      loadArchives();
+    }
+  });
+});
+
+// ── Backtest archives ────────────────────────────────────────────────
+
+function prettyBacktestName(filename, startISO, endISO) {
+  // Filename format: backtest_YYYY-MM-DD_YYYY-MM-DD.xlsx
+  const m = filename.match(
+    /^backtest_(\d{4})-(\d{2})-(\d{2})_(\d{4})-(\d{2})-(\d{2})\.xlsx$/i);
+  if (!m && !(startISO && endISO)) {
+    return { primary: filename, secondary: "" };
+  }
+  const [sy, sm, sd] = m
+    ? [m[1], m[2], m[3]]
+    : startISO.split("-");
+  const [ey, em, ed] = m
+    ? [m[4], m[5], m[6]]
+    : endISO.split("-");
+  // Anchor at noon UTC to dodge any TZ-rollover surprises in toLocaleDateString.
+  const start = new Date(Date.UTC(+sy, +sm - 1, +sd, 12));
+  const end   = new Date(Date.UTC(+ey, +em - 1, +ed, 12));
+  const opts  = { month: "short", day: "numeric", year: "numeric",
+                  timeZone: "UTC" };
+  const sameDay = sy === ey && sm === em && sd === ed;
+  if (sameDay) {
+    return {
+      primary:   start.toLocaleDateString(undefined, opts),
+      secondary: filename,
+    };
+  }
+  const sameYear = sy === ey;
+  const startOpts = sameYear
+    ? { month: "short", day: "numeric", timeZone: "UTC" }
+    : opts;
+  return {
+    primary:   `${start.toLocaleDateString(undefined, startOpts)} → ${end.toLocaleDateString(undefined, opts)}`,
+    secondary: filename,
+  };
+}
+
+async function loadBacktestArchives() {
+  const wrap = $("#bt-archives-list");
+  wrap.innerHTML = `<p class="muted"><span class="spinner"></span>Loading…</p>`;
+  try {
+    const j = await apiJSON("/api/backtest_archives");
+    if (!j.archives.length) {
+      wrap.innerHTML = `<p class="muted">No backtest reports yet. The 3 AM ET daily job creates one each morning, or run <b>Backtest</b> manually.</p>`;
+      return;
+    }
+    wrap.innerHTML = j.archives.map((a) => {
+      const pretty = prettyBacktestName(a.name, a.start, a.end);
+      const kb     = (a.size / 1024).toFixed(1);
+      return `<a class="row" href="#" data-name="${a.name}">
+        <div>
+          <div class="row-title">${pretty.primary}</div>
+          <div class="meta">${kb} KB</div>
+        </div>
+        <div>›</div>
+      </a>`;
+    }).join("");
+    wrap.querySelectorAll(".row").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        showBacktestArchiveDetail(a.dataset.name);
+      });
+    });
+  } catch (e) {
+    wrap.innerHTML = `<p class="error">${e.message}</p>`;
+  }
+}
+
+$("#bt-archives-refresh").addEventListener("click", loadBacktestArchives);
+
+function btArchiveListView(showList) {
+  $("#bt-archives-list-view").hidden   = !showList;
+  $("#bt-archives-detail-view").hidden = showList;
+  if (showList) window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("#bt-archive-back").addEventListener("click",
+                                        () => btArchiveListView(true));
+
+async function showBacktestArchiveDetail(name) {
+  btArchiveListView(false);
+  ["#bt-archive-by-sport-section", "#bt-archive-picks-section",
+   "#bt-archive-empty-state"].forEach((s) => $(s).hidden = true);
+  const pretty = prettyBacktestName(name);
+  $("#bt-archive-title").textContent  = pretty.primary;
+  $("#bt-archive-subtitle").innerHTML =
+    `<span class="spinner"></span>Reading report…`;
+  $("#bt-archive-summary-grid").innerHTML = "";
+  try {
+    const j = await apiJSON(
+      `/api/backtest_archives/${encodeURIComponent(name)}/contents`);
+    renderBacktestArchiveDetail(j);
+  } catch (e) {
+    $("#bt-archive-subtitle").innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+function renderBacktestArchiveDetail(j) {
+  const s = j.summary || {};
+  const c = j.counts  || {};
+  const ts = s.generated || j.start || "";
+  $("#bt-archive-subtitle").innerHTML =
+    `${ts}<br><span style="font-size:11px;opacity:0.5">${j.name}</span>`;
+
+  const dl = $("#bt-archive-download-link");
+  dl.href = `/api/backtest_archives/${encodeURIComponent(j.name)}`;
+  dl.onclick = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await api(
+        `/api/backtest_archives/${encodeURIComponent(j.name)}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const tmp = document.createElement("a");
+      tmp.href = url; tmp.download = j.name;
+      document.body.appendChild(tmp); tmp.click(); tmp.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (err) { alert(err.message); }
+  };
+
+  const wlpLine = `<b>${s.wins ?? 0}</b> W / <b>${s.losses ?? 0}</b> L / <b>${s.pushes ?? 0}</b> P`;
+  const extras  = [];
+  if (s.pending) extras.push(`${s.pending} pending`);
+  if (s.manual)  extras.push(`${s.manual} unresolved`);
+  const extraStr = extras.length ? ` · ${extras.join(" · ")}` : "";
+  // ROI/win-rate come back as strings ("12.3%") because that's how the writer
+  // formatted them. Pull the numeric to drive the +/- color class.
+  const roiNum = parseFloat(s.roi || "0");
+  const roiCls = roiNum >= 0 ? "pos" : "neg";
+  const roiCell = s.settled
+    ? `<span class="${roiCls}" style="font-size:1.3em">${s.roi || "—"}</span>
+       · Win rate: <b>${s.win_rate || "—"}</b>`
+    : "—";
+
+  const fmtMoneyCell = (v) =>
+    typeof v === "number"
+      ? (v >= 0 ? "+" : "−") + "$" + Math.abs(v).toFixed(2)
+      : "—";
+
+  $("#bt-archive-summary-grid").innerHTML = [
+    kvCell("Record", `${wlpLine}${extraStr}`, { full: true }),
+    kvCell("ROI", roiCell, { full: true }),
+    kvCell("Total picks", s.total_picks),
+    kvCell("Settled", s.settled),
+    kvCell("Wagered",
+            typeof s.total_wagered === "number"
+              ? `$${s.total_wagered.toFixed(2)}` : null),
+    kvCell("P&L", fmtMoneyCell(s.total_pnl)),
+  ].join("");
+
+  // Per-sport breakdown
+  const bs = j.by_sport || [];
+  if (bs.length) {
+    $("#bt-archive-by-sport-section").hidden = false;
+    renderBacktestBySport(bs);
+  }
+
+  // All picks table
+  $("#bt-archive-picks-count").textContent = `(${c.total || 0})`;
+  if ((j.picks || []).length) {
+    $("#bt-archive-picks-section").hidden = false;
+    renderBacktestPicksTable(j.picks);
+  } else {
+    $("#bt-archive-empty-state").hidden = false;
+  }
+}
+
+function renderBacktestBySport(rows) {
+  const body = rows.map((r) => {
+    const roi    = r.roi_pct;
+    const roiCls = roi == null ? "muted" : roi >= 0 ? "pos" : "neg";
+    const roiTxt = roi == null ? "—" : fmtPct(roi, 1);
+    const wr     = r.win_rate == null ? "—" : fmtPct(r.win_rate, 0);
+    return `<tr>
+      <td data-label="Sport" class="cell-sport">${r.sport}</td>
+      <td data-label="Picks" class="num">${r.picks}</td>
+      <td data-label="Settled" class="num">${r.settled}</td>
+      <td data-label="W-L" class="num">${r.wins}-${r.losses}</td>
+      <td data-label="WR" class="num">${wr}</td>
+      <td data-label="ROI" class="num ${roiCls}"><b>${roiTxt}</b></td>
+    </tr>`;
+  }).join("");
+  $("#bt-archive-by-sport-table").innerHTML = `
+    <thead><tr>
+      <th>Sport</th><th>Picks</th><th>Settled</th>
+      <th>W-L</th><th>WR</th><th>ROI</th>
+    </tr></thead>
+    <tbody>${body}</tbody>`;
+}
+
+function renderBacktestPicksTable(picks) {
+  // Show settled first, then unsettled — within each, latest game-date first.
+  const ordered = picks.slice().sort((a, b) => {
+    const aSet = ["WIN", "LOSS", "PUSH"].includes(a.result) ? 0 : 1;
+    const bSet = ["WIN", "LOSS", "PUSH"].includes(b.result) ? 0 : 1;
+    if (aSet !== bSet) return aSet - bSet;
+    return (b.game_date || "").localeCompare(a.game_date || "");
+  });
+  const rows = ordered.map((p) => {
+    const ev  = Number(p.ev_pct ?? 0);
+    return `<tr>
+      <td data-label="Date" class="muted">${p.game_date || ""}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td data-label="Mkt">${p.market ?? ""}</td>
+      <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 1)}</td>
+      ${resultCell(p)}
+    </tr>`;
+  }).join("");
+  $("#bt-archive-picks-table").innerHTML = `
+    <thead><tr>
+      <th>Date</th><th>Sport</th><th>Game</th><th>Book</th>
+      <th>Mkt</th><th>Pick</th><th>Odds</th><th>EV</th><th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }

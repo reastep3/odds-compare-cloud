@@ -278,6 +278,34 @@ button {
 .panel { display: none; }
 .panel.active { display: block; }
 
+/* Sub-toggle inside a panel (e.g. Run reports / Backtest reports). Pill-style
+   so it's visually distinct from the main top-level tabs. */
+.sub-toggle {
+  display: flex; gap: 4px;
+  background: var(--surface-2);
+  padding: 4px;
+  border-radius: 10px;
+  margin-bottom: 14px;
+}
+.sub-toggle button {
+  flex: 1;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 8px 10px;
+  font-weight: 600;
+  font-size: 13px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.sub-toggle button:hover { color: var(--text); }
+.sub-toggle button.active {
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
 .status {
   margin-top: 12px;
   padding: 10px 12px;
