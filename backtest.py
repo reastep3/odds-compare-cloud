@@ -664,10 +664,16 @@ def _read_promo_picks(filepath: str, file_dt: date) -> list[dict]:
     """
     Read Promo Picks rows from the "Play These" tab.
 
-    Detection:  a promo data row has a recognised market string in col 4 AND
+    Detection:  a promo data row has a non-empty market string in col 4 AND
     a positive numeric bet amount in col 12, and appears AFTER a banner row
     whose first cell contains "promo".  Rows with "No qualifying pick" in col 2
-    are skipped automatically (col 4 won't be a valid market string there).
+    are skipped automatically (col 4 is empty there).
+
+    Markets aren't gated to the core set — prop promos (PTS, REB, DD, etc.)
+    are accepted too, with player + side parsed from the Pick column when it
+    follows the "<player> O|U|Y|N" pattern. Markets that grade_prop knows
+    are normalised to its lowercase keys (PTS → pts); unknowns pass through
+    and grade as UNKNOWN, but are still tracked instead of silently dropped.
     """
     try:
         wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
@@ -701,7 +707,7 @@ def _read_promo_picks(filepath: str, file_dt: date) -> list[dict]:
         if not isinstance(raw_market, str):
             continue
         market = raw_market.strip().upper()
-        if market not in VALID_MARKETS:
+        if not market:
             continue
         if not isinstance(raw_bet_amt, (int, float)) or raw_bet_amt <= 0:
             continue
@@ -766,6 +772,29 @@ def _read_promo_picks(filepath: str, file_dt: date) -> list[dict]:
 
         sport = _extract_sport_from_promo(promo_desc) or "unknown"
 
+        # Prop layout: Pick is "<player> <O|U|Y|N>". O/U map to over/under
+        # (gradable thresholds — pts, reb, ast, K, total_bases). Y/N are
+        # binary props (DD, anytime TD, etc.) — we capture them so the bet
+        # is tracked, but grade_prop returns UNKNOWN for markets it doesn't
+        # know, which rolls up under MANUAL/unresolved in the report.
+        is_prop      = False
+        player       = None
+        prop_side    = None
+        market_final = market
+        for suffix, side_label in (
+            (" O", "over"), (" U", "under"),
+            (" Y", "yes"),  (" N", "no"),
+        ):
+            if pick.upper().endswith(suffix):
+                player    = pick[:-len(suffix)].strip()
+                prop_side = side_label
+                is_prop   = bool(player)   # need a non-empty player name
+                if is_prop:
+                    pkey = PROP_DISPLAY_TO_KEY.get(market.lower())
+                    if pkey:
+                        market_final = pkey
+                break
+
         # No game_time column in the promo section — use file date as proxy
         game_date = file_dt.strftime("%Y%m%d")
 
@@ -775,8 +804,11 @@ def _read_promo_picks(filepath: str, file_dt: date) -> list[dict]:
             "game_time":      "",
             "game_date":      game_date,
             "book":           book,
-            "market":         market,
+            "market":         market_final,
             "pick":           pick,
+            "player":         player,
+            "prop_side":      prop_side,
+            "is_prop":        is_prop,
             "line":           line_num,
             "odds":           boost_odds_am,        # boosted odds for display/grading
             "orig_odds":      orig_odds_am,
@@ -2507,7 +2539,13 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
             unmatched += 1
             continue
 
-        grade = grade_pick(pick, game_result)
+        # Props need box-score grading; game lines use score-based grading.
+        # Mirrors the same branch in run_backtest — without it, prop promos
+        # were getting graded as game-line bets and returning bogus W/Ls.
+        if pick.get("is_prop"):
+            grade = grade_prop(pick, game_result)
+        else:
+            grade = grade_pick(pick, game_result)
         pick["result"]        = grade
         pick["actual_result"] = game_result
         matched += 1
