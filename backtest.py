@@ -1243,6 +1243,32 @@ _espn_session.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 })
 
+# Date the caches were last seeded. When date.today() advances we wipe both
+# caches via _refresh_espn_cache_if_new_day(); see that function for the why.
+_espn_cache_seeded_on: date | None = None
+
+
+def _refresh_espn_cache_if_new_day() -> None:
+    """Wipe in-memory ESPN caches at calendar-day rollover.
+
+    The caches are keyed by (sport, date) and never expire within a process
+    lifetime. That's fine for cache hits within one day, but the daily
+    backtest job grades yesterday's picks at 3 AM ET and pre-fetches a ±1
+    day buffer — so yesterday's run cached "today's games" when they were
+    STATUS_SCHEDULED. Without this guard, today's run hits that stale cache
+    and marks every game as NOT_STARTED instead of re-fetching the (now
+    final) results.
+    """
+    global _espn_cache_seeded_on
+    today = date.today()
+    if _espn_cache_seeded_on is None:
+        _espn_cache_seeded_on = today
+        return
+    if today != _espn_cache_seeded_on:
+        _espn_all_cache.clear()
+        _espn_cache.clear()
+        _espn_cache_seeded_on = today
+
 
 def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
     """
@@ -1260,6 +1286,7 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
 
     Cached per (sport, date) under _espn_all_cache.
     """
+    _refresh_espn_cache_if_new_day()
     cache_key = f"{sport}|{date_str}"
     if cache_key in _espn_all_cache:
         return _espn_all_cache[cache_key]
@@ -1900,6 +1927,7 @@ def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
     games that have actually finished. Used everywhere the caller is
     purely interested in graded outcomes.
     """
+    _refresh_espn_cache_if_new_day()
     cache_key = f"{sport}|{date_str}"
     if cache_key in _espn_cache:
         return _espn_cache[cache_key]
