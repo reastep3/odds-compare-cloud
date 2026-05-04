@@ -50,7 +50,9 @@ from telegram.constants import ParseMode
 
 # Add project dir to path so we can import odds_compare
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bot_config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, USERS_FILE
+from bot_config import (
+    TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, USERS_FILE, validate_required_secrets,
+)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -2526,11 +2528,7 @@ def format_backtest_results(picks: list[dict], start_dt: date, end_dt: date,
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
-    if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: Set TELEGRAM_BOT_TOKEN environment variable.")
-        print("  1. Message @BotFather on Telegram -> /newbot")
-        print("  2. export TELEGRAM_BOT_TOKEN='your-token-here'")
-        sys.exit(1)
+    validate_required_secrets()
     if not ADMIN_CHAT_ID:
         print("ERROR: Set TELEGRAM_CHAT_ID environment variable.")
         print("  1. Message @userinfobot on Telegram -> /start")

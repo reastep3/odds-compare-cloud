@@ -245,13 +245,11 @@ ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
 # Pinnacle config
 # ──────────────────────────────────────────────────────────────────────
 
-# Pinnacle's public guest API — no account needed.
-# The key below is their own frontend guest key (embedded in their site).
-# If you get 401 errors, grab a fresh key from DevTools as described above.
+# Pinnacle's public guest API — no account needed. The key is their own
+# frontend's guest key (embedded in pinnacle.com) and rotates periodically.
+# Set via PINNACLE_GUEST_KEY env var; see .env.example for how to grab it.
 PINNACLE_BASE       = "https://guest.api.arcadia.pinnacle.com/0.1"
-PINNACLE_GUEST_KEY  = os.environ.get(
-    "PINNACLE_GUEST_KEY", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"
-)
+PINNACLE_GUEST_KEY  = os.environ.get("PINNACLE_GUEST_KEY", "")
 
 # Pinnacle league IDs — map from AN sport code to Pinnacle league ID(s).
 # To find an ID: open Pinnacle, pick the league, inspect any
