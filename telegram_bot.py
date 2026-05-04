@@ -2185,6 +2185,41 @@ async def send_daily_backtest(context: ContextTypes.DEFAULT_TYPE):
         log.exception("[daily-backtest] Run failed")
 
 
+async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: run /run skip at 10 AM ET as a backup data snapshot.
+
+    Mirrors /run_skip — fetches odds + computes edges with bankroll=0
+    (no bet sizing) and writes the ev_edges_*.xlsx file. Silent: no
+    Telegram output, errors logged but not DM'd.
+
+    Backtests dedup picks to FIRST appearance (see _dedup_picks), so the
+    user's earlier manual runs always win on dedup. This auto-job only
+    contributes data on days the user forgot to /run, ensuring the next
+    morning's 3 AM backtest always has something to grade.
+
+    Skipped if a manual /run is already in progress — that one will write
+    the same archive file with more thought-out bankroll inputs anyway.
+    """
+    if context.bot_data.get("running"):
+        log.info("[daily-skip-run] Manual run in progress — skipping.")
+        return
+    log.info("[daily-skip-run] Job firing.")
+    context.bot_data["running"] = True
+    try:
+        from odds_compare import run_headless_fetch, run_headless_finalize
+        fetched = await asyncio.to_thread(run_headless_fetch, 0, 0)
+        result  = await asyncio.to_thread(run_headless_finalize, fetched, None)
+        path    = result.get("output_path")
+        n_play  = len(result.get("play_edges") or [])
+        n_all   = len(result.get("all_edges")  or [])
+        log.info(f"[daily-skip-run] Done — {n_play} Play These / {n_all} all-EV "
+                 f"picks, output: {os.path.basename(path) if path else 'no file'}")
+    except Exception:
+        log.exception("[daily-skip-run] Run failed")
+    finally:
+        context.bot_data["running"] = False
+
+
 async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: build the weekly digest and DM every authorized user.
 
@@ -2652,6 +2687,21 @@ def main():
             name="daily_backtest",
         )
         log.info("Daily backtest scheduled — 3:00 AM ET (yesterday only, silent).")
+
+        # Daily backup /run_skip — 10:00 AM ET, silent (no Telegram).
+        # Safety net for days the user doesn't manually /run, so the
+        # next morning's 3 AM backtest always has data. 10 AM is late
+        # enough that all books have today's lines posted and stable,
+        # early enough that no MLB has started (~12-1 PM ET first pitch).
+        # Dedup-by-first-appearance means manual runs always take priority
+        # over this on days when both ran.
+        app.job_queue.run_daily(
+            send_daily_skip_run,
+            time=dtime(hour=10, minute=0,
+                       tzinfo=ZoneInfo("America/New_York")),
+            name="daily_skip_run",
+        )
+        log.info("Daily backup /run_skip scheduled — 10:00 AM ET (silent).")
     else:
         log.warning("JobQueue unavailable — weekly digest disabled. "
                     "Install with: pip install 'python-telegram-bot[job-queue]'")
