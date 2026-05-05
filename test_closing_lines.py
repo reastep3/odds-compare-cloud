@@ -20,6 +20,7 @@ from closing_lines import (
     _capture_close_for_pick,
     _list_recent_pending_files,
     compute_clv_pct,
+    load_closing_lines_for_dates,
 )
 
 
@@ -272,3 +273,78 @@ def test_list_recent_returns_existing_only(tmp_path):
     # Should include today, exclude the ancient unrelated file
     assert any(today in p for p in found)
     assert not any("2020-01-01" in p for p in found)
+
+
+# ── load_closing_lines_for_dates ───────────────────────────────────────
+
+def _write_pending_file(dirpath, date_iso, picks_dict):
+    """Helper: write a pending_closes JSON in the given dir."""
+    payload = {"scan_timestamp": "2026-05-05T12:00:00Z", "picks": picks_dict}
+    path = os.path.join(str(dirpath), f"pending_closes_{date_iso}.json")
+    with open(path, "w") as f:
+        json.dump(payload, f)
+    return path
+
+def test_load_closes_returns_empty_when_no_files(tmp_path):
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-06", str(tmp_path))
+    assert lookup == {}
+
+def test_load_closes_includes_only_captured(tmp_path):
+    # Two picks in one file: one captured, one not
+    _write_pending_file(tmp_path, "2026-05-05", {
+        "captured-key": {
+            "commence": "2026-05-05T22:00:00Z",
+            "close": {"odds_american": -110, "implied_pct": 52.4, "clv_pct": 1.5},
+        },
+        "uncaptured-key": {
+            "commence": "2026-05-05T22:00:00Z",
+            "close": None,
+        },
+    })
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-05", str(tmp_path))
+    assert "captured-key" in lookup
+    assert "uncaptured-key" not in lookup
+    assert lookup["captured-key"]["clv_pct"] == 1.5
+
+def test_load_closes_latest_file_wins(tmp_path):
+    # Same pick in two files; user's mental model is "latest scan = canonical
+    # open", so the later file's close (with that scan's CLV) should win.
+    _write_pending_file(tmp_path, "2026-05-05", {
+        "shared-key": {
+            "commence": "2026-05-06T22:00:00Z",
+            "close": {"odds_american": -110, "implied_pct": 52.4, "clv_pct": 5.0},
+        },
+    })
+    _write_pending_file(tmp_path, "2026-05-06", {
+        "shared-key": {
+            "commence": "2026-05-06T22:00:00Z",
+            "close": {"odds_american": -110, "implied_pct": 52.4, "clv_pct": 8.5},
+        },
+    })
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-06", str(tmp_path))
+    # 12 AM May 6 scan would write the May 6 file; its CLV (8.5%) wins.
+    assert lookup["shared-key"]["clv_pct"] == 8.5
+
+def test_load_closes_buffers_one_day_each_side(tmp_path):
+    # Pick captured by a scan run the day BEFORE the requested window
+    # should still come through (scans often run a day ahead).
+    _write_pending_file(tmp_path, "2026-05-04", {
+        "early-scan-key": {
+            "commence": "2026-05-05T22:00:00Z",
+            "close": {"odds_american": -120, "implied_pct": 54.5, "clv_pct": 2.0},
+        },
+    })
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-05", str(tmp_path))
+    assert "early-scan-key" in lookup
+
+def test_load_closes_handles_corrupt_json(tmp_path):
+    # Don't crash if a file has malformed JSON — log and continue
+    bad_path = tmp_path / "pending_closes_2026-05-05.json"
+    bad_path.write_text("{this is not valid json")
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-05", str(tmp_path))
+    assert lookup == {}

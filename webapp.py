@@ -1032,6 +1032,10 @@ def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
       2  File Date  6  Book     10 Odds    14 Seen
       3  Game Date  7  Market   11 EV %    15 Persistent
       4  Sport      8  Pick     12 Conf.   16 Result    17 P&L
+                                                        18 Close   19 CLV %
+
+    CLV columns (18-19) are written but not currently read here — they're
+    available in the .xlsx download for now. Dashboard surfacing is Phase C.
     """
     import openpyxl
     if not os.path.isfile(path):
