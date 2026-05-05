@@ -2222,6 +2222,27 @@ async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["running"] = False
 
 
+async def capture_closing_lines_job(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: capture closing-line odds for any pending pick whose
+    commence is within the next 5 minutes. Runs every 60 seconds, silent.
+
+    Picks are seeded into pending_closes_YYYY-MM-DD.json by every scan
+    (manual /run, /run_skip backup, etc.). This job is the consumer side
+    that re-queries the Odds API per-event endpoint and stamps each pick
+    with its close odds + CLV%. See closing_lines.py for the matching
+    logic. Idempotent — already-captured picks are skipped.
+    """
+    try:
+        from closing_lines import capture_pending_closes
+        stats = await asyncio.to_thread(capture_pending_closes)
+    except Exception:
+        log.exception("[closing-lines] Capture job failed")
+        return
+    if stats.get("captured") or stats.get("no_match"):
+        log.info("[closing-lines] %d captured, %d no-match",
+                 stats["captured"], stats["no_match"])
+
+
 async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: build the weekly digest and DM every authorized user.
 
@@ -2700,6 +2721,19 @@ def main():
             name="daily_skip_run",
         )
         log.info("Daily backup /run_skip scheduled — 10:00 AM ET (silent).")
+
+        # Closing-line capture — every minute, silent. Reads the day's
+        # pending_closes_*.json (seeded by each scan) and re-queries the
+        # Odds API per-event endpoint for any pick whose commence is in
+        # the next 0–5 min, stamping it with the close odds + CLV%.
+        # No-op on most ticks (nothing due); ~60-100 credits/day at peak
+        # for a typical 50-60 +EV picks/day on the 20k/mo plan.
+        app.job_queue.run_repeating(
+            capture_closing_lines_job,
+            interval=60, first=30,
+            name="closing_lines_capture",
+        )
+        log.info("Closing-line capture scheduled — every 60s (silent).")
     else:
         log.warning("JobQueue unavailable — weekly digest disabled. "
                     "Install with: pip install 'python-telegram-bot[job-queue]'")
