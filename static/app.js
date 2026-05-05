@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v17 (Login width + bet-size floor)";
+const BUILD = "2026-05-05 v18 (Top-tab nav + Account stub)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -104,9 +104,36 @@ $$(".tab").forEach((b) => {
         archiveListView(true);
         loadArchives();
       }
+    } else if (b.dataset.tab === "dashboard") {
+      // Light refresh — picks may have moved (commenced) since landing.
+      loadDashboard();
+    } else if (b.dataset.tab === "account") {
+      loadAccount();
     }
   });
 });
+
+// Account tab loader — placeholder until Item 5 wires per-user accounts.
+// For now we just show "free" tier with the legacy single-password admin.
+async function loadAccount() {
+  $("#account-loading").hidden = true;
+  $("#account-info").hidden = false;
+  $("#account-email").textContent = "admin (legacy login)";
+  $("#account-tier").textContent = "Free";
+  $("#account-since").textContent = "—";
+  $("#account-upgrade-btn").hidden = false;
+  $("#account-upgrade-stub").hidden = false;
+  $("#account-premium-active").hidden = true;
+}
+
+// Wire the upgrade-stub click — does nothing functional yet, just shows
+// the stub message. Real payment processing lands in a follow-up.
+const _upgradeBtn = document.querySelector("#account-upgrade-btn");
+if (_upgradeBtn) {
+  _upgradeBtn.addEventListener("click", () => {
+    $("#account-upgrade-stub").hidden = false;
+  });
+}
 
 // ── Dashboard (left pane: most recent run) ───────────────────────────
 
