@@ -41,7 +41,7 @@ header {
 }
 .brand { font-weight: 700; font-size: 18px; letter-spacing: 0.5px; }
 
-.screen { padding: 16px; max-width: 1280px; margin: 0 auto; }
+.screen { padding: 16px; max-width: 2200px; margin: 0 auto; }
 .screen[hidden] { display: none; }
 
 /* Two-column layout: dashboard left, tools right.
