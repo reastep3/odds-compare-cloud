@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v19 (Signup + tier framework)";
+const BUILD = "2026-05-05 v20 (Sportsbook deep links on picks)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -407,6 +407,27 @@ function fmtMoneyShort(x) {
   return x >= 100 ? `$${x.toFixed(0)}` : `$${x.toFixed(2)}`;
 }
 
+// Render the game-name cell — wraps in a sportsbook deep link when the
+// pick has one. Lands the user on the DK/FD event page in a new tab
+// (universal-links into the app on mobile). The `↗` glyph signals
+// external/new-tab without needing an icon font. Note: this is NOT a
+// pre-filled bet slip — DK/FD don't expose that — the user still has
+// to tap the specific market on the event page.
+function fmtGameCell(p) {
+  const game = p.game ?? "";
+  if (!game || !p.deep_link) return _esc(game);
+  return `<a href="${p.deep_link}" target="_blank" rel="noopener noreferrer"
+            class="deep-link" title="Open on ${p.book}">${_esc(game)} <span class="ext">↗</span></a>`;
+}
+
+// Minimal HTML escape so a malicious-looking team name can't inject
+// markup into the table. (Belt-and-suspenders — backend already sanitises.)
+function _esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 // Compact table for the left pane.
 // Stake column: bankroll × Kelly% (per-book). Falls back to BR% only
 // when the user has no bankroll set for that book, or when the archive
@@ -435,7 +456,7 @@ function renderDashboardTable(picks, userKellyFraction) {
     }
     return `<tr>
       <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
-      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(p)}</td>
       <td data-label="Book" class="${bookCls(p.book)}">${shortBook(p.book)}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
@@ -590,7 +611,7 @@ function renderEdges(edges) {
     return `<tr>
       <td data-label="#" class="num cell-rank">${i + 1}</td>
       <td data-label="Sport" class="cell-sport">${e.sport ?? ""}</td>
-      <td data-label="Game" class="cell-game">${e.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(e)}</td>
       <td data-label="Book" class="${bookCls}">${e.book ?? ""}</td>
       <td data-label="Mkt">${e.market ?? ""}</td>
       <td data-label="Pick">${e.outcome ?? ""}${e.line != null ? ` (${e.line})` : ""}</td>
@@ -862,7 +883,7 @@ function renderPlayTheseTable(picks) {
     const ev = Number(p.ev_pct ?? 0);
     return `<tr>
       <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
-      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(p)}</td>
       <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
       <td data-label="Mkt">${p.market ?? ""}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
