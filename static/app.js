@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v20 (Sportsbook deep links on picks)";
+const BUILD = "2026-05-05 v21 (Table column alignment + visible deep links)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -466,8 +466,10 @@ function renderDashboardTable(picks, userKellyFraction) {
     </tr>`;
   }).join("");
   return `<thead><tr>
-    <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
-    <th>Odds</th><th>Stake</th><th>EV</th><th>Result</th>
+    <th class="col-sport">Sport</th><th class="col-game">Game</th>
+    <th class="col-book">Book</th><th>Pick</th>
+    <th class="num">Odds</th><th class="num">Stake</th>
+    <th class="num">EV</th><th class="col-result">Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
 
@@ -623,9 +625,11 @@ function renderEdges(edges) {
   }).join("");
   $("#run-edges-table").innerHTML = `
     <thead><tr>
-      <th>#</th><th>Sport</th><th>Game</th><th>Book</th>
-      <th>Mkt</th><th>Pick</th><th>Odds</th><th>EV</th>
-      <th>Kelly</th><th>📌</th>
+      <th class="col-rank">#</th><th class="col-sport">Sport</th>
+      <th class="col-game">Game</th><th class="col-book">Book</th>
+      <th class="col-mkt">Mkt</th><th>Pick</th>
+      <th class="num">Odds</th><th class="num">EV</th>
+      <th class="num">Kelly</th><th class="col-sharp">📌</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
   $("#run-edges").hidden = false;
@@ -894,8 +898,10 @@ function renderPlayTheseTable(picks) {
   }).join("");
   $("#archive-play-table").innerHTML = `
     <thead><tr>
-      <th>Sport</th><th>Game</th><th>Book</th><th>Mkt</th>
-      <th>Pick</th><th>Odds</th><th>EV</th><th>Result</th>
+      <th class="col-sport">Sport</th><th class="col-game">Game</th>
+      <th class="col-book">Book</th><th class="col-mkt">Mkt</th>
+      <th>Pick</th><th class="num">Odds</th>
+      <th class="num">EV</th><th class="col-result">Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
