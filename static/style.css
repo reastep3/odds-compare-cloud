@@ -346,6 +346,26 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
 .book-DK { color: var(--accent); font-weight: 600; }
 .book-FD { color: var(--primary); font-weight: 600; }
 
+/* Deep-link to the sportsbook event page on a pick row.
+   Subtle underline + slightly brighter on hover so the link isn't
+   visually noisy in dense tables. The tiny `↗` glyph signals "opens
+   in new tab" without needing an icon font. */
+a.deep-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(255,255,255,0.25);
+}
+a.deep-link:hover {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+a.deep-link .ext {
+  font-size: 0.85em;
+  color: var(--muted);
+  margin-left: 2px;
+}
+a.deep-link:hover .ext { color: var(--primary); }
+
 .list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .list .row {
   display: flex; align-items: center; justify-content: space-between;

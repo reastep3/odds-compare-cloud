@@ -36,6 +36,7 @@ import base64
 import glob
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -671,6 +672,18 @@ li { margin:4px 0; }
 
 # ── JSON shaping helpers ───────────────────────────────────────────────
 
+def _edge_deep_link(e: dict[str, Any]) -> str | None:
+    """Build a sportsbook event URL for this edge if the right book's
+    event_id is present. Live edge dicts (from /api/run) carry these
+    IDs directly — no sidecar lookup needed."""
+    book = e.get("book")
+    if book == "DraftKings" and e.get("dk_event_id"):
+        return _DK_DEEP_LINK_BASE + str(e["dk_event_id"])
+    if book == "FanDuel" and e.get("fd_event_id"):
+        return _FD_DEEP_LINK_BASE + str(e["fd_event_id"])
+    return None
+
+
 def _shape_edge(e: dict[str, Any]) -> dict[str, Any]:
     """Trim an edge dict to a JSON-clean shape for the frontend."""
     return {
@@ -688,6 +701,7 @@ def _shape_edge(e: dict[str, Any]) -> dict[str, Any]:
         "implied_prob":  e.get("implied_prob"),
         "kelly_pct":     e.get("kelly_pct"),
         "pinnacle_anchored": bool(e.get("pinnacle_anchored")),
+        "deep_link":     _edge_deep_link(e),
     }
 
 
@@ -883,6 +897,12 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
     promos = _safe_grade(promos, run_backtest_promo, "promo_picks")
     props  = _safe_grade(props,  run_backtest,       "player_props")
 
+    # Sportsbook deep links — restored from the sidecar that odds_compare
+    # writes alongside the xlsx. xlsx round-trip drops the bookmaker IDs
+    # from edge_dict, so the dashboard can't link to the event page
+    # without this. {} when the sidecar is missing (older archives).
+    book_links = _load_book_event_ids(_OUTPUT_DIR)
+
     return {
         "name":     name,
         "an_only":  "_ANONLY" in name.upper(),
@@ -890,9 +910,11 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         "kelly_fraction_runtime": kelly_fraction_runtime,
         "summary":  _shape_summary(summary),
         "play_these":  [_shape_archive_pick(p, bankrolls,
-                                              kelly_fraction_runtime) for p in play],
+                                              kelly_fraction_runtime,
+                                              book_links) for p in play],
         "all_plays":   [_shape_archive_pick(p, bankrolls,
-                                              kelly_fraction_runtime) for p in all_ev],
+                                              kelly_fraction_runtime,
+                                              book_links) for p in all_ev],
         "promo_picks": [_shape_archive_promo(p) for p in promos],
         "player_props": [_shape_archive_prop(p) for p in props],
         "counts": {
@@ -1014,9 +1036,54 @@ def _round(v: Any, n: int = 2) -> Any:
     return v
 
 
+# ── Sportsbook deep links ──────────────────────────────────────────────
+# URL bases mirror telegram_bot._deep_link so both surfaces hit the same
+# event pages. DK and FD redirect users to their state's sportsbook
+# automatically, so a single base works for any legal jurisdiction.
+_DK_DEEP_LINK_BASE = "https://sportsbook.draftkings.com/event/"
+_FD_DEEP_LINK_BASE = "https://sportsbook.fanduel.com/sport/event/"
+
+
+def _load_book_event_ids(output_dir: str) -> dict:
+    """Load the latest_book_event_ids.json sidecar — pick_key →
+    {dk_event_id, fd_event_id}. Returns {} if the sidecar doesn't
+    exist yet (older archives, or scan hasn't run since deploy)."""
+    path = os.path.join(output_dir, "latest_book_event_ids.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload.get("picks", {}) or {}
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"[book-links] could not read {path}: {e}")
+        return {}
+
+
+def _resolve_deep_link(pick: dict[str, Any],
+                        book_links: dict | None) -> str | None:
+    """Look up the sportsbook event URL for this pick, or None if not
+    available (no sidecar entry, or no event_id for this pick's book)."""
+    if not book_links:
+        return None
+    # Lazy import — webapp.py is imported during cold start; pulling
+    # backtest.py in unconditionally would chain in openpyxl/etc.
+    from backtest import _backtest_pick_key
+    entry = book_links.get(_backtest_pick_key(pick))
+    if not entry:
+        return None
+    book = pick.get("book")
+    if book == "DraftKings" and entry.get("dk_event_id"):
+        return _DK_DEEP_LINK_BASE + str(entry["dk_event_id"])
+    if book == "FanDuel" and entry.get("fd_event_id"):
+        return _FD_DEEP_LINK_BASE + str(entry["fd_event_id"])
+    return None
+
+
 def _shape_archive_pick(p: dict[str, Any],
                           bankrolls: dict[str, float | None] | None = None,
                           kelly_fraction_runtime: float = 0.5,
+                          book_links: dict | None = None,
                           ) -> dict[str, Any]:
     """Per-pick shape with bankroll-independent stake info.
 
@@ -1028,6 +1095,10 @@ def _shape_archive_pick(p: dict[str, Any],
                      runtime fraction). Frontend multiplies this by the
                      user's chosen Kelly fraction to recompute BR % live
                      without re-fetching.
+    book_links     — optional sidecar lookup mapping pick_key →
+                     {dk_event_id, fd_event_id}. When the right book's
+                     ID is present, populates 'deep_link' so the frontend
+                     can render the pick title as a sportsbook link.
     """
     bet  = p.get("bet_amount")
     book = p.get("book")
@@ -1061,6 +1132,7 @@ def _shape_archive_pick(p: dict[str, Any],
         "confidence": p.get("confidence"),
         "result":     p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
+        "deep_link":  _resolve_deep_link(p, book_links),
     }
 
 

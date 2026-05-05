@@ -1846,6 +1846,46 @@ def _save_play_keys(play_edges: list[dict], script_dir: str) -> None:
         json.dump(keys, fh)
 
 
+def write_book_event_ids_sidecar(edges: list[dict] | None,
+                                   prop_edges: list[dict] | None,
+                                   output_dir: str) -> str | None:
+    """
+    Write a single `latest_book_event_ids.json` sidecar holding the DK/FD
+    event IDs for every pick in this scan, keyed by pick_key.
+
+    The dashboard frontend reads this to wrap pick rows in a sportsbook
+    deep link ("click → DK/FD event page"). xlsx round-trip strips the
+    bookmaker IDs from edge_dict, so this sidecar is how we surface them
+    back to the live UI without changing the xlsx schema.
+
+    Always overwrites — the dashboard only ever shows the LATEST archive,
+    so older scans' IDs are not needed and would just bloat the file.
+    Picks without IDs (some sport coverage gaps) are still recorded with
+    null values so the lookup always finds the pick (just no link).
+    """
+    path = os.path.join(output_dir, "latest_book_event_ids.json")
+
+    out: dict[str, dict] = {}
+    for edge in (edges or []) + (prop_edges or []):
+        key = _make_pick_key(edge)
+        out[key] = {
+            "dk_event_id": edge.get("dk_event_id"),
+            "fd_event_id": edge.get("fd_event_id"),
+        }
+
+    payload = {
+        "scan_timestamp": datetime.now(timezone.utc).isoformat(),
+        "picks":          out,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    has_id_count = sum(1 for v in out.values()
+                       if v.get("dk_event_id") or v.get("fd_event_id"))
+    print(f"  [book-links] {has_id_count}/{len(out)} picks have a DK/FD event ID "
+          f"in {os.path.basename(path)}")
+    return path
+
+
 def write_pending_closes_sidecar(edges: list[dict] | None,
                                  prop_edges: list[dict] | None,
                                  output_dir: str) -> str | None:
@@ -3701,6 +3741,16 @@ def write_excel(edges: list[dict], dk_bankroll: float,
     except Exception as e:
         # Never let sidecar failure block the xlsx save; just log it.
         print(f"  [closing-lines] sidecar write failed: {e}")
+
+    # ── Sidecar for sportsbook deep links ─────────────────────────────
+    # Restores DK/FD event IDs that the xlsx round-trip drops, so the
+    # dashboard can render "click pick → sportsbook event page" links.
+    try:
+        write_book_event_ids_sidecar(
+            edges, player_prop_edges, os.path.dirname(output_path),
+        )
+    except Exception as e:
+        print(f"  [book-links] sidecar write failed: {e}")
 
     wb.save(output_path)
     print(f"\nSaved to: {output_path}")
