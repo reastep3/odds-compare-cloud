@@ -44,6 +44,10 @@ header {
 .screen { padding: 16px; max-width: 2600px; margin: 0 auto; }
 .screen[hidden] { display: none; }
 
+/* Login screen: keep the sign-in card at a sensible centered width
+   instead of stretching to the full 2600px desktop cap. */
+#login.screen { max-width: 460px; padding-top: 60px; }
+
 /* Two-column layout: dashboard left, tools right.
    Login screen ignores .layout entirely (single card). */
 .layout {

@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v16 (Equal-width panes, 2600px max)";
+const BUILD = "2026-05-05 v17 (Login width + bet-size floor)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -157,6 +157,19 @@ function bankrollFor(book) {
   return 0;
 }
 
+// Per-book minimum bet sizes — mirror odds_compare.MIN_BET.
+// Used to floor live stake recalculations when Kelly × bankroll falls
+// below what the books will actually accept.
+const MIN_BET = {
+  "DraftKings": 0.10,
+  "FanDuel":    0.09,
+};
+function clampBet(dollars, book) {
+  if (!(dollars > 0)) return 0;
+  const floor = MIN_BET[book] ?? 0.10;
+  return Math.max(dollars, floor);
+}
+
 async function loadDashboard() {
   const meta = $("#dashboard-meta");
   meta.innerHTML = `<span class="spinner"></span>Loading latest run + grading…`;
@@ -306,9 +319,14 @@ function renderDashboardTable(picks, userKellyFraction) {
     if (br == null) {
       stakeCell = "—";
     } else if (bankroll > 0) {
-      const dollars = bankroll * (br / 100);
+      // Floor the dollars at the per-book minimum (DK $0.10, FD $0.09).
+      // When clamped, recompute the displayed % so dollars and % stay
+      // consistent — dollars × 100 / bankroll = the % actually bet.
+      const rawDollars = bankroll * (br / 100);
+      const dollars    = clampBet(rawDollars, p.book);
+      const displayPct = dollars > 0 ? (dollars / bankroll * 100) : br;
       stakeCell = `<span class="stake-amt">${fmtMoneyShort(dollars)}</span>` +
-                  `<span class="stake-pct">${br.toFixed(2)}%</span>`;
+                  `<span class="stake-pct">${displayPct.toFixed(2)}%</span>`;
     } else {
       stakeCell = `${br.toFixed(2)}%`;
     }
