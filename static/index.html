@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=18">
+  <link rel="stylesheet" href="/static/style.css?v=19">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -26,16 +26,44 @@
     <button id="logout-btn" class="ghost-btn" hidden>Sign out</button>
   </header>
 
-  <!-- Login screen -->
+  <!-- Login screen — toggles between Sign in / Sign up -->
   <section id="login" class="screen">
     <div class="card">
-      <h1>Sign in</h1>
-      <p class="muted">Enter the password you set as the <code>WEBAPP_PASSWORD</code> Fly secret.</p>
-      <form id="login-form">
-        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
-        <button type="submit" class="primary-btn">Sign in</button>
-      </form>
-      <p id="login-err" class="error" hidden></p>
+      <!-- Toggle between sign-in and sign-up modes -->
+      <div class="sub-toggle">
+        <button data-auth-mode="login" class="active">Sign in</button>
+        <button data-auth-mode="signup">Sign up</button>
+      </div>
+
+      <!-- Sign in form -->
+      <div data-auth-view="login">
+        <h1>Sign in</h1>
+        <p class="muted">Enter your account email + password, or leave email blank to use the legacy admin password.</p>
+        <form id="login-form">
+          <input type="email" id="login-email" placeholder="Email (optional)"
+                 autocomplete="email" autocapitalize="off" autocorrect="off">
+          <input type="password" id="login-password" placeholder="Password"
+                 autocomplete="current-password" required>
+          <button type="submit" class="primary-btn">Sign in</button>
+        </form>
+        <p id="login-err" class="error" hidden></p>
+      </div>
+
+      <!-- Sign up form -->
+      <div data-auth-view="signup" hidden>
+        <h1>Create account</h1>
+        <p class="muted">Free tier — full read access to scans, archives, and backtests. Premium upgrade coming soon.</p>
+        <form id="signup-form">
+          <input type="email" id="signup-email" placeholder="Email"
+                 autocomplete="email" autocapitalize="off" autocorrect="off" required>
+          <input type="password" id="signup-password" placeholder="Password (8+ chars)"
+                 autocomplete="new-password" minlength="8" required>
+          <input type="password" id="signup-confirm" placeholder="Confirm password"
+                 autocomplete="new-password" minlength="8" required>
+          <button type="submit" class="primary-btn">Sign up</button>
+        </form>
+        <p id="signup-err" class="error" hidden></p>
+      </div>
     </div>
   </section>
 
@@ -337,6 +365,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=18"></script>
+  <script src="/static/app.js?v=19"></script>
 </body>
 </html>

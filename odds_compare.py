@@ -98,8 +98,11 @@ EASTERN = ZoneInfo("America/New_York")
 # On cloud, set OUTPUT_DIR and DATA_DIR to a persistent volume mount.
 # Locally (unset), both default to the script's directory.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", _SCRIPT_DIR)
-DATA_DIR    = os.environ.get("DATA_DIR",   _SCRIPT_DIR)
+# Treat empty-string env values the same as unset — a `.env` file with
+# `OUTPUT_DIR=` (no value) would otherwise pass through as "" and break
+# os.makedirs("").
+OUTPUT_DIR  = os.environ.get("OUTPUT_DIR") or _SCRIPT_DIR
+DATA_DIR    = os.environ.get("DATA_DIR")   or _SCRIPT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR,   exist_ok=True)
 

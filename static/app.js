@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v18 (Top-tab nav + Account stub)";
+const BUILD = "2026-05-05 v19 (Signup + tier framework)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -44,8 +44,27 @@ function showLogin() {
   $("#login").hidden = false;
   $("#app").hidden = true;
   $("#logout-btn").hidden = true;
-  $("#password").focus();
+  // Always land on the sign-in view (not whatever was last toggled)
+  setAuthMode("login");
+  const target = $("#login-email") || $("#login-password");
+  if (target) target.focus();
 }
+
+// Toggle between sign-in and sign-up forms.
+function setAuthMode(mode) {
+  document.querySelectorAll("[data-auth-mode]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.authMode === mode);
+  });
+  document.querySelectorAll("[data-auth-view]").forEach((v) => {
+    v.hidden = (v.dataset.authView !== mode);
+  });
+  // Clear stale errors when switching modes
+  $("#login-err").hidden = true;
+  $("#signup-err").hidden = true;
+}
+document.querySelectorAll("[data-auth-mode]").forEach((b) => {
+  b.addEventListener("click", () => setAuthMode(b.dataset.authMode));
+});
 
 function showApp() {
   $("#login").hidden = true;
@@ -62,13 +81,16 @@ function showApp() {
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const pw = $("#password").value;
+  const email = $("#login-email").value.trim();
+  const pw    = $("#login-password").value;
   $("#login-err").hidden = true;
   try {
     const res = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
+      // Backend supports both flows: email + password (per-user account)
+      // and password alone (legacy WEBAPP_PASSWORD admin fallback).
+      body: JSON.stringify(email ? { email, password: pw } : { password: pw }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -76,11 +98,40 @@ $("#login-form").addEventListener("submit", async (e) => {
     }
     const j = await res.json();
     setToken(j.token);
-    $("#password").value = "";
+    $("#login-email").value    = "";
+    $("#login-password").value = "";
     showApp();
   } catch (err) {
     $("#login-err").textContent = err.message;
     $("#login-err").hidden = false;
+  }
+});
+
+$("#signup-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email   = $("#signup-email").value.trim();
+  const pw      = $("#signup-password").value;
+  const confirm = $("#signup-confirm").value;
+  $("#signup-err").hidden = true;
+  try {
+    const res = await fetch("/api/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: pw, confirm_password: confirm }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${res.status}`);
+    }
+    const j = await res.json();
+    setToken(j.token);
+    $("#signup-email").value    = "";
+    $("#signup-password").value = "";
+    $("#signup-confirm").value  = "";
+    showApp();
+  } catch (err) {
+    $("#signup-err").textContent = err.message;
+    $("#signup-err").hidden = false;
   }
 });
 
@@ -113,21 +164,46 @@ $$(".tab").forEach((b) => {
   });
 });
 
-// Account tab loader — placeholder until Item 5 wires per-user accounts.
-// For now we just show "free" tier with the legacy single-password admin.
+// Account tab loader — fetches /api/me and populates the panel.
+// Three tier states render distinctly:
+//   free     → Upgrade button visible, premium-active message hidden
+//   premium  → Upgrade button hidden, "Premium active" message shown
+//   admin    → Treated as premium (legacy WEBAPP_PASSWORD shared-login)
 async function loadAccount() {
-  $("#account-loading").hidden = true;
-  $("#account-info").hidden = false;
-  $("#account-email").textContent = "admin (legacy login)";
-  $("#account-tier").textContent = "Free";
-  $("#account-since").textContent = "—";
-  $("#account-upgrade-btn").hidden = false;
-  $("#account-upgrade-stub").hidden = false;
-  $("#account-premium-active").hidden = true;
+  const loading = $("#account-loading");
+  const info    = $("#account-info");
+  loading.hidden = false;
+  info.hidden    = true;
+  loading.textContent = "Loading…";
+
+  try {
+    const j = await apiJSON("/api/me");
+    const u = j.user || {};
+    $("#account-email").textContent =
+      u.email || (u.id === "legacy_admin" ? "admin (legacy login)" : "—");
+    const tierLabel = {
+      free:    "Free",
+      premium: "Premium",
+      admin:   "Admin (legacy)",
+    }[u.tier] || u.tier || "—";
+    $("#account-tier").textContent = tierLabel;
+    $("#account-since").textContent =
+      u.created_at ? new Date(u.created_at).toLocaleDateString() : "—";
+
+    const isPremium = (u.tier === "premium" || u.tier === "admin");
+    $("#account-upgrade-btn").hidden       =  isPremium;
+    $("#account-upgrade-stub").hidden      = true;   // shown only on click
+    $("#account-premium-active").hidden    = !isPremium;
+
+    loading.hidden = true;
+    info.hidden    = false;
+  } catch (err) {
+    loading.textContent = `Could not load account: ${err.message}`;
+  }
 }
 
-// Wire the upgrade-stub click — does nothing functional yet, just shows
-// the stub message. Real payment processing lands in a follow-up.
+// Upgrade-stub click — surfaces the "in development" message inline.
+// No payment processing wired yet; this is the framework for it.
 const _upgradeBtn = document.querySelector("#account-upgrade-btn");
 if (_upgradeBtn) {
   _upgradeBtn.addEventListener("click", () => {

@@ -14,3 +14,5 @@ tzdata==2026.2; platform_system == "Windows"
 # Web app (PWA) — runs alongside the Telegram bot in the same asyncio loop
 fastapi==0.136.1
 uvicorn[standard]==0.46.0
+# Password hashing for the multi-user signup flow.
+bcrypt==5.0.0

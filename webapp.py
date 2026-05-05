@@ -70,8 +70,12 @@ _TOKEN_SECRET = os.environ.get(
 _TOKEN_TTL_SECONDS = 30 * 24 * 3600   # 30 days
 
 # Where Excel archives live. Matches odds_compare.OUTPUT_DIR.
-_OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", os.path.dirname(
-    os.path.abspath(__file__)))
+# Treat empty-string env values the same as unset (handles bare
+# `OUTPUT_DIR=` lines in .env files).
+_OUTPUT_DIR  = (
+    os.environ.get("OUTPUT_DIR")
+    or os.path.dirname(os.path.abspath(__file__))
+)
 _ARCHIVE_DIR = os.path.join(_OUTPUT_DIR, "archive")
 # Older backtest_*.xlsx files get auto-moved here by run_full_backtest.
 # The latest report sits at the top level alongside ev_edges_*.xlsx.
@@ -82,28 +86,81 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ── Token helpers ──────────────────────────────────────────────────────
+# Two token formats accepted, one minted:
+#
+#   v2 format (minted by current code):
+#       base64("v2:<user_id>:<expiry>:<sig>")
+#       sig = hmac_sha256(secret, "<user_id>:<expiry>")
+#
+#   Legacy format (still accepted for backwards-compat with stale
+#   localStorage tokens; treated as legacy_admin):
+#       base64("<expiry>:<sig>")
+#       sig = hmac_sha256(secret, "<expiry>")
+#
+# All login flows (signup, /api/login email+password, WEBAPP_PASSWORD
+# fallback) mint v2 tokens. The legacy verify path only exists so users
+# with an older token in localStorage don't get logged out by the
+# auth-system upgrade.
 
-def _make_token(expiry_ts: int) -> str:
-    """HMAC-signed token: base64('<expiry>:<sig>')."""
-    msg = str(expiry_ts).encode()
-    sig = hmac.new(_TOKEN_SECRET, msg, hashlib.sha256).hexdigest()
-    raw = f"{expiry_ts}:{sig}".encode()
+import webapp_users
+
+
+def _make_user_token(user_id: str, expiry_ts: int) -> str:
+    """v2 token — embeds user_id so current_user can resolve the account."""
+    payload = f"{user_id}:{expiry_ts}"
+    sig = hmac.new(_TOKEN_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"v2:{payload}:{sig}".encode()
     return base64.urlsafe_b64encode(raw).decode()
 
 
-def _verify_token(token: str) -> bool:
+def _verify_token(token: str) -> str | None:
+    """Returns the authenticated user_id, or None if the token is bad/expired.
+
+    Tries v2 format first (4 parts: 'v2', user_id, expiry, sig), falls
+    back to legacy format (2 parts: expiry, sig → legacy_admin).
+    """
     try:
         raw = base64.urlsafe_b64decode(token.encode()).decode()
-        expiry_str, sig = raw.split(":", 1)
-        expiry_ts = int(expiry_str)
-        if expiry_ts < int(time.time()):
-            return False
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    parts = raw.split(":")
+    now = int(time.time())
+
+    # v2 format: "v2:<user_id>:<expiry>:<sig>"
+    if len(parts) == 4 and parts[0] == "v2":
+        _, user_id, expiry_str, sig = parts
+        try:
+            expiry_ts = int(expiry_str)
+        except ValueError:
+            return None
+        if expiry_ts < now:
+            return None
+        expected = hmac.new(
+            _TOKEN_SECRET, f"{user_id}:{expiry_str}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(sig, expected):
+            return user_id
+        return None
+
+    # Legacy format: "<expiry>:<sig>" → treat as legacy_admin
+    if len(parts) == 2:
+        expiry_str, sig = parts
+        try:
+            expiry_ts = int(expiry_str)
+        except ValueError:
+            return None
+        if expiry_ts < now:
+            return None
         expected = hmac.new(
             _TOKEN_SECRET, expiry_str.encode(), hashlib.sha256
         ).hexdigest()
-        return hmac.compare_digest(sig, expected)
-    except (ValueError, TypeError, AttributeError):
-        return False
+        if hmac.compare_digest(sig, expected):
+            return webapp_users.LEGACY_ADMIN_ID
+        return None
+
+    return None
 
 
 # ── Auth dependency ────────────────────────────────────────────────────
@@ -113,22 +170,51 @@ _bearer = HTTPBearer(auto_error=False)
 
 def current_user(
     cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> str:
-    """Validates the Bearer token. Returns a user id ('owner' for v1)."""
+) -> dict:
+    """Validates the Bearer token; returns the resolved user record.
+
+    Returns a dict with keys: id, email, tier, created_at. The legacy
+    admin (WEBAPP_PASSWORD shared login) returns a synthetic record
+    with id='legacy_admin' and tier='admin'.
+    """
     if cred is None or not cred.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _verify_token(cred.credentials):
+    user_id = _verify_token(cred.credentials)
+    if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Single-user for now. Multi-user later: decode user id from token.
-    return "owner"
+    user = webapp_users.find_by_id(user_id)
+    if user is None:
+        # Token validated but user record vanished (e.g., manual deletion
+        # of webapp_users.json). Treat as auth failure.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account not found — please sign in again",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return webapp_users.public(user)
+
+
+def require_premium(user: dict = Depends(current_user)) -> dict:
+    """Premium-gating dependency. Use on routes that require a paid tier.
+
+    Currently no premium-only routes exist — this is the framework that
+    item 5 wires up so future premium features are a one-liner away.
+    """
+    tier = user.get("tier")
+    if tier in (webapp_users.TIER_PREMIUM, webapp_users.TIER_ADMIN):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This feature requires a Premium account.",
+    )
 
 
 # ── App factory ────────────────────────────────────────────────────────
@@ -162,30 +248,85 @@ def build_app() -> FastAPI:
 
     @api.post("/api/login")
     async def login(req: Request) -> dict[str, Any]:
-        if not _WEBAPP_PASSWORD:
-            raise HTTPException(
-                status_code=503,
-                detail=("WEBAPP_PASSWORD not set. "
-                        "Run: fly secrets set WEBAPP_PASSWORD=<your-pw>"))
+        """Two flows accepted:
+
+        1. Email + password (per-user account from /api/signup)
+        2. Password only — falls back to WEBAPP_PASSWORD legacy admin
+           login. Existing users with the shared password keep working.
+
+        Both mint a v2 user token; legacy admin gets user_id='legacy_admin'.
+        """
         try:
             body = await req.json()
         except Exception:
             raise HTTPException(status_code=400, detail="JSON body required")
-        password = (body or {}).get("password", "")
+        body = body or {}
+        email    = (body.get("email") or "").strip()
+        password = body.get("password", "")
         if not isinstance(password, str) or not password:
             raise HTTPException(status_code=400, detail="Password required")
 
-        # Constant-time compare to avoid leaking length / first-mismatch
-        # via timing. Plus a fixed delay on wrong attempts to discourage
-        # online brute force on a public endpoint.
-        if not hmac.compare_digest(password.encode(),
+        user_id: str | None = None
+
+        # Email + password → look up the user record and verify
+        if email:
+            user = webapp_users.find_by_email(email)
+            if user and webapp_users.verify_password(user, password):
+                user_id = user["id"]
+
+        # No email OR email lookup failed → try the legacy admin password
+        # (WEBAPP_PASSWORD env var). Skip if not configured.
+        if user_id is None and _WEBAPP_PASSWORD:
+            if hmac.compare_digest(password.encode(),
                                     _WEBAPP_PASSWORD.encode()):
+                user_id = webapp_users.LEGACY_ADMIN_ID
+
+        if user_id is None:
+            # Fixed delay on failure: discourages online brute-force on
+            # this public endpoint without leaking which path failed.
             time.sleep(0.5)
-            raise HTTPException(status_code=401, detail="Invalid password")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
         expiry_ts = int(time.time()) + _TOKEN_TTL_SECONDS
-        token = _make_token(expiry_ts)
+        token = _make_user_token(user_id, expiry_ts)
         return {"token": token, "expires_at": expiry_ts}
+
+    @api.post("/api/signup")
+    async def signup(req: Request) -> dict[str, Any]:
+        """Create a new free-tier account. Returns a session token so
+        the user is logged in immediately after signup."""
+        try:
+            body = await req.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="JSON body required")
+        body = body or {}
+        email             = body.get("email", "")
+        password          = body.get("password", "")
+        confirm_password  = body.get("confirm_password", "")
+
+        if password != confirm_password:
+            raise HTTPException(status_code=400,
+                                 detail="Passwords do not match")
+
+        try:
+            user = webapp_users.create_user(email, password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        expiry_ts = int(time.time()) + _TOKEN_TTL_SECONDS
+        token = _make_user_token(user["id"], expiry_ts)
+        return {
+            "token":      token,
+            "expires_at": expiry_ts,
+            "user":       user,
+        }
+
+    @api.get("/api/me")
+    async def me(user: dict = Depends(current_user)) -> dict[str, Any]:
+        """Return the authenticated user's account info — drives the
+        Account tab. Excludes the password hash by virtue of going
+        through current_user → webapp_users.public()."""
+        return {"user": user}
 
     # ── Auth-required endpoints ───────────────────────────────────────
 
