@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-03 v14 (Backtest archives in Archives tab)";
+const BUILD = "2026-05-05 v21 (Table column alignment + visible deep links)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -44,8 +44,27 @@ function showLogin() {
   $("#login").hidden = false;
   $("#app").hidden = true;
   $("#logout-btn").hidden = true;
-  $("#password").focus();
+  // Always land on the sign-in view (not whatever was last toggled)
+  setAuthMode("login");
+  const target = $("#login-email") || $("#login-password");
+  if (target) target.focus();
 }
+
+// Toggle between sign-in and sign-up forms.
+function setAuthMode(mode) {
+  document.querySelectorAll("[data-auth-mode]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.authMode === mode);
+  });
+  document.querySelectorAll("[data-auth-view]").forEach((v) => {
+    v.hidden = (v.dataset.authView !== mode);
+  });
+  // Clear stale errors when switching modes
+  $("#login-err").hidden = true;
+  $("#signup-err").hidden = true;
+}
+document.querySelectorAll("[data-auth-mode]").forEach((b) => {
+  b.addEventListener("click", () => setAuthMode(b.dataset.authMode));
+});
 
 function showApp() {
   $("#login").hidden = true;
@@ -62,13 +81,16 @@ function showApp() {
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const pw = $("#password").value;
+  const email = $("#login-email").value.trim();
+  const pw    = $("#login-password").value;
   $("#login-err").hidden = true;
   try {
     const res = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
+      // Backend supports both flows: email + password (per-user account)
+      // and password alone (legacy WEBAPP_PASSWORD admin fallback).
+      body: JSON.stringify(email ? { email, password: pw } : { password: pw }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -76,11 +98,40 @@ $("#login-form").addEventListener("submit", async (e) => {
     }
     const j = await res.json();
     setToken(j.token);
-    $("#password").value = "";
+    $("#login-email").value    = "";
+    $("#login-password").value = "";
     showApp();
   } catch (err) {
     $("#login-err").textContent = err.message;
     $("#login-err").hidden = false;
+  }
+});
+
+$("#signup-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email   = $("#signup-email").value.trim();
+  const pw      = $("#signup-password").value;
+  const confirm = $("#signup-confirm").value;
+  $("#signup-err").hidden = true;
+  try {
+    const res = await fetch("/api/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: pw, confirm_password: confirm }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${res.status}`);
+    }
+    const j = await res.json();
+    setToken(j.token);
+    $("#signup-email").value    = "";
+    $("#signup-password").value = "";
+    $("#signup-confirm").value  = "";
+    showApp();
+  } catch (err) {
+    $("#signup-err").textContent = err.message;
+    $("#signup-err").hidden = false;
   }
 });
 
@@ -104,9 +155,61 @@ $$(".tab").forEach((b) => {
         archiveListView(true);
         loadArchives();
       }
+    } else if (b.dataset.tab === "dashboard") {
+      // Light refresh — picks may have moved (commenced) since landing.
+      loadDashboard();
+    } else if (b.dataset.tab === "account") {
+      loadAccount();
     }
   });
 });
+
+// Account tab loader — fetches /api/me and populates the panel.
+// Three tier states render distinctly:
+//   free     → Upgrade button visible, premium-active message hidden
+//   premium  → Upgrade button hidden, "Premium active" message shown
+//   admin    → Treated as premium (legacy WEBAPP_PASSWORD shared-login)
+async function loadAccount() {
+  const loading = $("#account-loading");
+  const info    = $("#account-info");
+  loading.hidden = false;
+  info.hidden    = true;
+  loading.textContent = "Loading…";
+
+  try {
+    const j = await apiJSON("/api/me");
+    const u = j.user || {};
+    $("#account-email").textContent =
+      u.email || (u.id === "legacy_admin" ? "admin (legacy login)" : "—");
+    const tierLabel = {
+      free:    "Free",
+      premium: "Premium",
+      admin:   "Admin (legacy)",
+    }[u.tier] || u.tier || "—";
+    $("#account-tier").textContent = tierLabel;
+    $("#account-since").textContent =
+      u.created_at ? new Date(u.created_at).toLocaleDateString() : "—";
+
+    const isPremium = (u.tier === "premium" || u.tier === "admin");
+    $("#account-upgrade-btn").hidden       =  isPremium;
+    $("#account-upgrade-stub").hidden      = true;   // shown only on click
+    $("#account-premium-active").hidden    = !isPremium;
+
+    loading.hidden = true;
+    info.hidden    = false;
+  } catch (err) {
+    loading.textContent = `Could not load account: ${err.message}`;
+  }
+}
+
+// Upgrade-stub click — surfaces the "in development" message inline.
+// No payment processing wired yet; this is the framework for it.
+const _upgradeBtn = document.querySelector("#account-upgrade-btn");
+if (_upgradeBtn) {
+  _upgradeBtn.addEventListener("click", () => {
+    $("#account-upgrade-stub").hidden = false;
+  });
+}
 
 // ── Dashboard (left pane: most recent run) ───────────────────────────
 
@@ -155,6 +258,19 @@ function bankrollFor(book) {
   if (book === "DraftKings") return getDkBR();
   if (book === "FanDuel")    return getFdBR();
   return 0;
+}
+
+// Per-book minimum bet sizes — mirror odds_compare.MIN_BET.
+// Used to floor live stake recalculations when Kelly × bankroll falls
+// below what the books will actually accept.
+const MIN_BET = {
+  "DraftKings": 0.10,
+  "FanDuel":    0.09,
+};
+function clampBet(dollars, book) {
+  if (!(dollars > 0)) return 0;
+  const floor = MIN_BET[book] ?? 0.10;
+  return Math.max(dollars, floor);
 }
 
 async function loadDashboard() {
@@ -291,6 +407,27 @@ function fmtMoneyShort(x) {
   return x >= 100 ? `$${x.toFixed(0)}` : `$${x.toFixed(2)}`;
 }
 
+// Render the game-name cell — wraps in a sportsbook deep link when the
+// pick has one. Lands the user on the DK/FD event page in a new tab
+// (universal-links into the app on mobile). The `↗` glyph signals
+// external/new-tab without needing an icon font. Note: this is NOT a
+// pre-filled bet slip — DK/FD don't expose that — the user still has
+// to tap the specific market on the event page.
+function fmtGameCell(p) {
+  const game = p.game ?? "";
+  if (!game || !p.deep_link) return _esc(game);
+  return `<a href="${p.deep_link}" target="_blank" rel="noopener noreferrer"
+            class="deep-link" title="Open on ${p.book}">${_esc(game)} <span class="ext">↗</span></a>`;
+}
+
+// Minimal HTML escape so a malicious-looking team name can't inject
+// markup into the table. (Belt-and-suspenders — backend already sanitises.)
+function _esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 // Compact table for the left pane.
 // Stake column: bankroll × Kelly% (per-book). Falls back to BR% only
 // when the user has no bankroll set for that book, or when the archive
@@ -306,15 +443,20 @@ function renderDashboardTable(picks, userKellyFraction) {
     if (br == null) {
       stakeCell = "—";
     } else if (bankroll > 0) {
-      const dollars = bankroll * (br / 100);
+      // Floor the dollars at the per-book minimum (DK $0.10, FD $0.09).
+      // When clamped, recompute the displayed % so dollars and % stay
+      // consistent — dollars × 100 / bankroll = the % actually bet.
+      const rawDollars = bankroll * (br / 100);
+      const dollars    = clampBet(rawDollars, p.book);
+      const displayPct = dollars > 0 ? (dollars / bankroll * 100) : br;
       stakeCell = `<span class="stake-amt">${fmtMoneyShort(dollars)}</span>` +
-                  `<span class="stake-pct">${br.toFixed(2)}%</span>`;
+                  `<span class="stake-pct">${displayPct.toFixed(2)}%</span>`;
     } else {
       stakeCell = `${br.toFixed(2)}%`;
     }
     return `<tr>
       <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
-      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(p)}</td>
       <td data-label="Book" class="${bookCls(p.book)}">${shortBook(p.book)}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
@@ -324,8 +466,10 @@ function renderDashboardTable(picks, userKellyFraction) {
     </tr>`;
   }).join("");
   return `<thead><tr>
-    <th>Sport</th><th>Game</th><th>Book</th><th>Pick</th>
-    <th>Odds</th><th>Stake</th><th>EV</th><th>Result</th>
+    <th class="col-sport">Sport</th><th class="col-game">Game</th>
+    <th class="col-book">Book</th><th>Pick</th>
+    <th class="num">Odds</th><th class="num">Stake</th>
+    <th class="num">EV</th><th class="col-result">Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
 
@@ -469,7 +613,7 @@ function renderEdges(edges) {
     return `<tr>
       <td data-label="#" class="num cell-rank">${i + 1}</td>
       <td data-label="Sport" class="cell-sport">${e.sport ?? ""}</td>
-      <td data-label="Game" class="cell-game">${e.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(e)}</td>
       <td data-label="Book" class="${bookCls}">${e.book ?? ""}</td>
       <td data-label="Mkt">${e.market ?? ""}</td>
       <td data-label="Pick">${e.outcome ?? ""}${e.line != null ? ` (${e.line})` : ""}</td>
@@ -481,9 +625,11 @@ function renderEdges(edges) {
   }).join("");
   $("#run-edges-table").innerHTML = `
     <thead><tr>
-      <th>#</th><th>Sport</th><th>Game</th><th>Book</th>
-      <th>Mkt</th><th>Pick</th><th>Odds</th><th>EV</th>
-      <th>Kelly</th><th>📌</th>
+      <th class="col-rank">#</th><th class="col-sport">Sport</th>
+      <th class="col-game">Game</th><th class="col-book">Book</th>
+      <th class="col-mkt">Mkt</th><th>Pick</th>
+      <th class="num">Odds</th><th class="num">EV</th>
+      <th class="num">Kelly</th><th class="col-sharp">📌</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
   $("#run-edges").hidden = false;
@@ -741,7 +887,7 @@ function renderPlayTheseTable(picks) {
     const ev = Number(p.ev_pct ?? 0);
     return `<tr>
       <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
-      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Game" class="cell-game">${fmtGameCell(p)}</td>
       <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
       <td data-label="Mkt">${p.market ?? ""}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
@@ -752,8 +898,10 @@ function renderPlayTheseTable(picks) {
   }).join("");
   $("#archive-play-table").innerHTML = `
     <thead><tr>
-      <th>Sport</th><th>Game</th><th>Book</th><th>Mkt</th>
-      <th>Pick</th><th>Odds</th><th>EV</th><th>Result</th>
+      <th class="col-sport">Sport</th><th class="col-game">Game</th>
+      <th class="col-book">Book</th><th class="col-mkt">Mkt</th>
+      <th>Pick</th><th class="num">Odds</th>
+      <th class="num">EV</th><th class="col-result">Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }

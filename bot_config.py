@@ -24,8 +24,10 @@ ODDS_API_KEY: str = os.environ.get("ODDS_API_KEY", "")
 
 # State files (users.json) live in DATA_DIR on cloud (persistent volume).
 # Locally, defaults to the script's directory for backward compatibility.
-_DATA_DIR = os.environ.get(
-    "DATA_DIR", os.path.dirname(os.path.abspath(__file__))
+# Treat `DATA_DIR=` (empty) in .env the same as unset.
+_DATA_DIR = (
+    os.environ.get("DATA_DIR")
+    or os.path.dirname(os.path.abspath(__file__))
 )
 # Volume mounts overlay the directories created by the Dockerfile, so we must
 # re-create our state subdirs here at runtime (not just during image build).
