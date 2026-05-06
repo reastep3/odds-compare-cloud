@@ -24,12 +24,13 @@ Commands:
 
 import asyncio
 import base64
+import glob
 import json
 import logging
 import re
 import sys
 import os
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -2194,17 +2195,41 @@ async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
     (no bet sizing) and writes the ev_edges_*.xlsx file. Silent: no
     Telegram output, errors logged but not DM'd.
 
+    Skipped when:
+      • A manual /run is already in progress.
+      • Any scan produced an ev_edges_*.xlsx within the last 12 hours
+        (i.e. between 10 PM ET yesterday and now). This is the user's
+        "if I already ran overnight, don't waste API credits" guard.
+
     Backtests dedup picks to FIRST appearance (see _dedup_picks), so the
     user's earlier manual runs always win on dedup. This auto-job only
     contributes data on days the user forgot to /run, ensuring the next
     morning's 3 AM backtest always has something to grade.
-
-    Skipped if a manual /run is already in progress — that one will write
-    the same archive file with more thought-out bankroll inputs anyway.
     """
     if context.bot_data.get("running"):
         log.info("[daily-skip-run] Manual run in progress — skipping.")
         return
+
+    # Skip if there was a scan in the previous 12h. ev_edges_*.xlsx is the
+    # canonical artifact of any scan path (manual /run*, prior auto-run);
+    # backtest_*.xlsx is excluded since we want SCAN coverage specifically.
+    from odds_compare import OUTPUT_DIR, EASTERN
+    now_et = datetime.now(EASTERN)
+    window_start = now_et - timedelta(hours=12)
+    ev_files: list[str] = []
+    for pat in (os.path.join(OUTPUT_DIR, "ev_edges_*.xlsx"),
+                os.path.join(OUTPUT_DIR, "archive", "ev_edges_*.xlsx")):
+        ev_files.extend(glob.glob(pat))
+    if ev_files:
+        newest_mtime = max(os.path.getmtime(p) for p in ev_files)
+        newest_et = datetime.fromtimestamp(
+            newest_mtime, tz=timezone.utc).astimezone(EASTERN)
+        if newest_et >= window_start:
+            log.info(
+                f"[daily-skip-run] Recent scan at {newest_et:%Y-%m-%d %H:%M %Z} "
+                f"(within 12h) — skipping auto-run to save credits.")
+            return
+
     log.info("[daily-skip-run] Job firing.")
     context.bot_data["running"] = True
     try:
