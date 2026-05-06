@@ -4147,6 +4147,10 @@ def run_full_backtest(start_dt: date, end_dt: date,
         prop_graded = None
 
     # ── Archive old backtest reports ──────────────────────────────────────────
+    # Run timestamp is baked into the new file's name (after the date range,
+    # joined by '__'), so re-running the same date range no longer clobbers
+    # the prior archive copy on disk OR collapses to a single dedup'd entry
+    # in the listing UI. Each run becomes its own visible report.
     bt_archive = os.path.join(SCRIPT_DIR, "Backtest Archives")
     old_reports = glob.glob(os.path.join(SCRIPT_DIR, "backtest_*.xlsx"))
     if old_reports:
@@ -4155,7 +4159,8 @@ def run_full_backtest(start_dt: date, end_dt: date,
             shutil.move(old, os.path.join(bt_archive, os.path.basename(old)))
         print(f"\nArchived {len(old_reports)} old report(s) → Backtest Archives/")
 
-    out_name = f"backtest_{start_dt}_{end_dt}.xlsx"
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_name = f"backtest_{start_dt}_{end_dt}__{run_stamp}.xlsx"
     out_path = os.path.join(SCRIPT_DIR, out_name)
     write_backtest_excel(primary_picks, primary_settled, out_path, start_dt, end_dt,
                          play_these_picks=graded if graded else None,

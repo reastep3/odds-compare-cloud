@@ -874,10 +874,20 @@ async function loadBacktestArchives() {
     wrap.innerHTML = j.archives.map((a) => {
       const pretty = prettyBacktestName(a.name, a.start, a.end);
       const kb     = (a.size / 1024).toFixed(1);
+      // Server returns run_time as 'YYYY-MM-DD HH:MM:SS' (filename-derived
+      // for current-format files, mtime-derived for legacy). Reformat for
+      // display so users can tell when each run was actually executed.
+      const runTime = a.run_time
+        ? new Date(a.run_time.replace(" ", "T")).toLocaleString(undefined, {
+            month: "short", day: "numeric",
+            hour: "numeric", minute: "2-digit",
+          })
+        : "";
+      const meta = runTime ? `Run ${runTime} · ${kb} KB` : `${kb} KB`;
       return `<a class="row" href="#" data-name="${a.name}">
         <div>
           <div class="row-title">${pretty.primary}</div>
-          <div class="meta">${kb} KB</div>
+          <div class="meta">${meta}</div>
         </div>
         <div>›</div>
       </a>`;
