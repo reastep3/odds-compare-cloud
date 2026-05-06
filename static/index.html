@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="stylesheet" href="/static/style.css?v=21">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -26,24 +26,61 @@
     <button id="logout-btn" class="ghost-btn" hidden>Sign out</button>
   </header>
 
-  <!-- Login screen -->
+  <!-- Login screen — toggles between Sign in / Sign up -->
   <section id="login" class="screen">
     <div class="card">
-      <h1>Sign in</h1>
-      <p class="muted">Enter the password you set as the <code>WEBAPP_PASSWORD</code> Fly secret.</p>
-      <form id="login-form">
-        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
-        <button type="submit" class="primary-btn">Sign in</button>
-      </form>
-      <p id="login-err" class="error" hidden></p>
+      <!-- Toggle between sign-in and sign-up modes -->
+      <div class="sub-toggle">
+        <button data-auth-mode="login" class="active">Sign in</button>
+        <button data-auth-mode="signup">Sign up</button>
+      </div>
+
+      <!-- Sign in form -->
+      <div data-auth-view="login">
+        <h1>Sign in</h1>
+        <p class="muted">Enter your account email + password, or leave email blank to use the legacy admin password.</p>
+        <form id="login-form">
+          <input type="email" id="login-email" placeholder="Email (optional)"
+                 autocomplete="email" autocapitalize="off" autocorrect="off">
+          <input type="password" id="login-password" placeholder="Password"
+                 autocomplete="current-password" required>
+          <button type="submit" class="primary-btn">Sign in</button>
+        </form>
+        <p id="login-err" class="error" hidden></p>
+      </div>
+
+      <!-- Sign up form -->
+      <div data-auth-view="signup" hidden>
+        <h1>Create account</h1>
+        <p class="muted">Free tier — full read access to scans, archives, and backtests. Premium upgrade coming soon.</p>
+        <form id="signup-form">
+          <input type="email" id="signup-email" placeholder="Email"
+                 autocomplete="email" autocapitalize="off" autocorrect="off" required>
+          <input type="password" id="signup-password" placeholder="Password (8+ chars)"
+                 autocomplete="new-password" minlength="8" required>
+          <input type="password" id="signup-confirm" placeholder="Confirm password"
+                 autocomplete="new-password" minlength="8" required>
+          <button type="submit" class="primary-btn">Sign up</button>
+        </form>
+        <p id="signup-err" class="error" hidden></p>
+      </div>
     </div>
   </section>
 
   <!-- App shell -->
   <main id="app" class="screen" hidden>
-    <div class="layout">
-    <!-- LEFT: dashboard for the most recent run -->
-    <aside class="left-pane">
+    <!-- Top-level navigation. Dashboard is the landing tab; Run/Archives/
+         Backtest are the tools; Account holds user info + premium upsell. -->
+    <nav class="tabs top-tabs">
+      <button data-tab="dashboard" class="tab active">Dashboard</button>
+      <button data-tab="run"       class="tab">Run</button>
+      <button data-tab="archives"  class="tab">Archives</button>
+      <button data-tab="backtest"  class="tab">Backtest</button>
+      <button data-tab="account"   class="tab">Account</button>
+    </nav>
+
+    <!-- Dashboard tab — latest run summary + Play These + All Plays -->
+    <section data-panel="dashboard" class="panel active">
       <div class="card" id="dashboard-card">
         <div class="dashboard-header">
           <h2>Latest Run</h2>
@@ -82,7 +119,7 @@
       </div>
 
       <!-- Bankroll inputs — drive real-time $ stake column in the tables.
-           Sync (via localStorage) with the run-card inputs in the right pane. -->
+           Sync (via localStorage) with the inputs on the Run tab. -->
       <div class="bankroll-bar" id="bankroll-bar" hidden>
         <label>Bankroll</label>
         <div class="br-input-wrap">
@@ -112,20 +149,12 @@
       </div>
 
       <div class="card" id="dashboard-empty" hidden>
-        <p class="muted">No archives yet. Tap <b>Run scan</b> on the right to generate the first one.</p>
+        <p class="muted">No archives yet. Tap the <b>Run</b> tab to generate the first one.</p>
       </div>
-    </aside>
-
-    <!-- RIGHT: tools (Run / Backtest / Archives) -->
-    <aside class="right-pane">
-    <nav class="tabs">
-      <button data-tab="run"      class="tab active">Run</button>
-      <button data-tab="archives" class="tab">Archives</button>
-      <button data-tab="backtest" class="tab">Backtest</button>
-    </nav>
+    </section>
 
     <!-- Run tab -->
-    <section data-panel="run" class="panel active">
+    <section data-panel="run" class="panel">
       <div class="card">
         <h2>Run scan</h2>
         <p class="muted">Pulls live odds from The Odds API (with Action Network fallback), finds +EV edges across DK and FD.</p>
@@ -300,10 +329,42 @@
         <div class="table-wrap"><table id="bt-table"></table></div>
       </div>
     </section>
-    </aside>
-    </div>
+
+    <!-- Account tab — user info + premium upsell. Wired up by Item 5. -->
+    <section data-panel="account" class="panel">
+      <div class="card" id="account-card">
+        <h2>Account</h2>
+        <p class="muted" id="account-loading">Loading…</p>
+        <div id="account-info" hidden>
+          <div class="summary-grid">
+            <div class="kv">
+              <span class="label">Email</span>
+              <span class="value" id="account-email">—</span>
+            </div>
+            <div class="kv">
+              <span class="label">Tier</span>
+              <span class="value" id="account-tier">—</span>
+            </div>
+            <div class="kv">
+              <span class="label">Member since</span>
+              <span class="value" id="account-since">—</span>
+            </div>
+          </div>
+          <button id="account-upgrade-btn" class="primary-btn"
+                  style="margin-top: 14px;" hidden>
+            ✦ Upgrade to Premium
+          </button>
+          <p class="muted" id="account-upgrade-stub" style="margin-top: 6px;" hidden>
+            Premium tier is in development — payment processing not yet wired up.
+          </p>
+          <p class="muted" id="account-premium-active" style="margin-top: 14px;" hidden>
+            ✓ Premium active. Thanks for supporting Arbyx.
+          </p>
+        </div>
+      </div>
+    </section>
   </main>
 
-  <script src="/static/app.js?v=14"></script>
+  <script src="/static/app.js?v=21"></script>
 </body>
 </html>

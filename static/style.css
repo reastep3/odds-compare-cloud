@@ -41,27 +41,31 @@ header {
 }
 .brand { font-weight: 700; font-size: 18px; letter-spacing: 0.5px; }
 
-.screen { padding: 16px; max-width: 1280px; margin: 0 auto; }
+.screen { padding: 16px; max-width: 2600px; margin: 0 auto; }
 .screen[hidden] { display: none; }
 
-/* Two-column layout: dashboard left, tools right.
-   Login screen ignores .layout entirely (single card). */
-.layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
+/* Login screen: keep the sign-in card at a sensible centered width
+   instead of stretching to the full 2600px desktop cap. */
+#login.screen { max-width: 460px; padding-top: 60px; }
+
+/* Top-level tabbed nav. Sticky so it stays in reach on long scroll
+   pages (Backtest results, large pick lists). */
+.top-tabs {
+  position: sticky; top: 0;
+  background: var(--bg);
+  z-index: 5;
+  margin-top: -8px;            /* tighten gap below the page header */
+  padding: 4px 0 0;
 }
-.left-pane, .right-pane { min-width: 0; }
-.right-pane {
-  position: sticky; top: 0; align-self: start;
-  max-height: calc(100vh - 32px);
-  overflow-y: auto;
-  padding-right: 4px;  /* room for the scrollbar */
+.top-tabs .tab {
+  flex: 0 1 auto;              /* let tabs size to their text instead of
+                                   stretching like the old sub-tabs did */
+  min-width: 100px;
+  padding: 12px 18px;
+  font-size: 15px;
 }
-@media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
-  .right-pane { position: static; max-height: none; overflow: visible; }
+@media (max-width: 640px) {
+  .top-tabs .tab { min-width: 0; padding: 10px 8px; font-size: 13px; }
 }
 
 .dashboard-header {
@@ -341,6 +345,44 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
 
 .book-DK { color: var(--accent); font-weight: 600; }
 .book-FD { color: var(--primary); font-weight: 600; }
+
+/* Pick-row deep links to the sportsbook event page. Use the primary
+   blue + a solid underline so the link is unmissable — the whole point
+   is the user can spot a "click to bet" cue without hunting. The `↗`
+   glyph signals "opens in new tab" / app on mobile. */
+a.deep-link {
+  color: var(--primary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--primary);
+}
+a.deep-link:hover { color: #7DD3FC; border-bottom-color: #7DD3FC; }
+a.deep-link .ext { font-size: 0.85em; opacity: 0.8; margin-left: 3px; }
+
+/* ── Table column widths ────────────────────────────────────────────
+   On the wide-desktop layout (top-tab nav, single full-width column),
+   tables would otherwise stretch numeric columns far from their
+   headers. Pinning numeric/tag columns to compact widths keeps the
+   ODDS / STAKE / EV / Result values aligned under their headers, with
+   the GAME and PICK columns absorbing the remaining slack. */
+table th.num, table td.num {
+  width: 100px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table th.col-sport, table td.cell-sport { width: 90px; }
+table th.col-book, table td.cell-book   { width: 60px; }
+table th.col-mkt                         { width: 80px; }
+table th.col-result                      { width: 130px; }
+table th.col-rank                        { width: 50px; }
+table th.col-sharp                       { width: 90px; }
+table th.col-game                        { /* absorbs slack */ }
+
+@media (max-width: 640px) {
+  /* Mobile card-stack layout overrides table widths anyway, so reset
+     here to avoid clobbering the responsive cell-stack styling above. */
+  table th.num, table td.num { width: auto; text-align: right; }
+  table th[class^="col-"], table td[class^="cell-"] { width: auto; }
+}
 
 .list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .list .row {

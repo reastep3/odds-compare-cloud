@@ -98,8 +98,11 @@ EASTERN = ZoneInfo("America/New_York")
 # On cloud, set OUTPUT_DIR and DATA_DIR to a persistent volume mount.
 # Locally (unset), both default to the script's directory.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", _SCRIPT_DIR)
-DATA_DIR    = os.environ.get("DATA_DIR",   _SCRIPT_DIR)
+# Treat empty-string env values the same as unset — a `.env` file with
+# `OUTPUT_DIR=` (no value) would otherwise pass through as "" and break
+# os.makedirs("").
+OUTPUT_DIR  = os.environ.get("OUTPUT_DIR") or _SCRIPT_DIR
+DATA_DIR    = os.environ.get("DATA_DIR")   or _SCRIPT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR,   exist_ok=True)
 
@@ -680,6 +683,9 @@ def fetch_odds_api_props(sport: str) -> list[dict]:
                         "side":        side_name,
                         "book":        book_key,
                         "odds":        odds,
+                        # Odds API IDs for closing-line capture
+                        "event_id":    eid,
+                        "sport_key":   api_sport,
                     })
 
         time.sleep(0.05)  # gentle rate limiting
@@ -1745,6 +1751,11 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
                         "all_book_odds":   all_book_odds,
                         "dk_event_id":     event.get("dk_event_id"),
                         "fd_event_id":     event.get("fd_event_id"),
+                        # Odds API canonical IDs — used by closing_lines.py
+                        # to re-query the per-event endpoint near tip-off.
+                        # None for Action Network fallback events.
+                        "event_id":        event.get("id"),
+                        "sport_key":       event.get("sport_key"),
                     }
                     if ev >= MIN_EV_PERCENT:
                         edges.append(edge_dict)
@@ -1833,6 +1844,112 @@ def _save_play_keys(play_edges: list[dict], script_dir: str) -> None:
     path = os.path.join(script_dir, "prev_play_keys.json")
     with open(path, "w") as fh:
         json.dump(keys, fh)
+
+
+def write_book_event_ids_sidecar(edges: list[dict] | None,
+                                   prop_edges: list[dict] | None,
+                                   output_dir: str) -> str | None:
+    """
+    Write a single `latest_book_event_ids.json` sidecar holding the DK/FD
+    event IDs for every pick in this scan, keyed by pick_key.
+
+    The dashboard frontend reads this to wrap pick rows in a sportsbook
+    deep link ("click → DK/FD event page"). xlsx round-trip strips the
+    bookmaker IDs from edge_dict, so this sidecar is how we surface them
+    back to the live UI without changing the xlsx schema.
+
+    Always overwrites — the dashboard only ever shows the LATEST archive,
+    so older scans' IDs are not needed and would just bloat the file.
+    Picks without IDs (some sport coverage gaps) are still recorded with
+    null values so the lookup always finds the pick (just no link).
+    """
+    path = os.path.join(output_dir, "latest_book_event_ids.json")
+
+    out: dict[str, dict] = {}
+    for edge in (edges or []) + (prop_edges or []):
+        key = _make_pick_key(edge)
+        out[key] = {
+            "dk_event_id": edge.get("dk_event_id"),
+            "fd_event_id": edge.get("fd_event_id"),
+        }
+
+    payload = {
+        "scan_timestamp": datetime.now(timezone.utc).isoformat(),
+        "picks":          out,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    has_id_count = sum(1 for v in out.values()
+                       if v.get("dk_event_id") or v.get("fd_event_id"))
+    print(f"  [book-links] {has_id_count}/{len(out)} picks have a DK/FD event ID "
+          f"in {os.path.basename(path)}")
+    return path
+
+
+def write_pending_closes_sidecar(edges: list[dict] | None,
+                                 prop_edges: list[dict] | None,
+                                 output_dir: str) -> str | None:
+    """
+    Append every +EV pick from this scan to the day's pending-closes JSON
+    so the closing-line capture worker (closing_lines.py) can re-query the
+    Odds API per-event endpoint near tip-off and record CLV.
+
+    First-seen wins: if a pick already appears in the file (from an earlier
+    scan the same day), its open odds and any captured close are preserved.
+    Only brand-new picks get added. Picks without an Odds API event_id
+    (Action Network fallback events) are skipped — we have no way to
+    re-query their close.
+
+    Filename: pending_closes_YYYY-MM-DD.json (date is the betting-day in ET).
+    Returns the path written, or None if no eligible picks.
+    """
+    today_et = datetime.now(EASTERN).date().isoformat()
+    path = os.path.join(output_dir, f"pending_closes_{today_et}.json")
+
+    existing: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f).get("picks", {})
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    added = 0
+    skipped_no_id = 0
+    for edge in (edges or []) + (prop_edges or []):
+        if not edge.get("event_id") or not edge.get("sport_key"):
+            skipped_no_id += 1
+            continue
+        key = _make_pick_key(edge)
+        if key in existing:
+            continue   # preserve first-seen open + any captured close
+        existing[key] = {
+            "sport":              edge.get("sport"),
+            "game":               edge.get("game"),
+            "commence":           edge.get("commence"),
+            "book":               edge.get("book"),
+            "market":             edge.get("market"),
+            "outcome":            edge.get("outcome"),
+            "point":              edge.get("point"),
+            "event_id":           edge.get("event_id"),
+            "sport_key":          edge.get("sport_key"),
+            "open_odds_american": edge.get("odds_american"),
+            "open_implied_pct":   edge.get("implied_prob"),
+            "close":              None,
+        }
+        added += 1
+
+    payload = {
+        "scan_timestamp": datetime.now(timezone.utc).isoformat(),
+        "picks":          existing,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    print(f"  [closing-lines] {len(existing)} picks tracked "
+          f"(+{added} new, {skipped_no_id} skipped without OddsAPI ID) "
+          f"in {os.path.basename(path)}")
+    return path
 
 
 def _confidence(e):
@@ -3613,6 +3730,28 @@ def write_excel(edges: list[dict], dk_bankroll: float,
     if play_edges:
         _save_play_keys(play_edges, _script_dir)
 
+    # ── Sidecar for closing-line capture ──────────────────────────────
+    # Tracks every +EV pick (Play These + All Plays + props) so the
+    # closing_lines worker can fetch the close near tip-off and compute
+    # CLV. Output dir is OUTPUT_DIR — the same dir holding the xlsx.
+    try:
+        write_pending_closes_sidecar(
+            edges, player_prop_edges, os.path.dirname(output_path),
+        )
+    except Exception as e:
+        # Never let sidecar failure block the xlsx save; just log it.
+        print(f"  [closing-lines] sidecar write failed: {e}")
+
+    # ── Sidecar for sportsbook deep links ─────────────────────────────
+    # Restores DK/FD event IDs that the xlsx round-trip drops, so the
+    # dashboard can render "click pick → sportsbook event page" links.
+    try:
+        write_book_event_ids_sidecar(
+            edges, player_prop_edges, os.path.dirname(output_path),
+        )
+    except Exception as e:
+        print(f"  [book-links] sidecar write failed: {e}")
+
     wb.save(output_path)
     print(f"\nSaved to: {output_path}")
 
@@ -5355,6 +5494,10 @@ def _merge_raw_props(all_raw: list[dict]) -> list[dict]:
                 "line":        p.get("line"),
                 "side":        side,
                 "book_odds":   {},
+                # Odds API IDs for closing-line capture; first non-None wins
+                # (a prop may appear from multiple sources, only OddsAPI sets these)
+                "event_id":    p.get("event_id"),
+                "sport_key":   p.get("sport_key"),
             }
 
         grp  = acc[found_key]
@@ -5366,6 +5509,11 @@ def _merge_raw_props(all_raw: list[dict]) -> list[dict]:
             grp["book_odds"][book] = odds
         if grp["line"] is None and p.get("line") is not None:
             grp["line"] = p["line"]
+        # Backfill OddsAPI IDs from any source that has them
+        if grp.get("event_id") is None and p.get("event_id"):
+            grp["event_id"] = p["event_id"]
+        if grp.get("sport_key") is None and p.get("sport_key"):
+            grp["sport_key"] = p["sport_key"]
 
     result = []
     for grp in acc.values():
@@ -5382,6 +5530,8 @@ def _merge_raw_props(all_raw: list[dict]) -> list[dict]:
             "line":        grp["line"],
             "side":        grp["side"],
             "book_odds":   grp["book_odds"],
+            "event_id":    grp.get("event_id"),
+            "sport_key":   grp.get("sport_key"),
         })
     return result
 
@@ -5574,6 +5724,9 @@ def find_player_prop_edges(props: list[dict]) -> list[dict]:
                 "line_bucket": line_b,
                 "over":        {},
                 "under":       {},
+                # Odds API IDs for closing-line capture (None for AN-fallback)
+                "event_id":    prop.get("event_id"),
+                "sport_key":   prop.get("sport_key"),
             }
         pairs[pk][prop["side"]].update(prop["book_odds"])
 
@@ -5665,6 +5818,9 @@ def find_player_prop_edges(props: list[dict]) -> list[dict]:
                         "player":            player,
                         "market_disp":       pair["market_disp"],
                         "prop_side":         side,
+                        # Odds API IDs for closing-line capture
+                        "event_id":          pair.get("event_id"),
+                        "sport_key":         pair.get("sport_key"),
                     })
 
     edges.sort(key=lambda x: x["ev_pct"], reverse=True)

@@ -2436,8 +2436,47 @@ def grade_prop(pick: dict, game_result: dict) -> str:
 
 # ── Backtest runner ────────────────────────────────────────────────────────────
 
-def run_backtest(picks: list[dict]) -> list[dict]:
-    """Grade all picks. Attaches 'result', 'pnl', and 'actual_result' to each."""
+def _backtest_pick_key(pick: dict) -> str:
+    """Build the closing-lines pick_key from a backtest pick dict.
+    Backtest uses 'pick'/'line'; the canonical key uses 'outcome'/'point'."""
+    from odds_compare import _make_pick_key
+    return _make_pick_key({
+        "game":    pick.get("game"),
+        "book":    pick.get("book"),
+        "market":  pick.get("market"),
+        "outcome": pick.get("pick"),
+        "point":   pick.get("line"),
+    })
+
+
+def _stamp_clv(pick: dict, lookup: dict | None) -> None:
+    """Attach close odds + CLV% to a pick if the close was captured.
+    Always sets the four CLV fields (None when not captured) so xlsx
+    write code doesn't need to special-case missing keys."""
+    pick["close_odds_american"] = None
+    pick["close_implied_pct"]   = None
+    pick["clv_pct"]             = None
+    pick["clv_captured"]        = False
+    if not lookup:
+        return
+    close = lookup.get(_backtest_pick_key(pick))
+    if not close:
+        return
+    pick["close_odds_american"] = close.get("odds_american")
+    pick["close_implied_pct"]   = close.get("implied_pct")
+    pick["clv_pct"]             = close.get("clv_pct")
+    pick["clv_captured"]        = close.get("clv_pct") is not None
+
+
+def run_backtest(picks: list[dict],
+                  closing_lines_lookup: dict | None = None) -> list[dict]:
+    """Grade all picks. Attaches 'result', 'pnl', 'actual_result' to each.
+
+    If closing_lines_lookup is provided, also attaches 'close_odds_american',
+    'close_implied_pct', 'clv_pct', 'clv_captured' for every pick (None
+    when no close was captured for that pick — the worker only fires for
+    picks with an Odds API event_id, so AN-fallback picks are uncapturable).
+    """
     today = date.today()
 
     # Pre-fetch all needed (sport, date) combos, including ±1 day buffers
@@ -2545,6 +2584,23 @@ def run_backtest(picks: list[dict]) -> list[dict]:
 
     print(f"Matched: {matched}  |  No result: {unmatched}  "
           f"|  MANUAL/skipped: {skipped}")
+
+    # ── CLV stamping (independent of grading status) ─────────────────────
+    # Every pick — graded or not — gets the four CLV fields set so
+    # downstream code can iterate without checking for missing keys.
+    # Captured CLVs come from the closing-lines worker; AN-fallback
+    # picks (no Odds API event_id) will always be uncaptured here.
+    if closing_lines_lookup:
+        captured = 0
+        for pick in picks:
+            _stamp_clv(pick, closing_lines_lookup)
+            if pick["clv_captured"]:
+                captured += 1
+        print(f"  CLV captured: {captured} / {len(picks)} picks")
+    else:
+        for pick in picks:
+            _stamp_clv(pick, None)
+
     return picks
 
 
@@ -3573,12 +3629,23 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
     _stat(r+10, "ROI",                           f"{roi:.1f}%",
           color="006100" if roi >= 0 else "9C0006")
 
-    # Inline sport summary at r+12
-    ws.cell(row=r+12, column=1, value="By Sport:").font = Font(bold=True, size=12)
+    # Overall CLV — averaged across all settled picks where the close
+    # was actually captured. Positive = your selections systematically
+    # got better-than-close odds, which is the gold-standard +EV signal
+    # (converges in dozens of bets vs. hundreds for W/L).
+    clv_settled = [p for p in settled if p.get("clv_pct") is not None]
+    if clv_settled:
+        avg_clv = sum(p["clv_pct"] for p in clv_settled) / len(clv_settled)
+        _stat(r+11, "Avg CLV %",
+              f"{avg_clv:+.2f}%  ({len(clv_settled)}/{len(settled)} captured)",
+              color="006100" if avg_clv >= 0 else "9C0006")
+
+    # Inline sport summary at r+13
+    ws.cell(row=r+13, column=1, value="By Sport:").font = Font(bold=True, size=12)
     sport_grps: dict[str, list] = defaultdict(list)
     for p in settled:
         sport_grps[p["sport"].upper()].append(p)
-    sr = r + 13
+    sr = r + 14
     for sp in sorted(sport_grps, key=lambda s: sum(p["pnl"] for p in sport_grps[s]), reverse=True):
         sg = sport_grps[sp]
         sw = sum(1 for p in sg if p["result"] == "WIN")
@@ -3587,9 +3654,19 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
         sp_bet = sum(p["bet_amount"] for p in sg)
         sp_roi = sp_pnl / sp_bet * 100 if sp_bet else 0
         wr_str = f"{sw/(sw+sl)*100:.0f}%" if (sw+sl) else "—"
+        # Avg CLV — across picks where the close was actually captured.
+        # Reported as `(captured_count / total_count)` so you can see how
+        # much of the sample is uncapturable (AN-fallback events).
+        clv_picks = [p for p in sg if p.get("clv_pct") is not None]
+        if clv_picks:
+            avg_clv = sum(p["clv_pct"] for p in clv_picks) / len(clv_picks)
+            clv_str = f"  CLV {avg_clv:+.2f}% ({len(clv_picks)}/{len(sg)})"
+        else:
+            clv_str = ""
         ws.cell(row=sr, column=1, value=sp).font = Font(bold=True)
         ws.cell(row=sr, column=2,
-                value=f"W{sw}/L{sl}  P&L ${sp_pnl:+.2f}  ROI {sp_roi:.1f}%  WR {wr_str}"
+                value=(f"W{sw}/L{sl}  P&L ${sp_pnl:+.2f}  "
+                       f"ROI {sp_roi:.1f}%  WR {wr_str}{clv_str}")
                 ).font = Font(color="006100" if sp_pnl >= 0 else "9C0006")
         sr += 1
 
@@ -3708,6 +3785,9 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
                 msr += 1
 
     # ── All Picks ──────────────────────────────────────────────────────────────
+    # Close + CLV % live at the end so existing column-index code (Result=16,
+    # P&L=17, Bet Amt=13) is unaffected. CLV captures: see closing_lines.py;
+    # blank when the close wasn't captured (AN-fallback, future game, etc.)
     ws_all = wb.create_sheet("All Picks")
     all_cols = [
         ("#", 5), ("File Date", 11), ("Game Date", 11), ("Sport", 8),
@@ -3715,6 +3795,7 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
         ("Line", 7), ("Odds", 8), ("EV %", 7), ("Confidence", 12),
         ("Bet Amt", 11), ("Seen", 6), ("Persistent", 10),
         ("Result", 9), ("P&L", 11),
+        ("Close", 8), ("CLV %", 9),
     ]
     _hdr(ws_all, all_cols, "2F5496")
 
@@ -3732,6 +3813,11 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
         odds = p.get("odds")
         odds_str = (f"+{odds}" if odds and odds > 0 else str(odds)) if odds else ""
 
+        # Close odds — same +/- sign convention as the open odds column
+        close_am = p.get("close_odds_american")
+        close_str = (f"+{close_am}" if close_am and close_am > 0
+                     else str(close_am)) if close_am is not None else ""
+
         gd = p.get("game_date") or ""
         gd_display = f"{gd[:4]}-{gd[4:6]}-{gd[6:]}" if len(gd) == 8 else gd
         fd = p.get("file_date")
@@ -3746,6 +3832,7 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
             p.get("times_seen", 1),
             "✓" if p.get("persistent") else "",
             result, pnl,
+            close_str, p.get("clv_pct"),
         ]
 
         for ci, val in enumerate(vals, 1):
@@ -3774,6 +3861,15 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
 
         if p.get("ev_pct") is not None:
             ws_all.cell(row=row, column=11).number_format = '0.0'
+
+        # CLV % cell — green for positive (line moved your way), red for
+        # negative (line moved against you), neutral when uncaptured
+        clv = p.get("clv_pct")
+        if clv is not None:
+            cv = ws_all.cell(row=row, column=19)
+            cv.number_format = '+0.00;-0.00;0.00'
+            cv.font = Font(bold=True, color="006100" if clv > 0 else
+                            ("9C0006" if clv < 0 else "1F4E79"))
 
     ws_all.freeze_panes = "A2"
     if sorted_all:
@@ -4075,10 +4171,23 @@ def run_full_backtest(start_dt: date, end_dt: date,
     """
     print(f"  AN-only sheets: {an_only_mode}")
 
+    # ── Closing-line lookup — built once for the whole date range ────────────
+    # Reads pending_closes_*.json files seeded by every scan. Picks without
+    # captured closes (AN-fallback events, or games still in the future)
+    # simply won't appear in the lookup, so CLV columns will be blank for
+    # them — graceful degradation rather than blocking the backtest.
+    try:
+        from closing_lines import load_closing_lines_for_dates
+        clv_lookup = load_closing_lines_for_dates(start_dt, end_dt)
+        print(f"  CLV lookup: {len(clv_lookup)} captured closes loaded")
+    except Exception as e:
+        print(f"  CLV lookup unavailable: {e}")
+        clv_lookup = {}
+
     # ── All +EV Picks (primary dataset — EV Edges tab) ────────────────────────
     print("─── All +EV Picks (EV Edges tab) ────────────────────────")
     ev_raw    = load_archive_ev_edges(start_dt, end_dt, an_only_mode)
-    ev_graded = run_backtest(ev_raw) if ev_raw else []
+    ev_graded = run_backtest(ev_raw, clv_lookup) if ev_raw else []
     if ev_graded:
         ev_settled_list = analyze(ev_graded, label="All +EV Picks")
     else:
@@ -4088,7 +4197,7 @@ def run_full_backtest(start_dt: date, end_dt: date,
     # ── Play These (filtered subset) ──────────────────────────────────────────
     print("\n─── Play These (filtered picks) ─────────────────────────")
     picks  = load_archive_picks(start_dt, end_dt, an_only_mode)
-    graded = run_backtest(picks) if picks else []
+    graded = run_backtest(picks, clv_lookup) if picks else []
     if graded:
         pt_settled_list = analyze(graded, label="Play These (filtered)")
     else:
@@ -4122,7 +4231,7 @@ def run_full_backtest(start_dt: date, end_dt: date,
     # ── Player Props ──────────────────────────────────────────────────────────
     print("\n─── Player Props (Odds Comparison tab) ──────────────────")
     prop_raw    = load_archive_props(start_dt, end_dt, an_only_mode)
-    prop_graded = run_backtest(prop_raw) if prop_raw else []
+    prop_graded = run_backtest(prop_raw, clv_lookup) if prop_raw else []
     if prop_graded:
         prop_settled = [p for p in prop_graded if p.get("result") in ("WIN","LOSS","PUSH")]
         print(f"Props settled: {len(prop_settled)} picks")

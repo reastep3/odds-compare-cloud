@@ -36,6 +36,7 @@ import base64
 import glob
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -70,8 +71,12 @@ _TOKEN_SECRET = os.environ.get(
 _TOKEN_TTL_SECONDS = 30 * 24 * 3600   # 30 days
 
 # Where Excel archives live. Matches odds_compare.OUTPUT_DIR.
-_OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", os.path.dirname(
-    os.path.abspath(__file__)))
+# Treat empty-string env values the same as unset (handles bare
+# `OUTPUT_DIR=` lines in .env files).
+_OUTPUT_DIR  = (
+    os.environ.get("OUTPUT_DIR")
+    or os.path.dirname(os.path.abspath(__file__))
+)
 _ARCHIVE_DIR = os.path.join(_OUTPUT_DIR, "archive")
 # Older backtest_*.xlsx files get auto-moved here by run_full_backtest.
 # The latest report sits at the top level alongside ev_edges_*.xlsx.
@@ -82,28 +87,81 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ── Token helpers ──────────────────────────────────────────────────────
+# Two token formats accepted, one minted:
+#
+#   v2 format (minted by current code):
+#       base64("v2:<user_id>:<expiry>:<sig>")
+#       sig = hmac_sha256(secret, "<user_id>:<expiry>")
+#
+#   Legacy format (still accepted for backwards-compat with stale
+#   localStorage tokens; treated as legacy_admin):
+#       base64("<expiry>:<sig>")
+#       sig = hmac_sha256(secret, "<expiry>")
+#
+# All login flows (signup, /api/login email+password, WEBAPP_PASSWORD
+# fallback) mint v2 tokens. The legacy verify path only exists so users
+# with an older token in localStorage don't get logged out by the
+# auth-system upgrade.
 
-def _make_token(expiry_ts: int) -> str:
-    """HMAC-signed token: base64('<expiry>:<sig>')."""
-    msg = str(expiry_ts).encode()
-    sig = hmac.new(_TOKEN_SECRET, msg, hashlib.sha256).hexdigest()
-    raw = f"{expiry_ts}:{sig}".encode()
+import webapp_users
+
+
+def _make_user_token(user_id: str, expiry_ts: int) -> str:
+    """v2 token — embeds user_id so current_user can resolve the account."""
+    payload = f"{user_id}:{expiry_ts}"
+    sig = hmac.new(_TOKEN_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"v2:{payload}:{sig}".encode()
     return base64.urlsafe_b64encode(raw).decode()
 
 
-def _verify_token(token: str) -> bool:
+def _verify_token(token: str) -> str | None:
+    """Returns the authenticated user_id, or None if the token is bad/expired.
+
+    Tries v2 format first (4 parts: 'v2', user_id, expiry, sig), falls
+    back to legacy format (2 parts: expiry, sig → legacy_admin).
+    """
     try:
         raw = base64.urlsafe_b64decode(token.encode()).decode()
-        expiry_str, sig = raw.split(":", 1)
-        expiry_ts = int(expiry_str)
-        if expiry_ts < int(time.time()):
-            return False
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    parts = raw.split(":")
+    now = int(time.time())
+
+    # v2 format: "v2:<user_id>:<expiry>:<sig>"
+    if len(parts) == 4 and parts[0] == "v2":
+        _, user_id, expiry_str, sig = parts
+        try:
+            expiry_ts = int(expiry_str)
+        except ValueError:
+            return None
+        if expiry_ts < now:
+            return None
+        expected = hmac.new(
+            _TOKEN_SECRET, f"{user_id}:{expiry_str}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(sig, expected):
+            return user_id
+        return None
+
+    # Legacy format: "<expiry>:<sig>" → treat as legacy_admin
+    if len(parts) == 2:
+        expiry_str, sig = parts
+        try:
+            expiry_ts = int(expiry_str)
+        except ValueError:
+            return None
+        if expiry_ts < now:
+            return None
         expected = hmac.new(
             _TOKEN_SECRET, expiry_str.encode(), hashlib.sha256
         ).hexdigest()
-        return hmac.compare_digest(sig, expected)
-    except (ValueError, TypeError, AttributeError):
-        return False
+        if hmac.compare_digest(sig, expected):
+            return webapp_users.LEGACY_ADMIN_ID
+        return None
+
+    return None
 
 
 # ── Auth dependency ────────────────────────────────────────────────────
@@ -113,22 +171,51 @@ _bearer = HTTPBearer(auto_error=False)
 
 def current_user(
     cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> str:
-    """Validates the Bearer token. Returns a user id ('owner' for v1)."""
+) -> dict:
+    """Validates the Bearer token; returns the resolved user record.
+
+    Returns a dict with keys: id, email, tier, created_at. The legacy
+    admin (WEBAPP_PASSWORD shared login) returns a synthetic record
+    with id='legacy_admin' and tier='admin'.
+    """
     if cred is None or not cred.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _verify_token(cred.credentials):
+    user_id = _verify_token(cred.credentials)
+    if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Single-user for now. Multi-user later: decode user id from token.
-    return "owner"
+    user = webapp_users.find_by_id(user_id)
+    if user is None:
+        # Token validated but user record vanished (e.g., manual deletion
+        # of webapp_users.json). Treat as auth failure.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account not found — please sign in again",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return webapp_users.public(user)
+
+
+def require_premium(user: dict = Depends(current_user)) -> dict:
+    """Premium-gating dependency. Use on routes that require a paid tier.
+
+    Currently no premium-only routes exist — this is the framework that
+    item 5 wires up so future premium features are a one-liner away.
+    """
+    tier = user.get("tier")
+    if tier in (webapp_users.TIER_PREMIUM, webapp_users.TIER_ADMIN):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This feature requires a Premium account.",
+    )
 
 
 # ── App factory ────────────────────────────────────────────────────────
@@ -162,30 +249,85 @@ def build_app() -> FastAPI:
 
     @api.post("/api/login")
     async def login(req: Request) -> dict[str, Any]:
-        if not _WEBAPP_PASSWORD:
-            raise HTTPException(
-                status_code=503,
-                detail=("WEBAPP_PASSWORD not set. "
-                        "Run: fly secrets set WEBAPP_PASSWORD=<your-pw>"))
+        """Two flows accepted:
+
+        1. Email + password (per-user account from /api/signup)
+        2. Password only — falls back to WEBAPP_PASSWORD legacy admin
+           login. Existing users with the shared password keep working.
+
+        Both mint a v2 user token; legacy admin gets user_id='legacy_admin'.
+        """
         try:
             body = await req.json()
         except Exception:
             raise HTTPException(status_code=400, detail="JSON body required")
-        password = (body or {}).get("password", "")
+        body = body or {}
+        email    = (body.get("email") or "").strip()
+        password = body.get("password", "")
         if not isinstance(password, str) or not password:
             raise HTTPException(status_code=400, detail="Password required")
 
-        # Constant-time compare to avoid leaking length / first-mismatch
-        # via timing. Plus a fixed delay on wrong attempts to discourage
-        # online brute force on a public endpoint.
-        if not hmac.compare_digest(password.encode(),
+        user_id: str | None = None
+
+        # Email + password → look up the user record and verify
+        if email:
+            user = webapp_users.find_by_email(email)
+            if user and webapp_users.verify_password(user, password):
+                user_id = user["id"]
+
+        # No email OR email lookup failed → try the legacy admin password
+        # (WEBAPP_PASSWORD env var). Skip if not configured.
+        if user_id is None and _WEBAPP_PASSWORD:
+            if hmac.compare_digest(password.encode(),
                                     _WEBAPP_PASSWORD.encode()):
+                user_id = webapp_users.LEGACY_ADMIN_ID
+
+        if user_id is None:
+            # Fixed delay on failure: discourages online brute-force on
+            # this public endpoint without leaking which path failed.
             time.sleep(0.5)
-            raise HTTPException(status_code=401, detail="Invalid password")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
         expiry_ts = int(time.time()) + _TOKEN_TTL_SECONDS
-        token = _make_token(expiry_ts)
+        token = _make_user_token(user_id, expiry_ts)
         return {"token": token, "expires_at": expiry_ts}
+
+    @api.post("/api/signup")
+    async def signup(req: Request) -> dict[str, Any]:
+        """Create a new free-tier account. Returns a session token so
+        the user is logged in immediately after signup."""
+        try:
+            body = await req.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="JSON body required")
+        body = body or {}
+        email             = body.get("email", "")
+        password          = body.get("password", "")
+        confirm_password  = body.get("confirm_password", "")
+
+        if password != confirm_password:
+            raise HTTPException(status_code=400,
+                                 detail="Passwords do not match")
+
+        try:
+            user = webapp_users.create_user(email, password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        expiry_ts = int(time.time()) + _TOKEN_TTL_SECONDS
+        token = _make_user_token(user["id"], expiry_ts)
+        return {
+            "token":      token,
+            "expires_at": expiry_ts,
+            "user":       user,
+        }
+
+    @api.get("/api/me")
+    async def me(user: dict = Depends(current_user)) -> dict[str, Any]:
+        """Return the authenticated user's account info — drives the
+        Account tab. Excludes the password hash by virtue of going
+        through current_user → webapp_users.public()."""
+        return {"user": user}
 
     # ── Auth-required endpoints ───────────────────────────────────────
 
@@ -538,6 +680,18 @@ li { margin:4px 0; }
 
 # ── JSON shaping helpers ───────────────────────────────────────────────
 
+def _edge_deep_link(e: dict[str, Any]) -> str | None:
+    """Build a sportsbook event URL for this edge if the right book's
+    event_id is present. Live edge dicts (from /api/run) carry these
+    IDs directly — no sidecar lookup needed."""
+    book = e.get("book")
+    if book == "DraftKings" and e.get("dk_event_id"):
+        return _DK_DEEP_LINK_BASE + str(e["dk_event_id"])
+    if book == "FanDuel" and e.get("fd_event_id"):
+        return _FD_DEEP_LINK_BASE + str(e["fd_event_id"])
+    return None
+
+
 def _shape_edge(e: dict[str, Any]) -> dict[str, Any]:
     """Trim an edge dict to a JSON-clean shape for the frontend."""
     return {
@@ -555,6 +709,7 @@ def _shape_edge(e: dict[str, Any]) -> dict[str, Any]:
         "implied_prob":  e.get("implied_prob"),
         "kelly_pct":     e.get("kelly_pct"),
         "pinnacle_anchored": bool(e.get("pinnacle_anchored")),
+        "deep_link":     _edge_deep_link(e),
     }
 
 
@@ -767,6 +922,12 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
     promos = _safe_grade(promos, run_backtest_promo, "promo_picks")
     props  = _safe_grade(props,  run_backtest,       "player_props")
 
+    # Sportsbook deep links — restored from the sidecar that odds_compare
+    # writes alongside the xlsx. xlsx round-trip drops the bookmaker IDs
+    # from edge_dict, so the dashboard can't link to the event page
+    # without this. {} when the sidecar is missing (older archives).
+    book_links = _load_book_event_ids(_OUTPUT_DIR)
+
     return {
         "name":     name,
         "an_only":  "_ANONLY" in name.upper(),
@@ -774,9 +935,11 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         "kelly_fraction_runtime": kelly_fraction_runtime,
         "summary":  _shape_summary(summary),
         "play_these":  [_shape_archive_pick(p, bankrolls,
-                                              kelly_fraction_runtime) for p in play],
+                                              kelly_fraction_runtime,
+                                              book_links) for p in play],
         "all_plays":   [_shape_archive_pick(p, bankrolls,
-                                              kelly_fraction_runtime) for p in all_ev],
+                                              kelly_fraction_runtime,
+                                              book_links) for p in all_ev],
         "promo_picks": [_shape_archive_promo(p) for p in promos],
         "player_props": [_shape_archive_prop(p) for p in props],
         "counts": {
@@ -898,9 +1061,54 @@ def _round(v: Any, n: int = 2) -> Any:
     return v
 
 
+# ── Sportsbook deep links ──────────────────────────────────────────────
+# URL bases mirror telegram_bot._deep_link so both surfaces hit the same
+# event pages. DK and FD redirect users to their state's sportsbook
+# automatically, so a single base works for any legal jurisdiction.
+_DK_DEEP_LINK_BASE = "https://sportsbook.draftkings.com/event/"
+_FD_DEEP_LINK_BASE = "https://sportsbook.fanduel.com/sport/event/"
+
+
+def _load_book_event_ids(output_dir: str) -> dict:
+    """Load the latest_book_event_ids.json sidecar — pick_key →
+    {dk_event_id, fd_event_id}. Returns {} if the sidecar doesn't
+    exist yet (older archives, or scan hasn't run since deploy)."""
+    path = os.path.join(output_dir, "latest_book_event_ids.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload.get("picks", {}) or {}
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"[book-links] could not read {path}: {e}")
+        return {}
+
+
+def _resolve_deep_link(pick: dict[str, Any],
+                        book_links: dict | None) -> str | None:
+    """Look up the sportsbook event URL for this pick, or None if not
+    available (no sidecar entry, or no event_id for this pick's book)."""
+    if not book_links:
+        return None
+    # Lazy import — webapp.py is imported during cold start; pulling
+    # backtest.py in unconditionally would chain in openpyxl/etc.
+    from backtest import _backtest_pick_key
+    entry = book_links.get(_backtest_pick_key(pick))
+    if not entry:
+        return None
+    book = pick.get("book")
+    if book == "DraftKings" and entry.get("dk_event_id"):
+        return _DK_DEEP_LINK_BASE + str(entry["dk_event_id"])
+    if book == "FanDuel" and entry.get("fd_event_id"):
+        return _FD_DEEP_LINK_BASE + str(entry["fd_event_id"])
+    return None
+
+
 def _shape_archive_pick(p: dict[str, Any],
                           bankrolls: dict[str, float | None] | None = None,
                           kelly_fraction_runtime: float = 0.5,
+                          book_links: dict | None = None,
                           ) -> dict[str, Any]:
     """Per-pick shape with bankroll-independent stake info.
 
@@ -912,6 +1120,10 @@ def _shape_archive_pick(p: dict[str, Any],
                      runtime fraction). Frontend multiplies this by the
                      user's chosen Kelly fraction to recompute BR % live
                      without re-fetching.
+    book_links     — optional sidecar lookup mapping pick_key →
+                     {dk_event_id, fd_event_id}. When the right book's
+                     ID is present, populates 'deep_link' so the frontend
+                     can render the pick title as a sportsbook link.
     """
     bet  = p.get("bet_amount")
     book = p.get("book")
@@ -945,6 +1157,7 @@ def _shape_archive_pick(p: dict[str, Any],
         "confidence": p.get("confidence"),
         "result":     p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
+        "deep_link":  _resolve_deep_link(p, book_links),
     }
 
 
@@ -1057,6 +1270,10 @@ def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
       2  File Date  6  Book     10 Odds    14 Seen
       3  Game Date  7  Market   11 EV %    15 Persistent
       4  Sport      8  Pick     12 Conf.   16 Result    17 P&L
+                                                        18 Close   19 CLV %
+
+    CLV columns (18-19) are written but not currently read here — they're
+    available in the .xlsx download for now. Dashboard surfacing is Phase C.
     """
     import openpyxl
     if not os.path.isfile(path):
