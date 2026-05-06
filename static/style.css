@@ -395,6 +395,13 @@ table th.col-game                        { /* absorbs slack */ }
   font-size: 14px;
 }
 .list .row .row-title { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+/* Run timestamp on backtest rows. Sits between the date-range title
+   and the muted size meta — bright enough to be the differentiator
+   when two rows share the same date range. */
+.list .row .row-runtime {
+  color: var(--text); font-size: 13px; font-weight: 500;
+  margin-bottom: 2px;
+}
 .list .row .meta { color: var(--muted); font-size: 12px; }
 .list .row.an-only { border-color: var(--warn-bg); }
 .list .row.an-only .tag { color: var(--warn-bg); font-weight: 600; }

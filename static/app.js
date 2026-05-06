@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-05 v21 (Table column alignment + visible deep links)";
+const BUILD = "2026-05-06 v22 (Backtest archive rows show run time on its own line)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -21,7 +21,12 @@ async function api(path, opts = {}) {
   if (opts.body && !(opts.body instanceof FormData)) {
     headers["Content-Type"] = headers["Content-Type"] || "application/json";
   }
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  // Refresh-after-mutate (e.g., reloading the archive list right after a
+  // /api/backtest run) needs to skip the browser HTTP cache — the API
+  // doesn't set Cache-Control so without this the browser may serve a
+  // stale list that doesn't include the file just written.
+  const fetchOpts = Object.assign({ cache: "no-store" }, opts, { headers });
+  const res = await fetch(path, fetchOpts);
   if (res.status === 401) {
     clearToken();
     showLogin();
@@ -1022,20 +1027,24 @@ async function loadBacktestArchives() {
     wrap.innerHTML = j.archives.map((a) => {
       const pretty = prettyBacktestName(a.name, a.start, a.end);
       const kb     = (a.size / 1024).toFixed(1);
-      // Server returns run_time as 'YYYY-MM-DD HH:MM:SS' (filename-derived
-      // for current-format files, mtime-derived for legacy). Reformat for
-      // display so users can tell when each run was actually executed.
+      // Run time goes on its own line beneath the date-range title, since
+      // re-running the same date range yields multiple entries that
+      // would otherwise be visually indistinguishable. Server returns
+      // run_time as 'YYYY-MM-DD HH:MM:SS' (filename-derived for current-
+      // format files, mtime-derived for legacy).
       const runTime = a.run_time
         ? new Date(a.run_time.replace(" ", "T")).toLocaleString(undefined, {
             month: "short", day: "numeric",
             hour: "numeric", minute: "2-digit",
           })
         : "";
-      const meta = runTime ? `Run ${runTime} · ${kb} KB` : `${kb} KB`;
+      const runLine = runTime
+        ? `<div class="row-runtime">Run ${runTime}</div>` : "";
       return `<a class="row" href="#" data-name="${a.name}">
         <div>
           <div class="row-title">${pretty.primary}</div>
-          <div class="meta">${meta}</div>
+          ${runLine}
+          <div class="meta">${kb} KB</div>
         </div>
         <div>›</div>
       </a>`;
