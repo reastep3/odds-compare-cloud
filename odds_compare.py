@@ -1985,13 +1985,15 @@ def _starts_within_days(e, max_days: int) -> bool:
 
 
 # European soccer leagues with consistently negative ROI across backtests.
-# Ligue1 and Serie A were previously blocked but proved profitable once
-# the broader +EV pool was examined (Ligue1 +26% / +4%, Serie A +47% / +11%
-# across month + week), so they are now allowed.
-# LALIGA added provisionally 2026-04-21: 1W/4L with 4 pushes across 31d+7d PT
-# windows (-72% / -31% ROI). Small sample — revisit after more data.
+# 2026-05-06 (30d backtest, post grader-fix resolution lift):
+#   PT cohort by league — EPL -86%, BUNDESLIGA -70%, LIGUE1 -59%,
+#   EUROPA -100%, LALIGA -30%, SERIEA -17%, CHAMPIONS -14%. The two
+#   newly added (LIGUE1, SERIEA) match the broad-pool pattern that
+#   drove the original block list. MLS remains the only PT-eligible
+#   soccer league.
 _BLOCKED_SOCCER = frozenset({
     "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA", "LALIGA",
+    "LIGUE1", "SERIEA",
 })
 
 
@@ -2057,10 +2059,14 @@ def _qualifies(e):
             return True
         return ev >= 2.5
 
-    # Totals: Pinnacle anchor required. Non-Pinn totals bleed at every
-    # EV tier (≥2%: -15.8%, ≥3%: -17.8%, ≥4%: -16.2%, ≥5%: -26.4%).
+    # Totals: MLB-only, Pinnacle-anchored. The non-MLB totals tail
+    # bleeds even with the Pinnacle gate — 2026-05-06 30d backtest had
+    # PT TOTALS at -12.4% ROI overall ($-12.66 P&L) despite the Pinn
+    # requirement; high-EV totals get *worse* (≥3% -26%, ≥5% -39%),
+    # the classic stale-soft-line trap. MLB totals are the only sport
+    # where the model's totals signal holds up.
     if mkt == "totals":
-        return pinn and ev >= 1.0
+        return sport == "MLB" and pinn and ev >= 1.0
 
     return False
 
@@ -2068,11 +2074,16 @@ def _qualifies(e):
 def _qualifies_prop(e):
     """Return True if a player prop edge qualifies for 'Play These'.
 
-    Recalibrated 2026-04-27. NBA pts non-Pinnacle threshold raised
-    2.0% → 3.0% based on 30-day backtest of all props:
-      EV 2-3% bucket: -13.5% ROI (132 picks) — bleeds
-      EV 3-5% bucket: +10.3% ROI (99 picks) — winners
-    Pinnacle path unchanged (still qualifies at EV ≥ 1%).
+    2026-05-06: added MLB total_bases + strikeouts after the grader
+    fixes made these markets visible for the first time. 30-day
+    backtest:
+      total_bases: +53.6% ROI (W34/L22 over 56 picks, 61% WR) —
+                   strongest single market in the report.
+      strikeouts:  +17.0% ROI (W31/L34 over 65 picks).
+      pts (NBA):   +8.0% ROI (W76/L65 over 170 picks) — already in.
+      reb/ast:     -21% / -16% — correctly stay excluded.
+    Same Pinn ≥1% / non-Pinn ≥3% threshold as NBA points; conservative
+    on a fresh-data market until we have a longer history.
 
     Calibrated 2026-04-12 against 149 settled NBA points picks:
       pts: 56% WR, +22.5% ROI this week (+9.1% lifetime) — profitable
@@ -2087,10 +2098,13 @@ def _qualifies_prop(e):
     if not _starts_within_days(e, MAX_PLAY_DAYS):
         return False
 
-    # NBA points — backtested +22.5% ROI (week), +9.1% (lifetime)
+    # Profitable counting-stat markets:
+    #   pts (NBA):         +9.1% ROI lifetime, +8.0% on the latest 30d
+    #   total_bases (MLB): +53.6% ROI on 56 picks (newly visible)
+    #   strikeouts (MLB):  +17.0% ROI on 65 picks (newly visible)
     # No book-count gate — props often have only 1-2 reference books
     # and are still profitable. Pinnacle bonus if available.
-    if mkt == "pts":
+    if mkt in ("pts", "total_bases", "strikeouts"):
         if pinn and ev >= 1.0:
             return True
         return ev >= 3.0
