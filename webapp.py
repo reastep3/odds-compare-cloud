@@ -350,12 +350,20 @@ def build_app() -> FastAPI:
                 except OSError:
                     continue
                 start_d, end_d = _bt_dates_from_name(name)
+                # run_stamp comes from the filename when present (current
+                # format); fall back to mtime so legacy files still show a
+                # time. mtime is what `shutil.move` preserves on archive.
+                run_stamp = _bt_run_stamp_from_name(name)
+                if run_stamp is None:
+                    run_stamp = datetime.fromtimestamp(
+                        st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
                 items.append({
-                    "name":  name,
-                    "size":  st.st_size,
-                    "mtime": int(st.st_mtime),
-                    "start": start_d.isoformat() if start_d else None,
-                    "end":   end_d.isoformat()   if end_d   else None,
+                    "name":     name,
+                    "size":     st.st_size,
+                    "mtime":    int(st.st_mtime),
+                    "start":    start_d.isoformat() if start_d else None,
+                    "end":      end_d.isoformat()   if end_d   else None,
+                    "run_time": run_stamp,
                 })
         items.sort(key=lambda x: x["mtime"], reverse=True)
         seen: set[str] = set()
@@ -627,10 +635,14 @@ def _resolve_backtest_archive(name: str) -> str:
 
 
 def _bt_dates_from_name(name: str) -> tuple[date | None, date | None]:
-    """Pull (start, end) out of backtest_<YYYY-MM-DD>_<YYYY-MM-DD>.xlsx."""
+    """Pull (start, end) out of a backtest filename. Two shapes are accepted:
+    - legacy: backtest_<start>_<end>.xlsx
+    - current: backtest_<start>_<end>__<runstamp>.xlsx (each run gets its own
+      file so re-running the same date range doesn't overwrite history)."""
     import re
     m = re.search(
-        r"^backtest_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.xlsx$", name)
+        r"^backtest_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})"
+        r"(?:__\d{8}_\d{6})?\.xlsx$", name)
     if not m:
         return (None, None)
     try:
@@ -638,6 +650,19 @@ def _bt_dates_from_name(name: str) -> tuple[date | None, date | None]:
                 date.fromisoformat(m.group(2)))
     except ValueError:
         return (None, None)
+
+
+def _bt_run_stamp_from_name(name: str) -> str | None:
+    """Pull the run timestamp out of a current-format backtest filename.
+    Returns ISO 'YYYY-MM-DD HH:MM:SS' or None for legacy / unparseable."""
+    import re
+    m = re.search(
+        r"^backtest_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}"
+        r"__(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.xlsx$", name)
+    if not m:
+        return None
+    y, mo, d, hh, mm, ss = m.groups()
+    return f"{y}-{mo}-{d} {hh}:{mm}:{ss}"
 
 
 def _read_summary_tab(path: str) -> dict[str, Any]:
