@@ -132,29 +132,38 @@ _SPORT_NORM: dict[str, str] = {
     "la liga":                          "laliga",
     "spanish la liga":                  "laliga",
     "spain - laliga":                   "laliga",
+    "la liga - spain":                  "laliga",
+    "laliga - spain":                   "laliga",
     "esp.1":                            "laliga",
     # Soccer — Ligue 1
     "ligue1":                           "ligue1",
     "ligue 1":                          "ligue1",
     "french ligue 1":                   "ligue1",
     "france - ligue 1":                 "ligue1",
+    "ligue 1 - france":                 "ligue1",
+    "ligue1 - france":                  "ligue1",
     "fra.1":                            "ligue1",
     # Soccer — Premier League
     "epl":                              "epl",
     "premier league":                   "epl",
     "english premier league":           "epl",
     "england - premier league":         "epl",
+    "premier league - england":         "epl",
+    "epl - england":                    "epl",
     "eng.1":                            "epl",
     # Soccer — Serie A
     "seriea":                           "seriea",
     "serie a":                          "seriea",
     "italian serie a":                  "seriea",
     "italy - serie a":                  "seriea",
+    "serie a - italy":                  "seriea",
+    "seriea - italy":                   "seriea",
     "ita.1":                            "seriea",
     # Soccer — Bundesliga
     "bundesliga":                       "bundesliga",
     "german bundesliga":                "bundesliga",
     "germany - bundesliga":             "bundesliga",
+    "bundesliga - germany":             "bundesliga",
     "ger.1":                            "bundesliga",
     # Soccer — Champions League / Europa / Conference
     "champions league":                 "champions",
@@ -190,7 +199,15 @@ _SPORT_NORM: dict[str, str] = {
 
 def _normalise_sport(raw: str) -> str:
     """Map any AN league-name variant to the canonical ESPN_SPORT_MAP key."""
-    return _SPORT_NORM.get(raw.lower().strip(), raw.lower().strip())
+    lower = raw.lower().strip()
+    if lower in _SPORT_NORM:
+        return _SPORT_NORM[lower]
+    # Tennis tournaments arrive as "ATP <event>" / "WTA <event>" — e.g.
+    # "ATP ITALIAN OPEN", "WTA MADRID OPEN". TennisExplorer covers both
+    # tours, so collapse all of them to the single "tennis" key.
+    if lower.startswith("atp ") or lower.startswith("wta "):
+        return "tennis"
+    return lower
 
 
 # ── Non-ESPN result sources ──────────────────────────────────────────
@@ -297,8 +314,13 @@ PROP_ESPN_STAT: dict[str, str | None] = {
     "reb":         "REB",
     "ast":         "AST",
     "strikeouts":  "K",       # pitcher strikeouts
-    "total_bases": None,      # computed: H + 2B + 2×3B + 3×HR
+    "total_bases": "TB",      # MLB Stats API exposes TB directly
 }
+
+# Markets where a missing stat for a roster player who DNP'd should be
+# treated as 0 (rather than NO_RESULT). All current props are counting
+# stats: missing = didn't accrue any.
+_PROP_DNP_DEFAULT_ZERO = {"pts", "reb", "ast", "strikeouts", "total_bases"}
 
 PROP_BANKROLL        = 100.0  # hypothetical bankroll for Kelly sizing props
 PROP_KELLY_FRACTION  = 0.5    # half-Kelly (matches Play These)
@@ -1979,15 +2001,107 @@ def fetch_espn_results(sport: str, date_str: str) -> list[dict]:
 _boxscore_cache: dict[str, dict] = {}
 
 
-def fetch_player_stats(sport: str, event_id: str) -> dict[str, dict]:
+# DNP marker: present in the stat dict means the player was on the roster
+# but did not play. Counting stats default to 0 for these players (so an
+# "Over 4.5 rebounds" pick on a DNP grades as LOSS instead of NO_RESULT).
+_DNP_FLAG = "__DNP__"
+
+
+def _fetch_mlb_player_stats(game_date: str, home_team: str,
+                            away_team: str) -> dict[str, dict]:
+    """
+    Fetch MLB player stats from the official MLB Stats API
+    (statsapi.mlb.com — free, no auth) instead of ESPN's summary box,
+    which omits doubles/triples and so can't compute total bases.
+    Returns the same shape as fetch_player_stats: {name: {label: value}}.
+    Labels exposed: H, 2B, 3B, HR, TB (batting), K (pitching strikeouts).
+    """
+    if not game_date or not home_team or not away_team:
+        return {}
+    cache_key = f"mlb-statsapi|{game_date}|{away_team}@{home_team}"
+    if cache_key in _boxscore_cache:
+        return _boxscore_cache[cache_key]
+
+    iso_date = f"{game_date[:4]}-{game_date[4:6]}-{game_date[6:]}"
+    sched_url = ("https://statsapi.mlb.com/api/v1/schedule"
+                 f"?sportId=1&date={iso_date}")
+    try:
+        sched = _espn_session.get(sched_url, timeout=15).json()
+    except Exception:
+        _boxscore_cache[cache_key] = {}
+        return {}
+
+    game_pk = None
+    for d in sched.get("dates", []):
+        for g in d.get("games", []):
+            a = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+            h = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+            if (_word_overlap(a, away_team) >= 0.5
+                    and _word_overlap(h, home_team) >= 0.5):
+                game_pk = g.get("gamePk")
+                break
+        if game_pk:
+            break
+    if not game_pk:
+        _boxscore_cache[cache_key] = {}
+        return {}
+
+    box_url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
+    try:
+        box = _espn_session.get(box_url, timeout=15).json()
+    except Exception:
+        _boxscore_cache[cache_key] = {}
+        return {}
+
+    player_stats: dict[str, dict] = {}
+    for side in ("away", "home"):
+        for pdata in box.get("teams", {}).get(side, {}).get("players", {}).values():
+            name = pdata.get("person", {}).get("fullName", "")
+            if not name:
+                continue
+            stats = pdata.get("stats", {})
+            bat = stats.get("batting") or {}
+            pit = stats.get("pitching") or {}
+            d: dict[str, float] = {}
+            if bat:
+                d["H"]  = float(bat.get("hits", 0))
+                d["2B"] = float(bat.get("doubles", 0))
+                d["3B"] = float(bat.get("triples", 0))
+                d["HR"] = float(bat.get("homeRuns", 0))
+                d["TB"] = float(bat.get("totalBases", 0))
+            if pit:
+                d["K"] = float(pit.get("strikeOuts", 0))
+            if d:
+                player_stats[name] = d
+            else:
+                # Roster but did not bat or pitch — treat as DNP so counting
+                # markets grade as 0 (LOSS for over, WIN for under > 0.5).
+                player_stats[name] = {_DNP_FLAG: True}
+
+    _boxscore_cache[cache_key] = player_stats
+    time.sleep(0.12)
+    return player_stats
+
+
+def fetch_player_stats(sport: str, event_id: str,
+                       game_result: dict | None = None,
+                       game_date: str | None = None) -> dict[str, dict]:
     """
     Fetch player stat lines for one completed game.
     Returns {player_display_name: {stat_label: numeric_value}}.
     NBA labels include: PTS, REB, AST.
-    MLB pitcher labels include: K (strikeouts).
-    MLB batter labels include: H, 2B, 3B, HR (for total-bases calculation).
-    Results cached per event_id.
+    MLB labels (via MLB Stats API) include: H, 2B, 3B, HR, TB, K.
+    Results cached per event_id (or per gamePk lookup for MLB).
+    DNP players are recorded with {_DNP_FLAG: True} so grade_prop can
+    grade their counting-stat picks as zero rather than NO_RESULT.
     """
+    if sport == "mlb" and game_result and game_date:
+        return _fetch_mlb_player_stats(
+            game_date,
+            game_result.get("home_team", ""),
+            game_result.get("away_team", ""),
+        )
+
     if not event_id:
         return {}
     cache_key = f"{sport}|{event_id}"
@@ -2019,8 +2133,13 @@ def fetch_player_stats(sport: str, event_id: str) -> dict[str, dict]:
             for athlete_entry in stat_block.get("athletes", []):
                 ath  = athlete_entry.get("athlete", {})
                 name = ath.get("displayName") or ath.get("shortName", "")
+                if not name:
+                    continue
                 raw_stats = athlete_entry.get("stats", [])
-                if not name or not raw_stats:
+                if not raw_stats:
+                    # On the roster but DNP (sat, late scratch, ejected, etc.)
+                    # Record presence so grade_prop can grade as zero.
+                    player_stats.setdefault(name, {})[_DNP_FLAG] = True
                     continue
                 stat_dict: dict[str, float] = {}
                 for label, raw_val in zip(labels, raw_stats):
@@ -2030,6 +2149,9 @@ def fetch_player_stats(sport: str, event_id: str) -> dict[str, dict]:
                         pass  # skip strings like "35:42" or "8-17"
                 if name not in player_stats:
                     player_stats[name] = {}
+                # An actual stat line supersedes a prior DNP marker (if a
+                # player appeared in multiple stat blocks).
+                player_stats[name].pop(_DNP_FLAG, None)
                 player_stats[name].update(stat_dict)
 
     _boxscore_cache[cache_key] = player_stats
@@ -2257,9 +2379,11 @@ def _find_player_in_stats(player_name: str,
 
 def grade_prop(pick: dict, game_result: dict) -> str:
     """
-    Grade a player-prop pick given the ESPN game result (which carries event_id).
-    Fetches the box score on demand; result cached.
-    Returns WIN / LOSS / PUSH / NO_RESULT.
+    Grade a player-prop pick given the matched game result.
+    For MLB the box score is fetched from MLB Stats API (totalBases is
+    only exposed directly there); other sports use ESPN's summary.
+    DNP players grade as stat=0 for counting markets.
+    Returns WIN / LOSS / PUSH / NO_RESULT / UNKNOWN.
     """
     sport    = pick["sport"]
     player   = pick.get("player", "")
@@ -2270,11 +2394,17 @@ def grade_prop(pick: dict, game_result: dict) -> str:
     if line is None or not player or not side:
         return "NO_RESULT"
 
-    event_id = game_result.get("event_id", "")
-    if not event_id:
+    # MLB uses MLB Stats API (date + teams), no ESPN event_id needed.
+    # Other sports require an event_id from the matched ESPN game.
+    if sport != "mlb" and not game_result.get("event_id"):
         return "NO_RESULT"
 
-    player_stats = fetch_player_stats(sport, event_id)
+    player_stats = fetch_player_stats(
+        sport,
+        game_result.get("event_id", ""),
+        game_result=game_result,
+        game_date=pick.get("game_date"),
+    )
     if not player_stats:
         return "NO_RESULT"
 
@@ -2282,25 +2412,17 @@ def grade_prop(pick: dict, game_result: dict) -> str:
     if stats is None:
         return "NO_RESULT"
 
-    # Compute the relevant stat value
-    if market == "total_bases":
-        # TB = H + 2B + 2×3B + 3×HR  (requires hit-type breakdown)
-        h  = stats.get("H")
-        d  = stats.get("2B")   # doubles
-        t  = stats.get("3B")   # triples
-        hr = stats.get("HR")
-        if h is None or d is None:
-            return "NO_RESULT"  # ESPN didn't provide hit breakdown
-        t  = t  or 0
-        hr = hr or 0
-        stat_val = h + d + 2 * t + 3 * hr
-    else:
-        stat_label = PROP_ESPN_STAT.get(market)
-        if not stat_label:
-            return "UNKNOWN"
-        raw = stats.get(stat_label)
-        if raw is None:
+    stat_label = PROP_ESPN_STAT.get(market)
+    if not stat_label:
+        return "UNKNOWN"
+    raw = stats.get(stat_label)
+    if raw is None:
+        # Player was on the roster but didn't play — counting stats are 0.
+        if stats.get(_DNP_FLAG) and market in _PROP_DNP_DEFAULT_ZERO:
+            stat_val = 0.0
+        else:
             return "NO_RESULT"
+    else:
         stat_val = float(raw)
 
     diff = stat_val - float(line)
