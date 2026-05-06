@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-06 v22 (Backtest archive rows show run time on its own line)";
+const BUILD = "2026-05-06 v23 (Tz selector on backtest archives + correct UTC parsing)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -535,18 +535,30 @@ if (_dashRefresh) _dashRefresh.addEventListener("click", loadDashboard);
 // dashboard meta line + archive list when changed. Game-time strings
 // inside picks are pre-baked in ET by the bot, so we only need to
 // re-render the filename-derived headers.
+//
+// Multiple selects can carry [data-tz-sync] (currently dashboard +
+// backtest-archives header). They all read/write the same localStorage
+// key, and changing any of them reloads every tz-sensitive surface and
+// keeps the other selects' displayed values in sync.
 {
-  const _tz = document.getElementById("tz-select");
-  if (_tz) {
-    _tz.value = getTZ();
-    _tz.addEventListener("change", () => {
-      setTZ(_tz.value);
+  const _syncTzSelects = () => {
+    const tz = getTZ();
+    document.querySelectorAll("[data-tz-sync]").forEach((s) => {
+      if (s.value !== tz) s.value = tz;
+    });
+  };
+  document.querySelectorAll("[data-tz-sync]").forEach((sel) => {
+    sel.value = getTZ();
+    sel.addEventListener("change", () => {
+      setTZ(sel.value);
+      _syncTzSelects();
       if (_dashCache) renderDashboard(_dashCache);
-      // Re-render archive list if it's been loaded already.
       const archList = document.getElementById("archives-list");
       if (archList && archList.childElementCount > 0) loadArchives();
+      const btArchList = document.getElementById("bt-archives-list");
+      if (btArchList && btArchList.childElementCount > 0) loadBacktestArchives();
     });
-  }
+  });
 }
 
 // ── Run scan ─────────────────────────────────────────────────────────
@@ -1032,11 +1044,16 @@ async function loadBacktestArchives() {
       // would otherwise be visually indistinguishable. Server returns
       // run_time as 'YYYY-MM-DD HH:MM:SS' (filename-derived for current-
       // format files, mtime-derived for legacy).
+      // run_time arrives as 'YYYY-MM-DD HH:MM:SS' UTC (filename or
+      // mtime). Append 'Z' so Date parses it as UTC, then the user's
+      // selected display tz (Auto / ET / CT / MT / PT / UTC) decides
+      // how it renders.
       const runTime = a.run_time
-        ? new Date(a.run_time.replace(" ", "T")).toLocaleString(undefined, {
-            month: "short", day: "numeric",
-            hour: "numeric", minute: "2-digit",
-          })
+        ? new Date(a.run_time.replace(" ", "T") + "Z").toLocaleString(
+            undefined,
+            { month: "short", day: "numeric",
+              hour: "numeric", minute: "2-digit",
+              ...tzOptions() })
         : "";
       const runLine = runTime
         ? `<div class="row-runtime">Run ${runTime}</div>` : "";

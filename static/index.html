@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=22">
+  <link rel="stylesheet" href="/static/style.css?v=23">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -85,7 +85,7 @@
         <div class="dashboard-header">
           <h2>Latest Run</h2>
           <div class="dashboard-header-tools">
-            <select id="tz-select" class="tz-select" title="Display timezone">
+            <select id="tz-select" class="tz-select" data-tz-sync title="Display timezone">
               <option value="auto">Auto</option>
               <option value="America/New_York">ET</option>
               <option value="America/Chicago">CT</option>
@@ -253,7 +253,19 @@
         <!-- List view -->
         <div id="bt-archives-list-view">
           <div class="card">
-            <h2>Backtest reports</h2>
+            <div class="dashboard-header">
+              <h2>Backtest reports</h2>
+              <div class="dashboard-header-tools">
+                <select class="tz-select" data-tz-sync title="Display timezone">
+                  <option value="auto">Auto</option>
+                  <option value="America/New_York">ET</option>
+                  <option value="America/Chicago">CT</option>
+                  <option value="America/Denver">MT</option>
+                  <option value="America/Los_Angeles">PT</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </div>
+            </div>
             <p class="muted">Past <code>backtest_*.xlsx</code> reports. The 3 AM ET daily job
               writes one per day; ad-hoc <b>Backtest</b> runs add more. Newest first.</p>
             <button id="bt-archives-refresh" class="secondary-btn">↻ Refresh</button>
@@ -365,6 +377,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=22"></script>
+  <script src="/static/app.js?v=23"></script>
 </body>
 </html>
