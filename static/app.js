@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-07 v28 (Date-namespace CLV lookup so same matchups across days don't cross-stamp)";
+const BUILD = "2026-05-07 v29 (Fix CLV sign: positive when line moves toward your pick)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
