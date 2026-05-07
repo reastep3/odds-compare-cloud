@@ -27,18 +27,21 @@ from closing_lines import (
 # ── compute_clv_pct ────────────────────────────────────────────────────
 
 def test_clv_zero_when_open_equals_close():
-    # If your odds didn't move, CLV is exactly 0
+    # If the line didn't move, CLV is exactly 0
     assert compute_clv_pct(50.0, 50.0) == pytest.approx(0.0)
 
-def test_clv_positive_when_close_lower_than_open():
-    # You bet at 60% implied, close at 50% — line moved IN your favor.
-    # (Your selection got more probable in the market.) CLV = +20%.
-    assert compute_clv_pct(60.0, 50.0) == pytest.approx(20.0)
+def test_clv_positive_when_close_implied_higher_than_open():
+    # You bet at 50% implied (+100, decent payout). Close moved to 60%
+    # implied (-150). The market caught up to your view — your pick
+    # became MORE favored — so you got better odds than the close.
+    # CLV = (60 - 50) / 60 ≈ +16.667%.
+    assert compute_clv_pct(50.0, 60.0) == pytest.approx(16.667, abs=0.01)
 
-def test_clv_negative_when_close_higher_than_open():
-    # You bet at 50% implied, close at 60% — line moved AGAINST you.
-    # CLV = (50-60)/60 ≈ -16.667%
-    assert compute_clv_pct(50.0, 60.0) == pytest.approx(-16.667, abs=0.01)
+def test_clv_negative_when_close_implied_lower_than_open():
+    # You bet at 60% implied (-150, paying premium). Close moved to 50%
+    # implied (+100). The market moved AWAY from your pick — you
+    # overpaid relative to the eventual close. CLV = -20%.
+    assert compute_clv_pct(60.0, 50.0) == pytest.approx(-20.0)
 
 def test_clv_none_when_open_missing():
     assert compute_clv_pct(None, 50.0) is None
@@ -188,8 +191,10 @@ def test_match_prop_rejects_wrong_side():
 # ── _build_close_record ────────────────────────────────────────────────
 
 def test_build_close_records_americanand_clv():
-    # Pick was -150 (60% implied), close at -110 (~52.4% implied)
-    # CLV = (60.0 - 52.38) / 52.38 ≈ +14.55%
+    # Pick was -150 (60% implied, paying premium), close at -110
+    # (~52.4% implied). Market moved AWAY from your pick → you got
+    # WORSE odds than the close → negative CLV.
+    # CLV = (52.38 - 60.0) / 52.38 ≈ -14.55%
     pick = {
         "open_implied_pct": 60.0,
         "commence": (datetime.now(timezone.utc) + timedelta(minutes=4))
@@ -200,8 +205,23 @@ def test_build_close_records_americanand_clv():
     rec = _build_close_record(pick, api_outcome, now)
     assert rec["odds_american"] == -110
     assert rec["implied_pct"] == pytest.approx(52.4, abs=0.1)
-    assert rec["clv_pct"] == pytest.approx(14.55, abs=0.1)
+    assert rec["clv_pct"] == pytest.approx(-14.55, abs=0.1)
     assert 3.5 < rec["minutes_before_commence"] <= 4.0
+
+
+def test_clv_sign_matches_real_world_screenshot():
+    """Regression test for the sign-inversion bug surfaced 2026-05-07.
+
+    User reported a Diamondbacks -1.5 pick at -128 closing at -154 was
+    showing CLV in red. -128 → -154 is the line moving TOWARD the pick
+    (more favored at close), so the bettor got better-than-close odds
+    and CLV should be POSITIVE.
+    """
+    open_implied  = 128 / (128 + 100) * 100   # 56.14% (open at -128)
+    close_implied = 154 / (154 + 100) * 100   # 60.63% (close at -154)
+    clv = compute_clv_pct(open_implied, close_implied)
+    assert clv > 0
+    assert clv == pytest.approx(7.41, abs=0.05)
 
 def test_build_close_handles_missing_commence():
     pick = {"open_implied_pct": 50.0, "commence": None}

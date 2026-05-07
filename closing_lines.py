@@ -182,17 +182,25 @@ def _fetch_event_odds(sport_key: str, event_id: str,
 
 def compute_clv_pct(open_implied_pct: float | None,
                      close_implied_pct: float) -> float | None:
-    """CLV%: how much your implied probability beat the close.
+    """CLV%: how much your odds beat the close.
 
-    Positive = your odds were better than the close (good — you got value
-    the market eventually corrected toward). Negative = the line moved
-    against you, suggesting the model overrated this side.
+    "Beating the close" means betting at a better price than where the
+    market settled. Better price for the bettor = higher payout =
+    *lower* implied probability for your selection. So a positive CLV
+    happens when open_implied < close_implied (the market moved toward
+    your pick after you bet, validating the edge).
 
-      clv_pct = (open_implied - close_implied) / close_implied × 100
+      clv_pct = (close_implied - open_implied) / close_implied × 100
+
+    Cross-check via decimal CLV: bet -128 (decimal 1.781), close -154
+    (decimal 1.649) → (1.781 − 1.649) / 1.649 = +8.0%, matching the
+    sign of (60.63 − 56.14) / 60.63 = +7.4% under this formula. (The
+    minor magnitude difference between decimal-CLV and implied-CLV is
+    just choice of denominator; sign agrees.)
     """
     if not isinstance(open_implied_pct, (int, float)) or close_implied_pct <= 0:
         return None
-    return round((open_implied_pct - close_implied_pct) / close_implied_pct * 100, 3)
+    return round((close_implied_pct - open_implied_pct) / close_implied_pct * 100, 3)
 
 
 def _build_close_record(pick: dict, outcome: dict, now_utc: datetime) -> dict:
@@ -322,6 +330,14 @@ def load_closing_lines_for_dates(start_date, end_date,
                 # Without a parseable commence we can't safely
                 # disambiguate this entry across days — drop it.
                 continue
+            # Always re-derive CLV from canonical open + close implied
+            # %s rather than trust the stored value. Pre-2026-05-08
+            # captures used a sign-inverted formula; recomputing on
+            # read fixes them transparently — no data migration needed.
+            fixed_clv = compute_clv_pct(pick.get("open_implied_pct"),
+                                          close.get("implied_pct"))
+            if fixed_clv is not None and fixed_clv != close.get("clv_pct"):
+                close = {**close, "clv_pct": fixed_clv}
             # Latest scan wins (we iterate files in date order)
             lookup[(game_date, pick_key)] = close
     return lookup
