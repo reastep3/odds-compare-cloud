@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-06 v24 (Surface CLV: live today widget + backtest archive cols)";
+const BUILD = "2026-05-07 v25 (All Plays section gets W/L/ROI rollup)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -441,8 +441,32 @@ function renderDashboard(arc) {
   $("#dashboard-all-count").textContent = `(${all.length})`;
   if (all.length) {
     $("#dashboard-all-section").hidden = false;
+    $("#dashboard-all-results").innerHTML =
+      renderResultsRollup(arc.all_plays_results);
     $("#dashboard-all-table").innerHTML = renderDashboardTable(all, kelly);
   }
+}
+
+// Reusable W/L/ROI tile pair — same shape as the Day's record / Day's ROI
+// cells on the top dashboard card, parameterised so we can reuse it for the
+// All Plays rollup (and any future pool we want to summarise).
+function renderResultsRollup(r) {
+  if (!r || (!r.settled && !r.pending && !r.manual)) return "";
+  const sgnCls = r.roi_pct >= 0 ? "pos" : "neg";
+  const wlpLine =
+    `<b>${r.wins}</b> W / <b>${r.losses}</b> L / <b>${r.pushes}</b> P`;
+  const extras = [];
+  if (r.in_progress) extras.push(`${r.in_progress} live`);
+  if (r.not_started) extras.push(`${r.not_started} not started`);
+  if (r.manual)      extras.push(`${r.manual} unresolved`);
+  const extraStr = extras.length ? ` · ${extras.join(" · ")}` : "";
+  const roiLine = r.settled
+    ? `ROI: <span class="${sgnCls}" style="font-size:1.3em">${fmtPct(r.roi_pct)}</span>
+       · Win rate: <b>${fmtPct(r.win_rate)}</b>`
+    : "<span class='muted'>No graded picks yet</span>";
+  return `
+    ${kvCell("Record", `${wlpLine}${extraStr}`, { full: true })}
+    ${kvCell("ROI",    roiLine,                  { full: true })}`;
 }
 
 // Recompute the stake column for both tables when the Kelly fraction

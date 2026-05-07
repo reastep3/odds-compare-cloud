@@ -962,9 +962,12 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
         },
         # Daily results aggregate — bankroll-independent (ROI = pnl / wagered,
         # both scale linearly with bankroll so the ratio is constant).
-        # Computed from Play These (the actionable filtered set), not
-        # all_plays — All Plays includes sub-threshold edges we wouldn't bet.
+        # Computed from Play These (the actionable filtered set).
         "results": _aggregate_archive_results(play + promos + props),
+        # Same aggregate over the broader All Plays pool — lets the user
+        # compare "what if I'd bet every +EV edge" against the filtered
+        # Play These set, so the value of the filter is visible at a glance.
+        "all_plays_results": _aggregate_archive_results(all_ev),
     }
 
 
