@@ -473,6 +473,18 @@ def build_app() -> FastAPI:
         contents = await asyncio.to_thread(_load_archive_contents, path, name)
         return {"archive": contents}
 
+    @api.get("/api/clv_today")
+    async def clv_today(
+        _user: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Live CLV stats from today + yesterday's pending_closes_*.json.
+
+        Surfaces what the closing-line worker has captured so far, refreshed
+        on each hit. Cheap — just reads two small JSON files.
+        """
+        import asyncio
+        return await asyncio.to_thread(_summarize_clv_today, _OUTPUT_DIR)
+
     @api.get("/api/backtest_archives")
     async def list_backtest_archives(
         _user: str = Depends(current_user),
@@ -1272,8 +1284,8 @@ def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
       4  Sport      8  Pick     12 Conf.   16 Result    17 P&L
                                                         18 Close   19 CLV %
 
-    CLV columns (18-19) are written but not currently read here — they're
-    available in the .xlsx download for now. Dashboard surfacing is Phase C.
+    Pre-CLV xlsx files (written before 2026-05-05) only have 17 columns;
+    we tolerate that by indexing defensively.
     """
     import openpyxl
     if not os.path.isfile(path):
@@ -1290,6 +1302,9 @@ def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or row[0] is None:
             continue
+        # Older xlsx pre-date the CLV columns — guard with len()
+        close_odds = _bt_cell_str(row[17]) if len(row) > 17 else None
+        clv_pct    = row[18]               if len(row) > 18 else None
         picks.append({
             "file_date":  _bt_cell_str(row[1]),
             "game_date":  _bt_cell_str(row[2]),
@@ -1305,6 +1320,8 @@ def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
             "bet_amount": row[12],
             "result":     (_bt_cell_str(row[15]) or "").upper() or None,
             "pnl":        row[16],
+            "close_odds": close_odds,
+            "clv_pct":    clv_pct if isinstance(clv_pct, (int, float)) else None,
         })
     wb.close()
     return picks
@@ -1353,6 +1370,8 @@ def _shape_bt_pick(p: dict[str, Any]) -> dict[str, Any]:
         "confidence": p.get("confidence"),
         "result":     p.get("result"),
         "unit_return_pct": _bt_unit_return_pct(p),
+        "close_odds": p.get("close_odds"),
+        "clv_pct":    _round(p.get("clv_pct"), 2),
     }
 
 
@@ -1389,6 +1408,90 @@ def _shape_bt_summary(s: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _avg_clv(picks: list[dict[str, Any]]) -> tuple[float | None, int]:
+    """Average CLV % across the subset of `picks` that have a captured CLV.
+    Returns (avg_clv_pct, captured_count). avg is None if no captures."""
+    captured = [p for p in picks if isinstance(p.get("clv_pct"), (int, float))]
+    if not captured:
+        return None, 0
+    return round(sum(p["clv_pct"] for p in captured) / len(captured), 2), \
+           len(captured)
+
+
+def _summarize_clv_today(output_dir: str) -> dict[str, Any]:
+    """Aggregate today + yesterday's pending_closes_*.json files for the
+    live dashboard widget.
+
+    Reads the same files the closing-line worker writes (today + yesterday
+    ET, since a midnight-crossing capture window straddles two files).
+    Returns a flat shape the frontend can render directly:
+        {
+            "tracked":           int   (total pending picks across files),
+            "captured":          int   (subset whose close was logged),
+            "avg_clv_pct":       float | None,
+            "positive":          int,
+            "negative":          int,
+            "by_book":           [{book, captured, tracked, avg_clv_pct}, ...],
+            "last_capture_iso":  str | None  (ISO ts of latest captured_at),
+        }
+    """
+    from closing_lines import _list_recent_pending_files
+
+    paths = _list_recent_pending_files(output_dir)
+    tracked = 0
+    captured: list[dict[str, Any]] = []
+    by_book: dict[str, dict[str, Any]] = {}
+    last_capture: str | None = None
+
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        for pick in (payload.get("picks") or {}).values():
+            tracked += 1
+            book = pick.get("book") or "—"
+            slot = by_book.setdefault(
+                book, {"book": book, "tracked": 0, "captured": 0, "_clvs": []})
+            slot["tracked"] += 1
+            close = pick.get("close") or {}
+            clv = close.get("clv_pct")
+            if isinstance(clv, (int, float)):
+                captured.append(pick)
+                slot["captured"] += 1
+                slot["_clvs"].append(clv)
+                ts = close.get("captured_at")
+                if ts and (last_capture is None or ts > last_capture):
+                    last_capture = ts
+
+    if captured:
+        all_clvs = [p["close"]["clv_pct"] for p in captured]
+        avg_clv_pct = round(sum(all_clvs) / len(all_clvs), 2)
+        positive = sum(1 for c in all_clvs if c > 0)
+        negative = sum(1 for c in all_clvs if c < 0)
+    else:
+        avg_clv_pct, positive, negative = None, 0, 0
+
+    by_book_out = []
+    for slot in by_book.values():
+        clvs = slot.pop("_clvs")
+        slot["avg_clv_pct"] = (round(sum(clvs) / len(clvs), 2)
+                                if clvs else None)
+        by_book_out.append(slot)
+    by_book_out.sort(key=lambda b: b["captured"], reverse=True)
+
+    return {
+        "tracked":          tracked,
+        "captured":         len(captured),
+        "avg_clv_pct":      avg_clv_pct,
+        "positive":         positive,
+        "negative":         negative,
+        "by_book":          by_book_out,
+        "last_capture_iso": last_capture,
+    }
+
+
 def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
     """Read a backtest report's Summary + All Picks tabs into JSON.
 
@@ -1413,30 +1516,41 @@ def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
         bet  = sum((x.get("bet_amount") or 0) for x in settled)
         roi  = (pnl / bet * 100) if bet else 0
         decided = wins + loss
+        avg_clv_pct, clv_n = _avg_clv(settled)
         sport_breakdown.append({
-            "sport":    sport,
-            "picks":    len(sg),
-            "settled":  len(settled),
-            "wins":     wins,
-            "losses":   loss,
-            "win_rate": round(wins / decided * 100, 1) if decided else None,
-            "roi_pct":  round(roi, 2) if bet else None,
+            "sport":            sport,
+            "picks":            len(sg),
+            "settled":          len(settled),
+            "wins":             wins,
+            "losses":           loss,
+            "win_rate":         round(wins / decided * 100, 1) if decided else None,
+            "roi_pct":          round(roi, 2) if bet else None,
+            "avg_clv_pct":      avg_clv_pct,
+            "clv_captured":     clv_n,
         })
     sport_breakdown.sort(key=lambda x: (x["roi_pct"] is None,
                                          -(x["roi_pct"] or 0)))
+
+    settled_all = [p for p in picks
+                   if (p.get("result") or "") in ("WIN", "LOSS", "PUSH")]
+    avg_clv_pct, clv_captured_count = _avg_clv(settled_all)
+    summary_shaped = _shape_bt_summary(summary)
+    # The xlsx Summary tab writes Avg CLV % as a formatted string that's
+    # awkward to round-trip. Re-derive from picks for a clean numeric we
+    # can render in tiles + sort/colour against.
+    summary_shaped["avg_clv_pct"]   = avg_clv_pct
+    summary_shaped["clv_captured"] = clv_captured_count
 
     return {
         "name":  name,
         "start": start_d.isoformat() if start_d else None,
         "end":   end_d.isoformat()   if end_d   else None,
-        "summary": _shape_bt_summary(summary),
+        "summary": summary_shaped,
         "picks":   [_shape_bt_pick(p) for p in picks],
         "by_sport": sport_breakdown,
         "counts": {
             "total":   len(picks),
-            "settled": sum(1 for p in picks
-                            if (p.get("result") or "")
-                                in ("WIN", "LOSS", "PUSH")),
+            "settled": len(settled_all),
         },
     }
 

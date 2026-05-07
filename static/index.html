@@ -151,6 +151,18 @@
       <div class="card" id="dashboard-empty" hidden>
         <p class="muted">No archives yet. Tap the <b>Run</b> tab to generate the first one.</p>
       </div>
+
+      <!-- Live CLV — what the closing-line worker has captured so far today.
+           Hidden until the first capture (worker fires every minute). -->
+      <div class="card" id="dashboard-clv-card" hidden>
+        <h3>CLV captured today
+          <span class="count" id="dashboard-clv-count"></span></h3>
+        <p class="muted" id="dashboard-clv-meta"></p>
+        <div class="summary-grid" id="dashboard-clv-grid"></div>
+        <div class="table-wrap" style="margin-top:12px;">
+          <table id="dashboard-clv-by-book"></table>
+        </div>
+      </div>
     </section>
 
     <!-- Run tab -->

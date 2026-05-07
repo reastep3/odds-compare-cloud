@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-06 v23 (Tz selector on backtest archives + correct UTC parsing)";
+const BUILD = "2026-05-06 v24 (Surface CLV: live today widget + backtest archive cols)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -289,6 +289,10 @@ async function loadDashboard() {
   $("#kelly-bar").hidden = true;
   $("#bankroll-bar").hidden = true;
 
+  // CLV widget refreshes alongside the dashboard. Independent of the run
+  // archive — shows whatever the closing-line worker has captured today.
+  loadClvToday();
+
   try {
     const j = await apiJSON("/api/latest");
     if (!j.archive) {
@@ -301,6 +305,82 @@ async function loadDashboard() {
   } catch (e) {
     meta.innerHTML = `<span class="error">${e.message}</span>`;
   }
+}
+
+async function loadClvToday() {
+  const card = $("#dashboard-clv-card");
+  if (!card) return;
+  try {
+    const j = await apiJSON("/api/clv_today");
+    if (!j || !j.tracked) {
+      card.hidden = true;
+      return;
+    }
+    renderClvToday(j);
+    card.hidden = false;
+  } catch (_) {
+    // Silent failure — endpoint may not be deployed on older servers.
+    card.hidden = true;
+  }
+}
+
+function renderClvToday(j) {
+  $("#dashboard-clv-count").textContent =
+    `(${j.captured} / ${j.tracked})`;
+
+  // Meta line: how stale the data is (worker fires every minute, so any
+  // capture older than ~5 min suggests the worker is asleep or no games
+  // have hit their close window yet)
+  let metaTxt = "";
+  if (j.last_capture_iso) {
+    const dt = new Date(j.last_capture_iso);
+    const ageSec = Math.max(0, (Date.now() - dt.getTime()) / 1000);
+    const ageStr = ageSec < 90 ? "just now"
+                  : ageSec < 3600 ? `${Math.round(ageSec / 60)} min ago`
+                  : `${(ageSec / 3600).toFixed(1)} h ago`;
+    metaTxt = `Last capture: ${ageStr}`;
+  } else {
+    metaTxt = "No captures yet — worker fires within 5 min of each tip-off.";
+  }
+  $("#dashboard-clv-meta").textContent = metaTxt;
+
+  const avg = j.avg_clv_pct;
+  const avgCls = avg == null ? "muted" : avg >= 0 ? "pos" : "neg";
+  const avgVal = avg == null
+    ? "—"
+    : `<span class="${avgCls}" style="font-size:1.3em">${
+        (avg >= 0 ? "+" : "")}${avg.toFixed(2)}%</span>`;
+
+  $("#dashboard-clv-grid").innerHTML = [
+    kvCell("Avg CLV", avgVal, { full: true }),
+    kvCell("Captured", `${j.captured} / ${j.tracked}`),
+    kvCell("Positive", j.positive),
+    kvCell("Negative", j.negative),
+  ].join("");
+
+  // By-book breakdown — only show if there's something to break down.
+  const rows = (j.by_book || []).filter((b) => b.captured > 0);
+  if (!rows.length) {
+    $("#dashboard-clv-by-book").innerHTML = "";
+    return;
+  }
+  const body = rows.map((b) => {
+    const cls = b.avg_clv_pct == null
+      ? "muted" : b.avg_clv_pct >= 0 ? "pos" : "neg";
+    const txt = b.avg_clv_pct == null
+      ? "—"
+      : `${b.avg_clv_pct >= 0 ? "+" : ""}${b.avg_clv_pct.toFixed(2)}%`;
+    return `<tr>
+      <td data-label="Book" class="${bookCls(b.book)}">${b.book}</td>
+      <td data-label="Captured" class="num">${b.captured} / ${b.tracked}</td>
+      <td data-label="Avg CLV" class="num ${cls}"><b>${txt}</b></td>
+    </tr>`;
+  }).join("");
+  $("#dashboard-clv-by-book").innerHTML = `
+    <thead><tr>
+      <th>Book</th><th>Captured</th><th>Avg CLV</th>
+    </tr></thead>
+    <tbody>${body}</tbody>`;
 }
 
 function renderDashboard(arc) {
@@ -1148,9 +1228,24 @@ function renderBacktestArchiveDetail(j) {
       ? (v >= 0 ? "+" : "−") + "$" + Math.abs(v).toFixed(2)
       : "—";
 
+  // Avg CLV — gold-standard +EV signal. Hidden when no closes were
+  // captured in the date range (e.g., backtests pre-2026-05-05).
+  let clvCell = "";
+  if (typeof s.avg_clv_pct === "number") {
+    const cls = s.avg_clv_pct >= 0 ? "pos" : "neg";
+    const sgn = s.avg_clv_pct >= 0 ? "+" : "";
+    clvCell = kvCell(
+      "Avg CLV",
+      `<span class="${cls}" style="font-size:1.3em">${sgn}${
+         s.avg_clv_pct.toFixed(2)}%</span>
+       · <b>${s.clv_captured ?? 0}</b> captured`,
+      { full: true });
+  }
+
   $("#bt-archive-summary-grid").innerHTML = [
     kvCell("Record", `${wlpLine}${extraStr}`, { full: true }),
     kvCell("ROI", roiCell, { full: true }),
+    clvCell,
     kvCell("Total picks", s.total_picks),
     kvCell("Settled", s.settled),
     kvCell("Wagered",
@@ -1177,11 +1272,26 @@ function renderBacktestArchiveDetail(j) {
 }
 
 function renderBacktestBySport(rows) {
+  // Only render the CLV column when at least one sport has captures —
+  // older reports pre-CLV would otherwise show a column of "—".
+  const hasClv = rows.some((r) => typeof r.avg_clv_pct === "number");
   const body = rows.map((r) => {
     const roi    = r.roi_pct;
     const roiCls = roi == null ? "muted" : roi >= 0 ? "pos" : "neg";
     const roiTxt = roi == null ? "—" : fmtPct(roi, 1);
     const wr     = r.win_rate == null ? "—" : fmtPct(r.win_rate, 0);
+    let clvTd = "";
+    if (hasClv) {
+      const c = r.avg_clv_pct;
+      if (c == null) {
+        clvTd = `<td data-label="CLV" class="num muted">—</td>`;
+      } else {
+        const cls = c >= 0 ? "pos" : "neg";
+        const sgn = c >= 0 ? "+" : "";
+        clvTd = `<td data-label="CLV" class="num ${cls}"><b>${sgn}${
+           c.toFixed(2)}%</b> <span class="muted">(${r.clv_captured})</span></td>`;
+      }
+    }
     return `<tr>
       <td data-label="Sport" class="cell-sport">${r.sport}</td>
       <td data-label="Picks" class="num">${r.picks}</td>
@@ -1189,12 +1299,13 @@ function renderBacktestBySport(rows) {
       <td data-label="W-L" class="num">${r.wins}-${r.losses}</td>
       <td data-label="WR" class="num">${wr}</td>
       <td data-label="ROI" class="num ${roiCls}"><b>${roiTxt}</b></td>
+      ${clvTd}
     </tr>`;
   }).join("");
   $("#bt-archive-by-sport-table").innerHTML = `
     <thead><tr>
       <th>Sport</th><th>Picks</th><th>Settled</th>
-      <th>W-L</th><th>WR</th><th>ROI</th>
+      <th>W-L</th><th>WR</th><th>ROI</th>${hasClv ? "<th>CLV</th>" : ""}
     </tr></thead>
     <tbody>${body}</tbody>`;
 }
@@ -1207,8 +1318,27 @@ function renderBacktestPicksTable(picks) {
     if (aSet !== bSet) return aSet - bSet;
     return (b.game_date || "").localeCompare(a.game_date || "");
   });
+  // Hide Close/CLV columns on legacy reports where nothing was ever
+  // captured — keeps the table visually clean.
+  const hasClv = picks.some((p) => typeof p.clv_pct === "number"
+                                 || (p.close_odds && p.close_odds !== ""));
   const rows = ordered.map((p) => {
     const ev  = Number(p.ev_pct ?? 0);
+    let clvTds = "";
+    if (hasClv) {
+      const closeStr = p.close_odds ? p.close_odds : "—";
+      const c = p.clv_pct;
+      let clvCell;
+      if (typeof c !== "number") {
+        clvCell = `<td data-label="CLV" class="num muted">—</td>`;
+      } else {
+        const cls = c > 0 ? "pos" : c < 0 ? "neg" : "";
+        const sgn = c >= 0 ? "+" : "";
+        clvCell = `<td data-label="CLV" class="num ${cls}"><b>${sgn}${
+           c.toFixed(2)}%</b></td>`;
+      }
+      clvTds = `<td data-label="Close" class="num">${closeStr}</td>${clvCell}`;
+    }
     return `<tr>
       <td data-label="Date" class="muted">${p.game_date || ""}</td>
       <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
@@ -1218,13 +1348,15 @@ function renderBacktestPicksTable(picks) {
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
       <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 1)}</td>
+      ${clvTds}
       ${resultCell(p)}
     </tr>`;
   }).join("");
+  const clvHeads = hasClv ? "<th>Close</th><th>CLV</th>" : "";
   $("#bt-archive-picks-table").innerHTML = `
     <thead><tr>
       <th>Date</th><th>Sport</th><th>Game</th><th>Book</th>
-      <th>Mkt</th><th>Pick</th><th>Odds</th><th>EV</th><th>Result</th>
+      <th>Mkt</th><th>Pick</th><th>Odds</th><th>EV</th>${clvHeads}<th>Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
