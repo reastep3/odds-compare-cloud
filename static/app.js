@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-07 v26 (Per-pick CLV column on the dashboard tables)";
+const BUILD = "2026-05-07 v27 (Close column next to Odds on dashboard tables)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -572,6 +572,7 @@ function renderDashboardTable(picks, userKellyFraction) {
       <td data-label="Book" class="${bookCls(p.book)}">${shortBook(p.book)}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      ${showClv ? closeCell(p) : ""}
       <td data-label="Stake" class="num stake-cell">${stakeCell}</td>
       <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${showClv ? clvCell(p) : ""}
@@ -581,7 +582,7 @@ function renderDashboardTable(picks, userKellyFraction) {
   return `<thead><tr>
     <th class="col-sport">Sport</th><th class="col-game">Game</th>
     <th class="col-book">Book</th><th>Pick</th>
-    <th class="num">Odds</th><th class="num">Stake</th>
+    <th class="num">Odds</th>${showClv ? '<th class="num">Close</th>' : ""}<th class="num">Stake</th>
     <th class="num">EV</th>${showClv ? '<th class="num">CLV</th>' : ""}<th class="col-result">Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
@@ -1006,6 +1007,15 @@ function clvCell(p) {
     c.toFixed(2)}%</b></td>`;
 }
 
+// Close-odds cell — captured closing line in American format. Travels
+// with CLV (same backend capture event), so visibility is gated on the
+// same hasAnyClv check that turns on the CLV column.
+function closeCell(p) {
+  const v = p.close_odds;
+  if (!v) return `<td data-label="Close" class="num muted">—</td>`;
+  return `<td data-label="Close" class="num">${v}</td>`;
+}
+
 function resultCell(p) {
   const r = p.result;
   if (!r) return `<td data-label="Result" class="muted">—</td>`;
@@ -1038,6 +1048,7 @@ function renderPlayTheseTable(picks) {
       <td data-label="Mkt">${p.market ?? ""}</td>
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
+      ${showClv ? closeCell(p) : ""}
       <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
       ${showClv ? clvCell(p) : ""}
       ${resultCell(p)}
@@ -1047,7 +1058,7 @@ function renderPlayTheseTable(picks) {
     <thead><tr>
       <th class="col-sport">Sport</th><th class="col-game">Game</th>
       <th class="col-book">Book</th><th class="col-mkt">Mkt</th>
-      <th>Pick</th><th class="num">Odds</th>
+      <th>Pick</th><th class="num">Odds</th>${showClv ? '<th class="num">Close</th>' : ""}
       <th class="num">EV</th>${showClv ? '<th class="num">CLV</th>' : ""}<th class="col-result">Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
