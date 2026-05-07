@@ -2452,14 +2452,22 @@ def _backtest_pick_key(pick: dict) -> str:
 def _stamp_clv(pick: dict, lookup: dict | None) -> None:
     """Attach close odds + CLV% to a pick if the close was captured.
     Always sets the four CLV fields (None when not captured) so xlsx
-    write code doesn't need to special-case missing keys."""
+    write code doesn't need to special-case missing keys.
+
+    Lookup is keyed by (game_date_yyyymmdd, pick_key) — date namespacing
+    prevents the same matchup on different days from cross-contaminating
+    (e.g., yesterday's NY Yankees ML close attaching to today's pick)."""
     pick["close_odds_american"] = None
     pick["close_implied_pct"]   = None
     pick["clv_pct"]             = None
     pick["clv_captured"]        = False
     if not lookup:
         return
-    close = lookup.get(_backtest_pick_key(pick))
+    game_date = pick.get("game_date")
+    if not game_date:
+        # No parseable game date — can't safely match across days.
+        return
+    close = lookup.get((game_date, _backtest_pick_key(pick)))
     if not close:
         return
     pick["close_odds_american"] = close.get("odds_american")

@@ -248,25 +248,44 @@ def _capture_close_for_pick(pick: dict, event_data: dict,
     return None
 
 
+def _game_date_yyyymmdd(commence_iso: str | None) -> str | None:
+    """Parse a commence ISO timestamp into a YYYYMMDD string in ET.
+
+    ET because that matches both the worker's day-rollover (the
+    pending_closes_<today_et>.json filename) and the backtest pick's
+    `game_date` derivation. Returns None if commence is missing or
+    unparseable, signalling "can't safely date-match this pick".
+    """
+    if not commence_iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(commence_iso.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt.astimezone(EASTERN).strftime("%Y%m%d")
+
+
 def load_closing_lines_for_dates(start_date, end_date,
                                    output_dir: str | None = None) -> dict:
     """
-    Load all captured closing-line records for backtest CLV computation.
+    Load all captured closing-line records for CLV stamping.
     Reads `pending_closes_YYYY-MM-DD.json` files whose ET date falls in
     [start_date - 1d, end_date + 1d] (the buffer absorbs scans that ran
     the day before / after the game's commence date).
 
-    Returns: dict[pick_key, close_record]. The pick_key is what
-    odds_compare._make_pick_key() produces; backtest.py uses an adapter
-    so picks read from xlsx generate the same key.
+    Returns: dict[(game_date_yyyymmdd, pick_key), close_record]. Date
+    namespacing is essential — `_make_pick_key()` excludes the game date
+    by design (a Yankees @ Rangers ML on 5/6 generates the same string
+    key as on 5/7), so without date prefixing yesterday's captured close
+    would silently attach to today's same-matchup pick.
 
-    Conflict resolution: when the same pick appears in multiple files
-    with captured closes, the **latest scan wins**. This implements the
-    user's "12 AM ET on game day = canonical open" mental model — the
-    latest scan before commence is always same-day-of-game, so its
-    `clv_pct` is computed against the desired open. (Across files the
-    close odds are identical; only the `clv_pct` differs because each
-    file's open is different.)
+    Conflict resolution: when the same (date, pick_key) tuple appears in
+    multiple files with captured closes, the **latest scan wins**. This
+    implements the user's "12 AM ET on game day = canonical open"
+    mental model — the latest scan before commence is always
+    same-day-of-game, so its `clv_pct` is computed against the desired
+    open. (Across files the close odds are identical; only the `clv_pct`
+    differs because each file's open is different.)
     """
     output_dir = output_dir or OUTPUT_DIR
 
@@ -280,7 +299,7 @@ def load_closing_lines_for_dates(start_date, end_date,
     scan_start = start_date - timedelta(days=1)
     scan_end   = end_date   + timedelta(days=1)
 
-    lookup: dict[str, dict] = {}
+    lookup: dict[tuple[str, str], dict] = {}
     days_span = (scan_end - scan_start).days
     for offset in range(days_span + 1):
         d = scan_start + timedelta(days=offset)
@@ -298,8 +317,13 @@ def load_closing_lines_for_dates(start_date, end_date,
             close = pick.get("close")
             if not close:
                 continue
+            game_date = _game_date_yyyymmdd(pick.get("commence"))
+            if not game_date:
+                # Without a parseable commence we can't safely
+                # disambiguate this entry across days — drop it.
+                continue
             # Latest scan wins (we iterate files in date order)
-            lookup[pick_key] = close
+            lookup[(game_date, pick_key)] = close
     return lookup
 
 
