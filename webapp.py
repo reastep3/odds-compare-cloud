@@ -927,12 +927,28 @@ def _load_archive_contents(path: str, name: str) -> dict[str, Any]:
     except Exception:
         kelly_fraction_runtime = 0.5
 
+    # Closing-line lookup — picks whose game has already hit its capture
+    # window will get close_odds_american + clv_pct stamped onto them by
+    # run_backtest. Range covers the file's date ± 1 day to absorb late
+    # games that crossed midnight ET. Empty dict if the file isn't present
+    # (legacy archive or no captures yet).
+    try:
+        from closing_lines import load_closing_lines_for_dates
+        clv_lookup = load_closing_lines_for_dates(
+            file_dt - timedelta(days=1), file_dt + timedelta(days=1))
+    except Exception as e:
+        log.warning(f"[archive] CLV lookup failed: {e}")
+        clv_lookup = {}
+
     # Grade everything against ESPN. all_ev is graded too so "All Plays"
-    # rows in the dashboard show their WIN/LOSS outcome.
-    play   = _safe_grade(play,   run_backtest,       "play_these")
-    all_ev = _safe_grade(all_ev, run_backtest,       "all_plays")
+    # rows in the dashboard show their WIN/LOSS outcome. Passing clv_lookup
+    # also stamps captured close odds + CLV % on each pick.
+    from functools import partial
+    _grade_with_clv = partial(run_backtest, closing_lines_lookup=clv_lookup)
+    play   = _safe_grade(play,   _grade_with_clv,    "play_these")
+    all_ev = _safe_grade(all_ev, _grade_with_clv,    "all_plays")
     promos = _safe_grade(promos, run_backtest_promo, "promo_picks")
-    props  = _safe_grade(props,  run_backtest,       "player_props")
+    props  = _safe_grade(props,  _grade_with_clv,    "player_props")
 
     # Sportsbook deep links — restored from the sidecar that odds_compare
     # writes alongside the xlsx. xlsx round-trip drops the bookmaker IDs
@@ -1157,6 +1173,12 @@ def _shape_archive_pick(p: dict[str, Any],
         kelly_pct = round(bet / bank * 100, 3)
     if kelly_pct is not None and kelly_fraction_runtime > 0:
         full_kelly_pct = round(kelly_pct / kelly_fraction_runtime, 3)
+    # Close odds — formatted with sign so frontend can render directly.
+    close_am = p.get("close_odds_american")
+    if isinstance(close_am, (int, float)):
+        close_str = f"+{int(close_am)}" if close_am > 0 else str(int(close_am))
+    else:
+        close_str = None
     return {
         "sport":      p.get("sport"),
         "game":       p.get("game"),
@@ -1173,6 +1195,12 @@ def _shape_archive_pick(p: dict[str, Any],
         "result":     p.get("result"),
         "unit_return_pct": _unit_return_pct(p),
         "deep_link":  _resolve_deep_link(p, book_links),
+        # Closing line value — stamped by run_backtest when the closing
+        # worker captured this pick. None for picks whose game hasn't
+        # hit the 5-min-pre-tip-off capture window yet, or AN-fallback
+        # picks (no Odds API event_id, so uncapturable).
+        "close_odds": close_str,
+        "clv_pct":    _round(p.get("clv_pct"), 2),
     }
 
 

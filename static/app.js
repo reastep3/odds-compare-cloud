@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-07 v25 (All Plays section gets W/L/ROI rollup)";
+const BUILD = "2026-05-07 v26 (Per-pick CLV column on the dashboard tables)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -542,6 +542,9 @@ function _esc(s) {
 // when the user has no bankroll set for that book, or when the archive
 // predates the full_kelly_pct field.
 function renderDashboardTable(picks, userKellyFraction) {
+  // Only show the CLV column when at least one pick has had its close
+  // captured — otherwise it's just a column of "—" before the first game.
+  const showClv = hasAnyClv(picks);
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
     const br = (p.full_kelly_pct != null)
@@ -571,6 +574,7 @@ function renderDashboardTable(picks, userKellyFraction) {
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
       <td data-label="Stake" class="num stake-cell">${stakeCell}</td>
       <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      ${showClv ? clvCell(p) : ""}
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -578,7 +582,7 @@ function renderDashboardTable(picks, userKellyFraction) {
     <th class="col-sport">Sport</th><th class="col-game">Game</th>
     <th class="col-book">Book</th><th>Pick</th>
     <th class="num">Odds</th><th class="num">Stake</th>
-    <th class="num">EV</th><th class="col-result">Result</th>
+    <th class="num">EV</th>${showClv ? '<th class="num">CLV</th>' : ""}<th class="col-result">Result</th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
 
@@ -982,6 +986,26 @@ function fmtBet(v) {
   return typeof v === "number" ? `$${v.toFixed(2)}` : "—";
 }
 
+// True if any pick in the list has a captured CLV %. Drives whether the
+// CLV column shows up at all — keeps tables tidy when no captures exist
+// yet (e.g., morning before the day's first close window).
+function hasAnyClv(picks) {
+  return picks.some((p) => typeof p.clv_pct === "number");
+}
+
+// CLV cell — green for positive (line moved your way), red for negative.
+// "—" for picks whose game hasn't hit the close-capture window yet.
+function clvCell(p) {
+  const c = p.clv_pct;
+  if (typeof c !== "number") {
+    return `<td data-label="CLV" class="num muted">—</td>`;
+  }
+  const cls = c > 0 ? "pos" : c < 0 ? "neg" : "";
+  const sgn = c >= 0 ? "+" : "";
+  return `<td data-label="CLV" class="num ${cls}"><b>${sgn}${
+    c.toFixed(2)}%</b></td>`;
+}
+
 function resultCell(p) {
   const r = p.result;
   if (!r) return `<td data-label="Result" class="muted">—</td>`;
@@ -1004,6 +1028,7 @@ function resultCell(p) {
 }
 
 function renderPlayTheseTable(picks) {
+  const showClv = hasAnyClv(picks);
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
     return `<tr>
@@ -1014,6 +1039,7 @@ function renderPlayTheseTable(picks) {
       <td data-label="Pick">${p.pick ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
       <td data-label="Odds" class="num">${fmtAmerican(p.odds)}</td>
       <td data-label="EV" class="num ${ev > 0 ? "pos" : ev < 0 ? "neg" : ""}">${fmtPct(ev, 2)}</td>
+      ${showClv ? clvCell(p) : ""}
       ${resultCell(p)}
     </tr>`;
   }).join("");
@@ -1022,7 +1048,7 @@ function renderPlayTheseTable(picks) {
       <th class="col-sport">Sport</th><th class="col-game">Game</th>
       <th class="col-book">Book</th><th class="col-mkt">Mkt</th>
       <th>Pick</th><th class="num">Odds</th>
-      <th class="num">EV</th><th class="col-result">Result</th>
+      <th class="num">EV</th>${showClv ? '<th class="num">CLV</th>' : ""}<th class="col-result">Result</th>
     </tr></thead>
     <tbody>${rows}</tbody>`;
 }
