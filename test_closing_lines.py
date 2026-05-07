@@ -291,7 +291,9 @@ def test_load_closes_returns_empty_when_no_files(tmp_path):
     assert lookup == {}
 
 def test_load_closes_includes_only_captured(tmp_path):
-    # Two picks in one file: one captured, one not
+    # Two picks in one file: one captured, one not. Note: lookup keys
+    # are (game_date_yyyymmdd, pick_key) — date is derived from each
+    # pick's commence in ET (May 5 22:00 UTC = May 5 18:00 ET).
     _write_pending_file(tmp_path, "2026-05-05", {
         "captured-key": {
             "commence": "2026-05-05T22:00:00Z",
@@ -304,13 +306,14 @@ def test_load_closes_includes_only_captured(tmp_path):
     })
     lookup = load_closing_lines_for_dates(
         "2026-05-05", "2026-05-05", str(tmp_path))
-    assert "captured-key" in lookup
-    assert "uncaptured-key" not in lookup
-    assert lookup["captured-key"]["clv_pct"] == 1.5
+    assert ("20260505", "captured-key") in lookup
+    assert ("20260505", "uncaptured-key") not in lookup
+    assert lookup[("20260505", "captured-key")]["clv_pct"] == 1.5
 
 def test_load_closes_latest_file_wins(tmp_path):
-    # Same pick in two files; user's mental model is "latest scan = canonical
-    # open", so the later file's close (with that scan's CLV) should win.
+    # Same pick (same date, same key) in two files; user's mental model
+    # is "latest scan = canonical open", so the later file's close (with
+    # that scan's CLV) should win.
     _write_pending_file(tmp_path, "2026-05-05", {
         "shared-key": {
             "commence": "2026-05-06T22:00:00Z",
@@ -326,7 +329,7 @@ def test_load_closes_latest_file_wins(tmp_path):
     lookup = load_closing_lines_for_dates(
         "2026-05-05", "2026-05-06", str(tmp_path))
     # 12 AM May 6 scan would write the May 6 file; its CLV (8.5%) wins.
-    assert lookup["shared-key"]["clv_pct"] == 8.5
+    assert lookup[("20260506", "shared-key")]["clv_pct"] == 8.5
 
 def test_load_closes_buffers_one_day_each_side(tmp_path):
     # Pick captured by a scan run the day BEFORE the requested window
@@ -339,7 +342,47 @@ def test_load_closes_buffers_one_day_each_side(tmp_path):
     })
     lookup = load_closing_lines_for_dates(
         "2026-05-05", "2026-05-05", str(tmp_path))
-    assert "early-scan-key" in lookup
+    assert ("20260505", "early-scan-key") in lookup
+
+def test_load_closes_no_cross_day_collision(tmp_path):
+    """Same matchup on consecutive days must NOT cross-contaminate.
+
+    Real bug seen 2026-05-07: NY Yankees ML on FD was captured at -174
+    on 5/6, the same matchup repeated 5/7 with no close yet. Without
+    date namespacing the 5/6 close attached to the 5/7 pick (visible
+    on the dashboard as a closing line for a game that hadn't started).
+    """
+    _write_pending_file(tmp_path, "2026-05-06", {
+        "yankees-fd-h2h": {
+            "commence": "2026-05-06T23:00:00Z",   # ET: May 6
+            "close":    {"odds_american": -174, "implied_pct": 63.5, "clv_pct": -2.0},
+        },
+    })
+    _write_pending_file(tmp_path, "2026-05-07", {
+        "yankees-fd-h2h": {
+            "commence": "2026-05-07T23:00:00Z",   # ET: May 7
+            "close":    None,                     # not captured yet
+        },
+    })
+    lookup = load_closing_lines_for_dates(
+        "2026-05-06", "2026-05-07", str(tmp_path))
+    # May 6 close stays bound to May 6
+    assert lookup[("20260506", "yankees-fd-h2h")]["clv_pct"] == -2.0
+    # May 7 has no captured close → must NOT inherit May 6's
+    assert ("20260507", "yankees-fd-h2h") not in lookup
+
+def test_load_closes_skips_picks_without_commence(tmp_path):
+    # A close without a parseable commence is dropped — without a date
+    # we can't safely match it to any specific game.
+    _write_pending_file(tmp_path, "2026-05-05", {
+        "no-commence": {
+            "commence": None,
+            "close": {"odds_american": -110, "implied_pct": 52.4, "clv_pct": 1.0},
+        },
+    })
+    lookup = load_closing_lines_for_dates(
+        "2026-05-05", "2026-05-05", str(tmp_path))
+    assert lookup == {}
 
 def test_load_closes_handles_corrupt_json(tmp_path):
     # Don't crash if a file has malformed JSON — log and continue
