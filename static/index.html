@@ -145,6 +145,10 @@
       <div class="card" id="dashboard-all-section" hidden>
         <h3>All Plays <span class="count" id="dashboard-all-count"></span></h3>
         <p class="muted">Every +EV edge found, including sub-threshold ones.</p>
+        <!-- W/L/ROI rollup over the broader pool — lets the user gauge
+             the value of the Play These filter at a glance. -->
+        <div class="summary-grid" id="dashboard-all-results"
+             style="margin-bottom:12px;"></div>
         <div class="table-wrap"><table id="dashboard-all-table"></table></div>
       </div>
 
