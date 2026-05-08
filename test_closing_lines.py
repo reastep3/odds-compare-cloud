@@ -251,8 +251,10 @@ def test_capture_finds_matching_outcome():
             }],
         }],
     }
-    rec = _capture_close_for_pick(pick, event_data, datetime.now(timezone.utc))
+    rec, reason = _capture_close_for_pick(
+        pick, event_data, datetime.now(timezone.utc))
     assert rec is not None
+    assert reason is None
     assert rec["odds_american"] == -150
 
 def test_capture_returns_none_when_book_missing():
@@ -268,16 +270,20 @@ def test_capture_returns_none_when_book_missing():
             }],
         }],
     }
-    assert _capture_close_for_pick(pick, event_data,
-                                    datetime.now(timezone.utc)) is None
+    rec, reason = _capture_close_for_pick(
+        pick, event_data, datetime.now(timezone.utc))
+    assert rec is None
+    assert reason is not None
 
 def test_capture_returns_none_for_unknown_book():
     pick = {"book": "BetMGM", "market": "h2h",  # not in BOOK_DISPLAY_TO_KEY
             "outcome": "Lakers", "point": None,
             "open_implied_pct": 55.0, "commence": "2099-01-01T00:00:00Z"}
     event_data = {"bookmakers": []}
-    assert _capture_close_for_pick(pick, event_data,
-                                    datetime.now(timezone.utc)) is None
+    rec, reason = _capture_close_for_pick(
+        pick, event_data, datetime.now(timezone.utc))
+    assert rec is None
+    assert reason is not None
 
 
 # ── _list_recent_pending_files ─────────────────────────────────────────

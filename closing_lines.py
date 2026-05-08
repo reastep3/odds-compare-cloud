@@ -42,8 +42,15 @@ log = logging.getLogger(__name__)
 # from now. We aim for the last few minutes pre-game — the standard
 # sportsbook-industry definition of the close. We don't fetch after
 # commence (negative lead) because in-play prices are not closing lines.
+#
+# 15-min ceiling tolerates schedule drift (tennis matches that start late
+# behind a long preceding match) and gives the worker enough retry windows
+# to recover from transient API or rate-limit failures. First-capture-wins
+# semantics still apply, so the typical successful capture is at the OUTER
+# edge of the window — accept a small accuracy hit on usually-fine picks
+# in exchange for catching the ones that were missing entirely.
 CAPTURE_LEAD_MINUTES_MIN = 0      # don't fetch after commence
-CAPTURE_LEAD_MINUTES_MAX = 5      # fetch up to 5 min before commence
+CAPTURE_LEAD_MINUTES_MAX = 15     # fetch up to 15 min before commence
 
 
 # Reverse map: internal market key → Odds API market key.
@@ -123,8 +130,12 @@ def _outcome_matches(pick: dict, outcome: dict, market_api: str) -> bool:
     if pick_point is not None:
         if api_point is None:
             return False
-        # Same 0.5-bucket tolerance as _make_pick_key uses
-        if abs(float(api_point) - float(pick_point)) > 0.25:
+        # Game lines tolerate a single half-line shift (7.5 → 8 etc.) so a
+        # totals/spread move between scan and close still produces a usable
+        # CLV; props stay strict because the player line IS the bet.
+        is_game_line = market_api in ("h2h", "spreads", "totals")
+        tol = 0.75 if is_game_line else 0.25
+        if abs(float(api_point) - float(pick_point)) > tol:
             return False
 
     name = (outcome.get("name") or "").strip()
@@ -230,30 +241,51 @@ def _build_close_record(pick: dict, outcome: dict, now_utc: datetime) -> dict:
 
 
 def _capture_close_for_pick(pick: dict, event_data: dict,
-                              now_utc: datetime) -> dict | None:
-    """Locate this pick's outcome in the event's odds payload; build close
-    record if found, else None."""
+                              now_utc: datetime
+                              ) -> tuple[dict | None, str | None]:
+    """Locate this pick's outcome in the event's odds payload.
+
+    Returns (close_record, None) on success, (None, reason) on miss. The
+    reason string identifies the specific failure (unknown book, market
+    not offered, no matching outcome) so future audits don't have to
+    infer why a pick wasn't captured."""
     market_internal = (pick.get("market") or "").lower()
     market_api = INTERNAL_TO_API_MARKET.get(market_internal, market_internal)
     book_key = BOOK_DISPLAY_TO_KEY.get(pick.get("book", ""))
     if not book_key:
-        return None
+        return None, f"unknown book mapping: {pick.get('book')!r}"
 
+    api_books = [bm.get("key") for bm in event_data.get("bookmakers", [])]
     for bm in event_data.get("bookmakers", []):
         if bm.get("key") != book_key:
             continue
+        api_markets = [mkt.get("key") for mkt in bm.get("markets", [])]
         for mkt in bm.get("markets", []):
             if mkt.get("key") != market_api:
                 continue
+            outcome_summary: list[str] = []
             for outcome in mkt.get("outcomes", []):
                 if not _outcome_matches(pick, outcome, market_api):
+                    nm = outcome.get("name")
+                    pt = outcome.get("point")
+                    desc = outcome.get("description")
+                    label = f"{nm}" + (f"@{pt}" if pt is not None else "")
+                    if desc:
+                        label = f"{desc}/{label}"
+                    outcome_summary.append(label)
                     continue
                 try:
                     int(outcome.get("price"))   # validate parseable
                 except (TypeError, ValueError):
-                    continue
-                return _build_close_record(pick, outcome, now_utc)
-    return None
+                    return None, f"unparseable price {outcome.get('price')!r}"
+                return _build_close_record(pick, outcome, now_utc), None
+            return None, (
+                f"no outcome match for {pick.get('outcome')!r} "
+                f"point={pick.get('point')!r}; api offered: {outcome_summary}")
+        return None, (
+            f"market {market_api!r} not offered by {book_key} at close "
+            f"(book had: {api_markets})")
+    return None, f"book {book_key!r} not in api response (had: {api_books})"
 
 
 def _game_date_yyyymmdd(commence_iso: str | None) -> str | None:
@@ -392,11 +424,17 @@ def capture_pending_closes(output_dir: str | None = None) -> dict:
                 continue
             for pick_key in batch["pick_keys"]:
                 pick = picks[pick_key]
-                close = _capture_close_for_pick(pick, event_data, now_utc)
+                close, reason = _capture_close_for_pick(
+                    pick, event_data, now_utc)
                 if close is not None:
                     pick["close"] = close
+                    pick.pop("last_no_match", None)
                     stats["captured"] += 1
                 else:
+                    pick["last_no_match"] = {
+                        "reason":      reason,
+                        "captured_at": now_utc.isoformat(),
+                    }
                     stats["no_match"] += 1
 
         _save_pending(path, payload)

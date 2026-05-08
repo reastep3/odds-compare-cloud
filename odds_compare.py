@@ -2074,16 +2074,24 @@ def _qualifies(e):
 def _qualifies_prop(e):
     """Return True if a player prop edge qualifies for 'Play These'.
 
+    Recalibrated 2026-05-08 with per-market non-Pinn thresholds. The
+    flat 3% gate from 2026-05-06 was too tight for MLB props — recent
+    runs detected only 1 PT-eligible total_bases or strikeout pick
+    across 3 scans, because consensus pricing on those markets is
+    tighter than NBA points so most edges sit in the 1–3% band. EV-tier
+    slice of the 30-day backtest (2026-04-06 → 05-06):
+
+      pts (NBA):    1–2% +0.2% / 2–3% -0.1% / 3–5% +10.8% / 5%+ +53.4%
+                    → 3% threshold correct, 1–3% bucket is breakeven.
+      strikeouts:   1–2% -1.0% / 2–3% +6.9% / 3–5% +25.6% / 5%+ +66.2%
+                    → drop to 2% to capture the +6.9% bucket.
+      total_bases:  1–2% +11.7% / 2–3% +32.7% / 3–5% -20.9% / 5%+ +100.6%
+                    → drop to 1.5% — both 1–2% and 2–3% are solidly
+                    profitable; the 3–5% dip is only 6 picks (noise).
+
     2026-05-06: added MLB total_bases + strikeouts after the grader
-    fixes made these markets visible for the first time. 30-day
-    backtest:
-      total_bases: +53.6% ROI (W34/L22 over 56 picks, 61% WR) —
-                   strongest single market in the report.
-      strikeouts:  +17.0% ROI (W31/L34 over 65 picks).
-      pts (NBA):   +8.0% ROI (W76/L65 over 170 picks) — already in.
-      reb/ast:     -21% / -16% — correctly stay excluded.
-    Same Pinn ≥1% / non-Pinn ≥3% threshold as NBA points; conservative
-    on a fresh-data market until we have a longer history.
+    fixes made these markets visible. Initial threshold was 3%;
+    recalibration above relaxes that.
 
     Calibrated 2026-04-12 against 149 settled NBA points picks:
       pts: 56% WR, +22.5% ROI this week (+9.1% lifetime) — profitable
@@ -2098,16 +2106,19 @@ def _qualifies_prop(e):
     if not _starts_within_days(e, MAX_PLAY_DAYS):
         return False
 
-    # Profitable counting-stat markets:
-    #   pts (NBA):         +9.1% ROI lifetime, +8.0% on the latest 30d
-    #   total_bases (MLB): +53.6% ROI on 56 picks (newly visible)
-    #   strikeouts (MLB):  +17.0% ROI on 65 picks (newly visible)
-    # No book-count gate — props often have only 1-2 reference books
-    # and are still profitable. Pinnacle bonus if available.
-    if mkt in ("pts", "total_bases", "strikeouts"):
-        if pinn and ev >= 1.0:
-            return True
+    # Pinn ≥1% gate is symmetric defence — Pinnacle props aren't wired
+    # in today, but if we ever blend them in the threshold's already
+    # set. Active path is the per-market non-Pinn gate below.
+    if pinn and ev >= 1.0 and mkt in ("pts", "total_bases", "strikeouts"):
+        return True
+
+    # Per-market non-Pinn thresholds — see EV-tier table in docstring.
+    if mkt == "pts":
         return ev >= 3.0
+    if mkt == "strikeouts":
+        return ev >= 2.0
+    if mkt == "total_bases":
+        return ev >= 1.5
 
     return False
 
@@ -2359,6 +2370,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
     play_edges = [e for e in edges if _qualifies(e)]
     if player_prop_edges:
         play_edges.extend(e for e in player_prop_edges if _qualifies_prop(e))
+    play_edges.sort(key=lambda e: e["ev_pct"], reverse=True)
 
     if play_edges:
         ws_play = wb.create_sheet("Play These")
@@ -6774,6 +6786,7 @@ def run_headless_finalize(fetched: dict,
     if play_props:
         print(f"  {len(play_props)} player prop(s) qualify for Play These")
         play_edges.extend(play_props)
+    play_edges.sort(key=lambda e: e["ev_pct"], reverse=True)
 
     promo_picks = compute_promo_picks(promo_pool, promos,
                                       extra_edges=player_prop_edges)
