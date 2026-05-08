@@ -1688,6 +1688,7 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
                   if _qualifies(e) and e["book"] in user_books]
     play_edges.extend(e for e in fetched["player_prop_edges"]
                       if _qualifies_prop(e) and e["book"] in user_books)
+    play_edges.sort(key=lambda e: e["ev_pct"], reverse=True)
 
     bankrolls = {}
     if "DraftKings" in user_books:
