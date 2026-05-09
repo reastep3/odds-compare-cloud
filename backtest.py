@@ -4163,14 +4163,44 @@ def weekly_digest_text(start_dt: date, end_dt: date) -> str:
     return "\n".join(lines)
 
 
+def _replay_pt_from_ev(ev_graded: list[dict]) -> list[dict]:
+    """Filter graded EV Edges through odds_compare._qualifies() (current rules).
+
+    Bridges the field-name differences between the backtest pick dict and the
+    live edge dict that _qualifies() expects: market is uppercased here but
+    lowercase in the live filter; pinnacle/num_books use different keys.
+    """
+    from odds_compare import _qualifies
+    out = []
+    for p in ev_graded:
+        adapted = {
+            "ev_pct":             p.get("ev_pct", 0.0),
+            "num_other_books":    p.get("num_books", 0),
+            "market":             (p.get("market") or "").lower(),
+            "sport":              p.get("sport", ""),
+            "pinnacle_anchored":  p.get("pinnacle", False),
+        }
+        if _qualifies(adapted):
+            out.append(p)
+    print(f"  → {len(out)} of {len(ev_graded)} picks pass current _qualifies()")
+    return out
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_full_backtest(start_dt: date, end_dt: date,
-                       an_only_mode: str = "exclude") -> dict:
+                       an_only_mode: str = "exclude",
+                       replay: bool = False) -> dict:
     """Load, grade, and write the full Excel backtest report.
 
     an_only_mode controls inclusion of _ANONLY archive files (see
     AN_ONLY_MODES). Default "exclude" keeps skill measurement clean.
+
+    replay: when True, the Play These subset is derived by re-applying the
+    *current* odds_compare._qualifies() filter to the historical EV Edges
+    pool, instead of reading each archive's frozen-at-write-time PT tab.
+    Use this to evaluate the live filter against history without ghost
+    picks from leagues/markets that have since been blocked.
 
     Returns a dict with:
         primary_picks      — graded EV Edges (or Play These fallback); drives Excel
@@ -4178,6 +4208,8 @@ def run_full_backtest(start_dt: date, end_dt: date,
         excel_path         — absolute path to the written .xlsx, or None if no picks
     """
     print(f"  AN-only sheets: {an_only_mode}")
+    if replay:
+        print("  Mode: REPLAY (PT subset = current _qualifies() applied to EV Edges)")
 
     # ── Closing-line lookup — built once for the whole date range ────────────
     # Reads pending_closes_*.json files seeded by every scan. Picks without
@@ -4203,14 +4235,23 @@ def run_full_backtest(start_dt: date, end_dt: date,
         print("  No EV Edges data found — falling back to Play These as primary.")
 
     # ── Play These (filtered subset) ──────────────────────────────────────────
-    print("\n─── Play These (filtered picks) ─────────────────────────")
-    picks  = load_archive_picks(start_dt, end_dt, an_only_mode)
-    graded = run_backtest(picks, clv_lookup) if picks else []
-    if graded:
-        pt_settled_list = analyze(graded, label="Play These (filtered)")
+    if replay:
+        print("\n─── Play These (REPLAYED with current filter) ───────────")
+        graded = _replay_pt_from_ev(ev_graded)
+        if graded:
+            pt_settled_list = analyze(graded, label="Play These (replayed)")
+        else:
+            pt_settled_list = []
+            print("  No picks pass current _qualifies().")
     else:
-        pt_settled_list = []
-        print("  No Play These picks found.")
+        print("\n─── Play These (filtered picks) ─────────────────────────")
+        picks  = load_archive_picks(start_dt, end_dt, an_only_mode)
+        graded = run_backtest(picks, clv_lookup) if picks else []
+        if graded:
+            pt_settled_list = analyze(graded, label="Play These (filtered)")
+        else:
+            pt_settled_list = []
+            print("  No Play These picks found.")
 
     if not ev_graded and not graded:
         print("\nNo picks found in the selected date range.")
@@ -4301,6 +4342,12 @@ def main():
               "exhausted and the bot fell back to Action Network "
               "(filename suffix _ANONLY). 'exclude' (default) skips them, "
               "'include' counts them, 'only' uses them exclusively."))
+    parser.add_argument(
+        "--replay", action="store_true",
+        help=("Replay history through the *current* odds_compare._qualifies() "
+              "filter instead of reading each archive's frozen-at-write-time "
+              "Play These tab. Use to evaluate live filter changes without "
+              "ghost picks from leagues/markets blocked after the fact."))
     args = parser.parse_args()
 
     print("=" * 62)
@@ -4322,7 +4369,8 @@ def main():
             print("No archive or ev_edges files found. Run odds_compare.py first.")
             return
 
-    run_full_backtest(start_dt, end_dt, an_only_mode=args.an_only)
+    run_full_backtest(start_dt, end_dt, an_only_mode=args.an_only,
+                      replay=args.replay)
 
 
 if __name__ == "__main__":

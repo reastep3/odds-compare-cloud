@@ -2139,16 +2139,19 @@ def _starts_within_days(e, max_days: int) -> bool:
         return True
 
 
-# European soccer leagues with consistently negative ROI across backtests.
+# Soccer leagues with consistently negative ROI across backtests.
 # 2026-05-06 (30d backtest, post grader-fix resolution lift):
 #   PT cohort by league — EPL -86%, BUNDESLIGA -70%, LIGUE1 -59%,
 #   EUROPA -100%, LALIGA -30%, SERIEA -17%, CHAMPIONS -14%. The two
 #   newly added (LIGUE1, SERIEA) match the broad-pool pattern that
 #   drove the original block list. MLS remains the only PT-eligible
 #   soccer league.
+# 2026-05-09 (30d backtest, broad-pool tail): LIGAMX 0/4 (-99% ROI),
+#   CONFERENCE 1/2 (-46% ROI). Same pattern as the European leagues —
+#   non-Pinnacle consensus pricing on second-tier soccer is unreliable.
 _BLOCKED_SOCCER = frozenset({
     "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA", "LALIGA",
-    "LIGUE1", "SERIEA",
+    "LIGUE1", "SERIEA", "LIGAMX", "CONFERENCE",
 })
 
 
@@ -2202,8 +2205,16 @@ def _qualifies(e):
 
     # H2H: MLB (+16.6% ROI broad, +26.4% lifetime) and MLS (+9.7% on 75 picks).
     # All other sports' H2H is blocked.
+    # MLB non-Pinn upper cap (2026-05-09): EV-tier slice of the 30d All Picks
+    # showed 2.5–3% at +22.7% ROI on 23 picks (the sweet spot), but every
+    # bucket ≥3% combined ran 1W/12L (-79% ROI) — classic stale-line trap on
+    # books moving early on lineup/weather news. Pinn anchors stay uncapped.
     if mkt == "h2h":
-        if sport in ("MLB", "MLS"):
+        if sport == "MLB":
+            if pinn and ev >= 1.0:
+                return True
+            return 2.5 <= ev <= 3.0
+        if sport == "MLS":
             if pinn and ev >= 1.0:
                 return True
             return ev >= 2.5
