@@ -1246,29 +1246,45 @@ def _shape_archive_prop(p: dict[str, Any]) -> dict[str, Any]:
 
 # ── Backtest archive viewer helpers ────────────────────────────────────
 
-def _read_bt_summary_tab(path: str) -> dict[str, Any]:
-    """Read the headline numbers from a backtest report's Summary tab.
+_BT_SUMMARY_LABEL_MAP = {
+    "Total Unique Picks":        "total_picks",
+    "Settled (W / L / P)":       "settled",
+    "Pending (future games)":    "pending",
+    "Pending":                   "pending",
+    "Manual / Unresolved":       "manual",
+    "Wins":                      "wins",
+    "Losses":                    "losses",
+    "Pushes":                    "pushes",
+    "Win Rate (excl. pushes)":   "win_rate",
+    "Total Wagered":             "total_wagered",
+    "Total P&L":                 "total_pnl",
+    "ROI":                       "roi",
+}
 
-    The writer (write_backtest_excel in backtest.py) lays out labels in
-    column A and values in column B. We label-match in the same way as
-    _read_summary_tab so the reader survives row reshuffles.
+_BT_PT_ANCHOR = "▶ PLAY THESE"
+
+
+def _empty_bt_summary() -> dict[str, Any]:
+    return {k: None for k in (
+        "generated", "date_range", "total_picks", "settled", "pending",
+        "manual", "wins", "losses", "pushes", "win_rate",
+        "total_wagered", "total_pnl", "roi",
+    )}
+
+
+def _read_bt_summary_tab(path: str) -> dict[str, Any]:
+    """Read both summary blocks from a backtest report's Summary tab.
+
+    The writer lays out two stat blocks under shared labels: an "All +EV
+    picks" block at the top, then a "▶ PLAY THESE (Filtered Picks)"
+    block lower down. Splits on the anchor row so each block's labels
+    don't collide.
+
+    Returns {"all_ev": {...}, "pt": {...}}. Either block may have all-None
+    values if absent from the file.
     """
     import openpyxl
-    out: dict[str, Any] = {
-        "generated":     None,
-        "date_range":    None,
-        "total_picks":   None,
-        "settled":       None,
-        "pending":       None,
-        "manual":        None,
-        "wins":          None,
-        "losses":        None,
-        "pushes":        None,
-        "win_rate":      None,
-        "total_wagered": None,
-        "total_pnl":     None,
-        "roi":           None,
-    }
+    out = {"all_ev": _empty_bt_summary(), "pt": _empty_bt_summary()}
     try:
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     except Exception:
@@ -1281,32 +1297,79 @@ def _read_bt_summary_tab(path: str) -> dict[str, Any]:
     def _at(addr: str) -> Any:
         return ws[addr].value
 
-    out["date_range"] = _at("A2")
-    out["generated"]  = _at("A3")
+    out["all_ev"]["date_range"] = _at("A2")
+    out["all_ev"]["generated"]  = _at("A3")
+    out["pt"]["date_range"]     = out["all_ev"]["date_range"]
+    out["pt"]["generated"]      = out["all_ev"]["generated"]
 
-    label_map = {
-        "Total Unique Picks":        "total_picks",
-        "Settled (W / L / P)":       "settled",
-        "Pending (future games)":    "pending",
-        "Manual / Unresolved":       "manual",
-        "Wins":                      "wins",
-        "Losses":                    "losses",
-        "Pushes":                    "pushes",
-        "Win Rate (excl. pushes)":   "win_rate",
-        "Total Wagered":             "total_wagered",
-        "Total P&L":                 "total_pnl",
-        "ROI":                       "roi",
-    }
-    for r in range(2, 25):
+    section = "all_ev"
+    for r in range(2, 120):
         a = _at(f"A{r}")
         if not isinstance(a, str):
             continue
         a = a.strip()
-        if a in label_map:
-            out[label_map[a]] = _at(f"B{r}")
+        if _BT_PT_ANCHOR in a:
+            section = "pt"
+            continue
+        if a in _BT_SUMMARY_LABEL_MAP:
+            out[section][_BT_SUMMARY_LABEL_MAP[a]] = _at(f"B{r}")
 
     wb.close()
     return out
+
+
+def _read_bt_pt_by_sport(path: str) -> list[dict[str, Any]]:
+    """Read the "PT By Sport" tab into the same shape as the computed
+    by_sport breakdown so it can drop into the API response directly.
+
+    Returns [] if the tab is missing (older reports). Skips the TOTAL row.
+    """
+    import openpyxl
+    if not os.path.isfile(path):
+        return []
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return []
+    if "PT By Sport" not in wb.sheetnames:
+        wb.close()
+        return []
+    ws = wb["PT By Sport"]
+    rows: list[dict[str, Any]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[0] is None:
+            continue
+        sport = str(row[0]).strip()
+        if sport.upper() == "TOTAL":
+            continue
+        try:
+            picks_n   = int(row[1]) if row[1] is not None else 0
+            settled_n = int(row[2]) if row[2] is not None else 0
+            wins      = int(row[3]) if row[3] is not None else 0
+            losses    = int(row[4]) if row[4] is not None else 0
+        except (TypeError, ValueError):
+            continue
+        wr_raw  = row[6] if len(row) > 6 else None
+        roi_raw = row[9] if len(row) > 9 else None
+        win_rate = (round(wr_raw  * 100, 1)
+                    if isinstance(wr_raw,  (int, float)) else None)
+        roi_pct  = (round(roi_raw * 100, 2)
+                    if isinstance(roi_raw, (int, float)) else None)
+        decided = wins + losses
+        rows.append({
+            "sport":         sport,
+            "picks":         picks_n,
+            "settled":       settled_n,
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      win_rate if decided else None,
+            "roi_pct":       roi_pct,
+            "avg_clv_pct":   None,
+            "clv_captured":  0,
+        })
+    wb.close()
+    rows.sort(key=lambda x: (x["roi_pct"] is None, -(x["roi_pct"] or 0)))
+    return rows
 
 
 def _read_bt_all_picks(path: str) -> list[dict[str, Any]]:
@@ -1530,19 +1593,25 @@ def _summarize_clv_today(output_dir: str) -> dict[str, Any]:
 def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
     """Read a backtest report's Summary + All Picks tabs into JSON.
 
+    Headline numbers (summary, by_sport) come from the Play These slice —
+    that's what the bot actually recommends, so it's the meaningful read
+    of the bot's edge. The All +EV slice (every detected pick, including
+    filter-rejects) is exposed alongside as `summary_all_ev` and
+    `by_sport_all_ev` for drill-down. Old reports without a PT block
+    fall back to All +EV as the headline.
+
     No re-grading — results are read straight from the file as written.
     """
-    summary = _read_bt_summary_tab(path)
+    summary_blocks = _read_bt_summary_tab(path)
     picks   = _read_bt_all_picks(path)
     start_d, end_d = _bt_dates_from_name(name)
 
-    by_sport: dict[str, list] = {}
-    for p in picks:
-        sport = (p.get("sport") or "").upper() or "OTHER"
-        by_sport.setdefault(sport, []).append(p)
-
-    sport_breakdown = []
-    for sport, sg in sorted(by_sport.items()):
+    by_sport_all_ev = []
+    for sport, sg in sorted(
+        {((p.get("sport") or "").upper() or "OTHER"): None for p in picks}.items()
+    ):
+        sg = [p for p in picks
+              if ((p.get("sport") or "").upper() or "OTHER") == sport]
         settled = [x for x in sg
                     if (x.get("result") or "") in ("WIN", "LOSS", "PUSH")]
         wins = sum(1 for x in settled if x["result"] == "WIN")
@@ -1552,7 +1621,7 @@ def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
         roi  = (pnl / bet * 100) if bet else 0
         decided = wins + loss
         avg_clv_pct, clv_n = _avg_clv(settled)
-        sport_breakdown.append({
+        by_sport_all_ev.append({
             "sport":            sport,
             "picks":            len(sg),
             "settled":          len(settled),
@@ -1563,26 +1632,42 @@ def _load_backtest_contents(path: str, name: str) -> dict[str, Any]:
             "avg_clv_pct":      avg_clv_pct,
             "clv_captured":     clv_n,
         })
-    sport_breakdown.sort(key=lambda x: (x["roi_pct"] is None,
+    by_sport_all_ev.sort(key=lambda x: (x["roi_pct"] is None,
                                          -(x["roi_pct"] or 0)))
 
     settled_all = [p for p in picks
                    if (p.get("result") or "") in ("WIN", "LOSS", "PUSH")]
     avg_clv_pct, clv_captured_count = _avg_clv(settled_all)
-    summary_shaped = _shape_bt_summary(summary)
-    # The xlsx Summary tab writes Avg CLV % as a formatted string that's
-    # awkward to round-trip. Re-derive from picks for a clean numeric we
-    # can render in tiles + sort/colour against.
-    summary_shaped["avg_clv_pct"]   = avg_clv_pct
-    summary_shaped["clv_captured"] = clv_captured_count
+
+    summary_all_ev = _shape_bt_summary(summary_blocks["all_ev"])
+    # Avg CLV is re-derived from picks (the xlsx writes it as a formatted
+    # string awkward to round-trip). Only the All +EV slice has a CLV
+    # figure today — PT-only CLV would need PT-tagged picks, which the
+    # report doesn't store. So PT headlines render without a CLV cell;
+    # the All +EV drill-down keeps it.
+    summary_all_ev["avg_clv_pct"]   = avg_clv_pct
+    summary_all_ev["clv_captured"]  = clv_captured_count
+
+    summary_pt = _shape_bt_summary(summary_blocks["pt"])
+    summary_pt["avg_clv_pct"]  = None
+    summary_pt["clv_captured"] = 0
+
+    by_sport_pt = _read_bt_pt_by_sport(path)
+
+    has_pt = summary_pt.get("settled") is not None
+    headline_summary = summary_pt if has_pt else summary_all_ev
+    headline_by_sport = by_sport_pt if has_pt and by_sport_pt else by_sport_all_ev
 
     return {
         "name":  name,
         "start": start_d.isoformat() if start_d else None,
         "end":   end_d.isoformat()   if end_d   else None,
-        "summary": summary_shaped,
-        "picks":   [_shape_bt_pick(p) for p in picks],
-        "by_sport": sport_breakdown,
+        "summary":          headline_summary,
+        "summary_all_ev":   summary_all_ev,
+        "picks":            [_shape_bt_pick(p) for p in picks],
+        "by_sport":         headline_by_sport,
+        "by_sport_all_ev":  by_sport_all_ev,
+        "headline_source":  "play_these" if has_pt else "all_ev",
         "counts": {
             "total":   len(picks),
             "settled": len(settled_all),
