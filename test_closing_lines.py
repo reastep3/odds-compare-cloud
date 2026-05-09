@@ -22,6 +22,7 @@ from closing_lines import (
     compute_clv_pct,
     load_closing_lines_for_dates,
 )
+from odds_compare import EASTERN
 
 
 # ── compute_clv_pct ────────────────────────────────────────────────────
@@ -307,8 +308,9 @@ def test_capture_returns_none_for_unknown_book():
 # ── _list_recent_pending_files ─────────────────────────────────────────
 
 def test_list_recent_returns_existing_only(tmp_path):
-    from datetime import date
-    today = date.today().isoformat()
+    # _list_recent_pending_files defines "today" as the ET date, so the
+    # test must too — otherwise it flakes on UTC runners around midnight ET.
+    today = datetime.now(EASTERN).date().isoformat()
     p_today = tmp_path / f"pending_closes_{today}.json"
     p_today.write_text("{}")
     p_other = tmp_path / "pending_closes_2020-01-01.json"
