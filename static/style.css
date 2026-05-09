@@ -39,7 +39,25 @@ header {
   position: sticky; top: 0;
   background: var(--bg); z-index: 10;
 }
-.brand { font-weight: 700; font-size: 18px; letter-spacing: 0.5px; }
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 18px; letter-spacing: 0.5px;
+}
+.brand-logo { height: 28px; width: 28px; display: block; }
+
+.login-card { text-align: center; max-width: 380px; margin: 40px auto; }
+.login-logo {
+  display: block; width: 96px; height: 96px;
+  margin: 4px auto 12px;
+}
+.login-card .login-title {
+  margin: 0; font-size: 32px; letter-spacing: 1px;
+}
+.login-card .login-tagline {
+  margin: 2px 0 16px; color: var(--muted); font-size: 13px;
+  letter-spacing: 1.5px; text-transform: uppercase;
+}
+.login-card form { text-align: left; margin-top: 8px; }
 
 .screen { padding: 16px; max-width: 2600px; margin: 0 auto; }
 .screen[hidden] { display: none; }
