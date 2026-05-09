@@ -12,23 +12,29 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Arbyx">
   <link rel="manifest" href="/manifest.json">
-  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/icon-192.png" type="image/png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=23">
+  <link rel="stylesheet" href="/static/style.css?v=24">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
   <header>
-    <div class="brand">⚡ Arbyx</div>
+    <div class="brand">
+      <img src="/static/logo-icon.png?v=24" alt="" class="brand-logo">
+      <span>Arbyx</span>
+    </div>
     <button id="logout-btn" class="ghost-btn" hidden>Sign out</button>
   </header>
 
   <!-- Login screen — toggles between Sign in / Sign up -->
   <section id="login" class="screen">
-    <div class="card">
+    <div class="card login-card">
+      <img src="/static/logo-icon.png?v=24" alt="Arbyx" class="login-logo">
+      <h1 class="login-title">Arbyx</h1>
+      <p class="login-tagline">+EV Edge Finder</p>
       <!-- Toggle between sign-in and sign-up modes -->
       <div class="sub-toggle">
         <button data-auth-mode="login" class="active">Sign in</button>
@@ -393,6 +399,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=23"></script>
+  <script src="/static/app.js?v=24"></script>
 </body>
 </html>
