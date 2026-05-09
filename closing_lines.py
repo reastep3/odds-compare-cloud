@@ -29,6 +29,7 @@ from bot_config import ODDS_API_KEY
 from odds_compare import (
     ODDS_API_BASE,
     ODDS_API_BOOKMAKERS,
+    ODDS_API_FIRST_INNING_MARKETS,
     ODDS_API_PROP_MARKETS,
     OUTPUT_DIR,
     EASTERN,
@@ -55,13 +56,24 @@ CAPTURE_LEAD_MINUTES_MAX = 15     # fetch up to 15 min before commence
 
 # Reverse map: internal market key → Odds API market key.
 # h2h/spreads/totals are passed through unchanged. Prop keys come from
-# ODDS_API_PROP_MARKETS in odds_compare.py.
+# ODDS_API_PROP_MARKETS, first-inning keys from ODDS_API_FIRST_INNING_MARKETS.
 INTERNAL_TO_API_MARKET: dict[str, str] = {
     "h2h": "h2h", "spreads": "spreads", "totals": "totals",
 }
 for _sport_markets in ODDS_API_PROP_MARKETS.values():
     for _api_key, _internal_key, _display in _sport_markets:
         INTERNAL_TO_API_MARKET[_internal_key] = _api_key
+for _sport_markets in ODDS_API_FIRST_INNING_MARKETS.values():
+    for _api_key, _internal_key, _display in _sport_markets:
+        INTERNAL_TO_API_MARKET[_internal_key] = _api_key
+
+# Markets whose outcome.name is "Over"/"Under" or a team name — i.e. they
+# share the team-or-side matching path rather than the player-prop path.
+# Includes first-inning totals (totals_1st_1_innings) since they're a
+# straight Over/Under just like full-game totals.
+_GAME_LINE_API_MARKETS = frozenset({
+    "h2h", "spreads", "totals", "totals_1st_1_innings",
+})
 
 
 # Display-name → Odds API canonical book key.
@@ -133,7 +145,7 @@ def _outcome_matches(pick: dict, outcome: dict, market_api: str) -> bool:
         # Game lines tolerate a single half-line shift (7.5 → 8 etc.) so a
         # totals/spread move between scan and close still produces a usable
         # CLV; props stay strict because the player line IS the bet.
-        is_game_line = market_api in ("h2h", "spreads", "totals")
+        is_game_line = market_api in _GAME_LINE_API_MARKETS
         tol = 0.75 if is_game_line else 0.25
         if abs(float(api_point) - float(pick_point)) > tol:
             return False
@@ -142,7 +154,7 @@ def _outcome_matches(pick: dict, outcome: dict, market_api: str) -> bool:
     desc = (outcome.get("description") or "").strip()
 
     # Game lines: outcome.name is the team name (h2h/spreads) or "Over"/"Under" (totals)
-    if market_api in ("h2h", "spreads", "totals"):
+    if market_api in _GAME_LINE_API_MARKETS:
         return name.lower() == pick_outcome.lower()
 
     # Player props: pick_outcome is "{player} O/U" (or Y/N for binary).

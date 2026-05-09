@@ -200,6 +200,27 @@ PROMO_MARKET_KEYWORDS = {
     "pra": "pra",
     "dd": "dd", "doubledouble": "dd",
     "sog": "sog", "shotsongoal": "sog",
+    # First-inning total runs (MLB) — used for FanDuel "First Inning Friday"
+    # and similar promos. Single-token forms; multi-token "first inning" is
+    # caught by PROMO_MARKET_PHRASES below.
+    "1st_inning": "totals_1st", "first_inning": "totals_1st",
+    "first-inning": "totals_1st", "1st-inning": "totals_1st",
+    "firstinning": "totals_1st", "1stinning": "totals_1st",
+    "f1": "totals_1st",
+}
+
+# Two-word market phrases checked with one-token lookahead. Mirrors the
+# PROMO_SPORT_PHRASES pattern so the user can type "fd 50% first inning mlb"
+# or "fd 50% 1st inning mlb" naturally.
+PROMO_MARKET_PHRASES = {
+    "first inning": "totals_1st",
+    "1st inning":   "totals_1st",
+}
+
+# Display labels for non-trivial market keys. Markets not listed here fall
+# back to mkt.capitalize() in the promo label builder.
+PROMO_MARKET_DISPLAY = {
+    "totals_1st": "1st Inning",
 }
 
 # Natural-language filler tokens that carry no semantic weight for the
@@ -281,6 +302,11 @@ def parse_promo(text: str) -> dict | None:
             two_word = f"{tok} {rest[i + 1]}"
             if two_word in PROMO_SPORT_PHRASES:
                 promo["sport"] = PROMO_SPORT_PHRASES[two_word]
+                i += 2
+                continue
+            # Two-word market phrase (e.g. "first inning", "1st inning")
+            if two_word in PROMO_MARKET_PHRASES:
+                promo["market"] = PROMO_MARKET_PHRASES[two_word]
                 i += 2
                 continue
 
@@ -430,7 +456,9 @@ def parse_promo(text: str) -> dict | None:
     if promo["sport"] != "all":
         parts.append(f"/ {promo['sport'].upper()}")
     if promo["market"] != "all":
-        parts.append(f"/ {promo['market'].capitalize()}")
+        mkt_label = PROMO_MARKET_DISPLAY.get(
+            promo["market"], promo["market"].capitalize())
+        parts.append(f"/ {mkt_label}")
     if promo["min_odds"] is not None:
         parts.append(f"(min {promo['min_odds']:+d})")
     if promo["max_bet"] is not None:
@@ -678,7 +706,7 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
         pt = _format_point(edge.get("point"), edge.get("market", ""))
         if pt:
             pick_str += f" {pt}"
-        elif edge.get("market", "").lower() in ("spreads", "totals"):
+        elif edge.get("market", "").lower() in ("spreads", "totals", "totals_1st"):
             log.warning(
                 "Promo pick on %s/%s has no point: %r",
                 edge.get("market"), edge.get("game"), edge)
