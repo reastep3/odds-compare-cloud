@@ -244,6 +244,18 @@ ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
+# First-inning / partial-game markets per sport. Like props, these are
+# alternate markets only available on the per-event endpoint (sport-level
+# returns 422). Promo-only — bypass _qualifies(), flow into promo_pool so
+# the FanDuel "First Inning Friday" 50% boost (and similar) can pick them.
+ODDS_API_FIRST_INNING_MARKETS: dict[str, list[tuple[str, str, str]]] = {
+    # (api_market_key, internal_market_key, display_name)
+    "mlb": [
+        ("totals_1st_1_innings", "totals_1st", "1st Inning Total"),
+    ],
+}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Pinnacle config
 # ──────────────────────────────────────────────────────────────────────
@@ -693,6 +705,138 @@ def fetch_odds_api_props(sport: str) -> list[dict]:
     print(f"  [OddsAPI Props/{sport.upper()}] {len(raw)} raw lines "
           f"from {len(event_list)} events (quota: {remaining} left)")
     return raw
+
+
+def fetch_odds_api_first_inning(sport: str) -> list[dict]:
+    """
+    Fetch first-inning (and other partial-game) markets from The Odds API.
+
+    Per-event call pattern (same as props): one /events list call (free),
+    then one /events/{id}/odds call per event for the alternate market(s)
+    listed in ODDS_API_FIRST_INNING_MARKETS[sport]. Pinnacle is included
+    in the bookmaker request, so the sharp anchor comes through the same
+    response — no separate Pinnacle period-1 fetch needed.
+
+    Returns event dicts in the standard internal format (compatible with
+    _inject_book_events), where each bookmaker's markets list keys the
+    market with the internal key (e.g. "totals_1st") rather than the
+    Odds API key, so find_edges treats them as a regular Over/Under market.
+    """
+    from bot_config import ODDS_API_KEY
+
+    fi_markets = ODDS_API_FIRST_INNING_MARKETS.get(sport)
+    if not fi_markets:
+        return []
+
+    api_sport = ODDS_API_SPORTS.get(sport)
+    if not api_sport:
+        return []
+    if isinstance(api_sport, list):
+        api_sport = api_sport[0]
+
+    api_market_keys = ",".join(m[0] for m in fi_markets)
+    market_map = {m[0]: m[1] for m in fi_markets}  # api_key -> internal_key
+
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{api_sport}/events",
+            params={"apiKey": ODDS_API_KEY},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events HTTP {r.status_code}")
+            return []
+        event_list = r.json()
+    except Exception as e:
+        print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events error: {e}")
+        return []
+
+    if not event_list:
+        return []
+
+    events_out: list[dict] = []
+    remaining = "?"
+    for ev_info in event_list:
+        eid = ev_info.get("id")
+        away = ev_info.get("away_team", "")
+        home = ev_info.get("home_team", "")
+        commence = ev_info.get("commence_time", "")
+        if not (eid and away and home):
+            continue
+
+        try:
+            r2 = requests.get(
+                f"{ODDS_API_BASE}/sports/{api_sport}/events/{eid}/odds",
+                params={
+                    "apiKey":      ODDS_API_KEY,
+                    "regions":     "us",
+                    "markets":     api_market_keys,
+                    "oddsFormat":  "american",
+                    "bookmakers":  ODDS_API_BOOKMAKERS,
+                },
+                timeout=15,
+            )
+            remaining = r2.headers.get("x-requests-remaining", remaining)
+            if r2.status_code != 200:
+                continue
+            ev_data = r2.json()
+        except Exception:
+            continue
+
+        bookmakers_out: list[dict] = []
+        for bm in ev_data.get("bookmakers", []):
+            book_key = bm.get("key", "")
+            markets_out: list[dict] = []
+            for mkt in bm.get("markets", []):
+                internal_key = market_map.get(mkt.get("key", ""))
+                if not internal_key:
+                    continue
+                outcomes_out = []
+                for oc in mkt.get("outcomes", []):
+                    raw_name = (oc.get("name") or "").lower()
+                    if raw_name not in ("over", "under"):
+                        continue
+                    try:
+                        price = int(oc.get("price"))
+                    except (ValueError, TypeError):
+                        continue
+                    point = oc.get("point")
+                    try:
+                        point = float(point) if point is not None else None
+                    except (ValueError, TypeError):
+                        point = None
+                    outcomes_out.append({
+                        "name":  "Over" if raw_name == "over" else "Under",
+                        "price": price,
+                        "point": point,
+                    })
+                if len(outcomes_out) == 2:
+                    markets_out.append({
+                        "key":      internal_key,
+                        "outcomes": outcomes_out,
+                    })
+            if markets_out:
+                bookmakers_out.append({
+                    "key":     book_key,
+                    "markets": markets_out,
+                    "source":  "api",
+                })
+
+        if bookmakers_out:
+            events_out.append({
+                "commence_time": commence,
+                "home_team":     home,
+                "away_team":     away,
+                "sport_title":   sport.upper(),
+                "bookmakers":    bookmakers_out,
+                "id":            eid,
+                "sport_key":     api_sport,
+            })
+        time.sleep(0.05)
+
+    print(f"  [OddsAPI 1st-Inn/{sport.upper()}] {len(events_out)}/{len(event_list)} "
+          f"events with first-inning markets (quota: {remaining} left)")
+    return events_out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1559,6 +1703,17 @@ def _fetch_sport_all(sport: str) -> tuple[str, list[dict], int, int, str]:
 
     if not events:
         return sport.upper(), [], 0, 0, source
+
+    # ── First-inning / partial-game markets ──────────────────────────────
+    # Promo-only feed (FanDuel "First Inning Friday" etc.). MLB only today.
+    # Skipped on AN fallback — these markets are Odds-API-exclusive.
+    if source == "api" and sport in ODDS_API_FIRST_INNING_MARKETS:
+        try:
+            fi_events = fetch_odds_api_first_inning(sport)
+            if fi_events:
+                events, _ = _inject_book_events(events, fi_events)
+        except Exception as e:
+            print(f"  [OddsAPI 1st-Inn/{sport}] error: {e}")
 
     # Count Pinnacle coverage for diagnostics
     pinn_ct = sum(1 for ev in events

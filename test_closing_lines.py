@@ -67,6 +67,11 @@ def test_market_map_resolves_nba_pts_prop():
 def test_market_map_resolves_mlb_strikeouts():
     assert INTERNAL_TO_API_MARKET["strikeouts"] == "pitcher_strikeouts"
 
+def test_market_map_resolves_first_inning_total():
+    # First-inning O/U flows through the same closing-line path as a
+    # full-game total — promo-only feed but still CLV-tracked when +EV.
+    assert INTERNAL_TO_API_MARKET["totals_1st"] == "totals_1st_1_innings"
+
 
 # ── BOOK_DISPLAY_TO_KEY ────────────────────────────────────────────────
 
@@ -142,6 +147,19 @@ def test_match_within_quarter_point_tolerance():
     pick = {"outcome": "Over", "point": 220.5}
     api_outcome = {"name": "Over", "point": 220.5 + 0.2, "price": -108}
     assert _outcome_matches(pick, api_outcome, "totals") is True
+
+def test_match_first_inning_total_over():
+    # Same Over/Under shape as full-game totals; market_api is the Odds
+    # API key (totals_1st_1_innings), which closing-line lookup resolves
+    # via INTERNAL_TO_API_MARKET.
+    pick = {"outcome": "Over", "point": 0.5}
+    api_outcome = {"name": "Over", "point": 0.5, "price": -120}
+    assert _outcome_matches(pick, api_outcome, "totals_1st_1_innings") is True
+
+def test_match_first_inning_total_rejects_wrong_side():
+    pick = {"outcome": "Over", "point": 0.5}
+    api_outcome = {"name": "Under", "point": 0.5, "price": +100}
+    assert _outcome_matches(pick, api_outcome, "totals_1st_1_innings") is False
 
 
 # ── _outcome_matches: player props ─────────────────────────────────────
