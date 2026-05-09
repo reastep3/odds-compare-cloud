@@ -561,7 +561,8 @@ def build_app() -> FastAPI:
         """Body:
             { "start": "YYYY-MM-DD",
               "end":   "YYYY-MM-DD",
-              "an_only_mode": "exclude" | "include" | "only" }
+              "an_only_mode": "exclude" | "include" | "only",
+              "replay": bool }
         """
         try:
             body = await req.json()
@@ -581,11 +582,14 @@ def build_app() -> FastAPI:
         if an_mode not in ("exclude", "include", "only"):
             an_mode = "exclude"
 
+        replay = bool(body.get("replay", False))
+
         import asyncio
         from backtest import run_full_backtest
 
         def _do_bt() -> dict[str, Any]:
-            return run_full_backtest(start_dt, end_dt, an_only_mode=an_mode)
+            return run_full_backtest(start_dt, end_dt, an_only_mode=an_mode,
+                                      replay=replay)
 
         result = await asyncio.to_thread(_do_bt)
         return _shape_backtest_result(result, start_dt, end_dt)
