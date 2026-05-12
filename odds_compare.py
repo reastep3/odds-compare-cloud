@@ -4467,28 +4467,38 @@ def find_hr_edges(hr_props: list[dict]) -> list[dict]:
 
         for display, dec, am, bid in best_target.values():
             ev = calc_ev(fair_prob, dec)
-            # Lower EV threshold for HR props (boost makes them valuable)
-            if ev >= -5.0:  # include slightly -EV since boost can flip them
-                kelly = kelly_bet(fair_prob, dec)
-                edges.append({
-                    "sport":           prop["sport"],
-                    "game":            prop["game"],
-                    "commence":        prop["commence"],
-                    "book":            display,
-                    "market":          "hr",
-                    "outcome":         prop["player"],
-                    "point":           None,
-                    "odds_american":   am,
-                    "odds_decimal":    round(dec, 3),
-                    "fair_prob":       round(fair_prob * 100, 1),
-                    "implied_prob":    round(decimal_to_implied_prob(dec) * 100, 1),
-                    "ev_pct":          round(ev, 2),
-                    "kelly_pct":       round(kelly * 100, 2),
-                    "num_other_books": len(other_entries),
-                    "best_other_odds": format_american(best_other_dec),
-                    "pinnacle_anchored": False,
-                    "all_book_odds":   all_book_display,
-                })
+            # No pre-boost EV gate. HR edges feed two consumers:
+            #   1. _build_hr_boost_rows (HR Props tab) — applies its own
+            #      `boosted_ev < 0.5` filter, so trash never appears there.
+            #   2. _build_promo_picks (Play These / Telegram) — ranks by
+            #      *boosted* EV with a least-bad fallback when nothing
+            #      clears MIN_EV_PERCENT, so a 30%+ HR boost can lift
+            #      an underdog with raw EV of -20% or worse into playable
+            #      territory. Gating raw EV here would empty the pool
+            #      for that promo and force the "No outcomes match"
+            #      diagnostic instead of surfacing the best available.
+            # fair_prob is already clamped to [0.02, 0.60] above, so we
+            # can't admit pathological long-shots.
+            kelly = kelly_bet(fair_prob, dec)
+            edges.append({
+                "sport":           prop["sport"],
+                "game":            prop["game"],
+                "commence":        prop["commence"],
+                "book":            display,
+                "market":          "hr",
+                "outcome":         prop["player"],
+                "point":           None,
+                "odds_american":   am,
+                "odds_decimal":    round(dec, 3),
+                "fair_prob":       round(fair_prob * 100, 1),
+                "implied_prob":    round(decimal_to_implied_prob(dec) * 100, 1),
+                "ev_pct":          round(ev, 2),
+                "kelly_pct":       round(kelly * 100, 2),
+                "num_other_books": len(other_entries),
+                "best_other_odds": format_american(best_other_dec),
+                "pinnacle_anchored": False,
+                "all_book_odds":   all_book_display,
+            })
 
     edges.sort(key=lambda x: x["ev_pct"], reverse=True)
     return edges
