@@ -2858,6 +2858,51 @@ def analyze(picks: list[dict], label: str = "All +EV Picks") -> list[dict]:
         print(f"  {label:<20}  W{ww}/L{ll}  WR {wr_:.0f}%  "
               f"P&L ${tpnl:>+8.2f}  ROI {roi_:>+.1f}%")
 
+    # Prop market × EV-tier cross-slice — feeds _qualifies_prop() calibration.
+    # Non-Pinn only: the qualifier already lets any Pinn-anchored prop through
+    # at ev >= 1.0, so threshold decisions are about the non-Pinn band.
+    prop_settled = [p for p in settled
+                    if p.get("is_prop") and not p.get("pinnacle_anchored")]
+    if prop_settled:
+        ev_buckets = [
+            ("1–2%",  lambda v: 1.0 <= v < 2.0),
+            ("2–3%",  lambda v: 2.0 <= v < 3.0),
+            ("3–5%",  lambda v: 3.0 <= v < 5.0),
+            ("5%+",   lambda v: v >= 5.0),
+        ]
+        by_market: dict[str, list] = defaultdict(list)
+        for p in prop_settled:
+            by_market[p["market"]].append(p)
+
+        print(f"\n  PROP MARKET × EV TIER (non-Pinn only)")
+        print(f"  {'─'*70}")
+        for mkt in sorted(by_market.keys()):
+            mp = by_market[mkt]
+            mw = sum(1 for p in mp if p["result"] == "WIN")
+            ml = sum(1 for p in mp if p["result"] == "LOSS")
+            mwager = sum(p["bet_amount"] for p in mp)
+            mpnl   = sum(p["pnl"] for p in mp)
+            mroi   = mpnl / mwager * 100 if mwager else 0
+            print(f"  {mkt:<14}  total: W{mw}/L{ml}  "
+                  f"P&L ${mpnl:>+7.2f}  ROI {mroi:>+5.1f}%  (n={len(mp)})")
+            for blabel, bfilt in ev_buckets:
+                bp = [p for p in mp if bfilt(p.get("ev_pct") or 0)]
+                if not bp:
+                    continue
+                bw = sum(1 for p in bp if p["result"] == "WIN")
+                bl = sum(1 for p in bp if p["result"] == "LOSS")
+                bwager = sum(p["bet_amount"] for p in bp)
+                bpnl   = sum(p["pnl"] for p in bp)
+                broi   = bpnl / bwager * 100 if bwager else 0
+                note = ""
+                if (bw + bl) >= 30 and broi >= 5.0:
+                    note = "  ← promote candidate"
+                elif (bw + bl) >= 30 and broi <= -5.0:
+                    note = "  ← exclude"
+                print(f"    {blabel:<8}  W{bw}/L{bl}  "
+                      f"P&L ${bpnl:>+7.2f}  ROI {broi:>+5.1f}%  "
+                      f"(n={len(bp)}){note}")
+
     return settled
 
 
@@ -3240,6 +3285,7 @@ def _add_props_tab(wb, prop_picks: list[dict]):
       1. All Picks detail table (one row per prop)
       2. Summary by prop market (pts / reb / ast / strikeouts / total_bases)
       3. Summary by sport (NBA / MLB)
+      4. Non-Pinn market × EV tier — feeds _qualifies_prop() calibration
     """
     ws = wb.create_sheet("Player Props")
 
@@ -3247,8 +3293,16 @@ def _add_props_tab(wb, prop_picks: list[dict]):
         "pts":         "Points",
         "reb":         "Rebounds",
         "ast":         "Assists",
+        "threes":      "3-Pointers",
+        "pra":         "Pts+Reb+Ast",
+        "dd":          "Double-Double",
         "strikeouts":  "Strikeouts",
         "total_bases": "Total Bases",
+        "hits":        "Hits",
+        "rbis":        "RBIs",
+        "hr":          "Home Runs",
+        "sog":         "Shots on Goal",
+        "nhl_pts":     "NHL Points",
     }
 
     # ── Detail table ────────────────────────────────────────────────────────
@@ -3370,8 +3424,33 @@ def _add_props_tab(wb, prop_picks: list[dict]):
 
     next_row = _prop_summary_section(
         "By Prop Market", by_market, gap_row, "375623")
-    _prop_summary_section(
+    next_row = _prop_summary_section(
         "By Sport", by_sport, next_row + 1, "1F4E79")
+
+    # Non-Pinn market × EV tier — _qualifies_prop() calibration view.
+    # Pinn-anchored props auto-pass at ev >= 1.0 so the threshold decision
+    # is purely about the non-Pinn band.
+    ev_buckets = [
+        ("1–2%", lambda v: 1.0 <= v < 2.0),
+        ("2–3%", lambda v: 2.0 <= v < 3.0),
+        ("3–5%", lambda v: 3.0 <= v < 5.0),
+        ("5%+",  lambda v: v >= 5.0),
+    ]
+    by_market_tier: dict[str, list] = defaultdict(list)
+    for p in prop_picks:
+        if p.get("pinnacle_anchored"):
+            continue
+        ev = p.get("ev_pct") or 0
+        mkt_label = PROP_MARKET_LABELS.get(p["market"], p["market"])
+        for blabel, bfilt in ev_buckets:
+            if bfilt(ev):
+                by_market_tier[f"{mkt_label} {blabel}"].append(p)
+                break
+
+    if by_market_tier:
+        _prop_summary_section(
+            "Non-Pinn Market × EV Tier (calibration view)",
+            by_market_tier, next_row + 1, "7B4D00")
 
 
 def _add_promo_tab(wb, promo_picks: list[dict]):
