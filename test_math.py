@@ -156,3 +156,93 @@ def test_fmt_pt_total_has_no_sign():
 
 def test_fmt_pt_no_market_no_sign():
     assert _fmt_pt(7.5) == "7.5"
+
+
+# ── _derive_promo_scope ────────────────────────────────────────────────
+# Scope derivation drives the /run_promos fetch optimisation. Wrong scope
+# = wasted API credits at best, missing picks at worst.
+
+from odds_compare import _derive_promo_scope
+
+
+def test_scope_none_for_empty_promos():
+    assert _derive_promo_scope([]) is None
+    assert _derive_promo_scope(None) is None
+
+
+def test_scope_full_fetch_when_market_is_all():
+    # Catch-all market means we can't narrow.
+    assert _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "all"}
+    ]) is None
+
+
+def test_scope_full_fetch_when_sport_is_all():
+    assert _derive_promo_scope([
+        {"book": "FanDuel", "sport": "all", "market": "h2h"}
+    ]) is None
+
+
+def test_scope_full_fetch_for_bonus_bet():
+    # Bonus bets need broad pools to find longest-odds picks.
+    assert _derive_promo_scope([
+        {"book": "DraftKings", "sport": "nba", "market": "h2h",
+         "promo_type": "bonus_bet"}
+    ]) is None
+
+
+def test_scope_full_fetch_for_parlay():
+    assert _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "h2h",
+         "promo_type": "parlay"}
+    ]) is None
+
+
+def test_scope_full_fetch_for_unknown_market():
+    # Defensive: if we don't recognise the market, don't guess.
+    assert _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "made_up_market"}
+    ]) is None
+
+
+def test_scope_hr_only():
+    scope = _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "hr"}
+    ])
+    assert scope is not None
+    assert scope["need_hr"] is True
+    assert scope["need_golf"] is False
+    assert scope["sports"] == set()
+    assert scope["prop_sport_markets"] == {}
+
+
+def test_scope_game_line():
+    scope = _derive_promo_scope([
+        {"book": "DraftKings", "sport": "nba", "market": "spreads"}
+    ])
+    assert scope is not None
+    assert scope["sports"] == {"nba"}
+    assert scope["need_hr"] is False
+    assert scope["prop_sport_markets"] == {}
+
+
+def test_scope_player_prop_routed_to_correct_sport():
+    scope = _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "strikeouts"}
+    ])
+    assert scope is not None
+    assert scope["prop_sport_markets"] == {"mlb": {"strikeouts"}}
+    assert scope["sports"] == set()
+    assert scope["need_hr"] is False
+
+
+def test_scope_union_across_multiple_promos():
+    scope = _derive_promo_scope([
+        {"book": "FanDuel", "sport": "mlb", "market": "h2h"},
+        {"book": "FanDuel", "sport": "mlb", "market": "hr"},
+        {"book": "DraftKings", "sport": "nba", "market": "pts"},
+    ])
+    assert scope is not None
+    assert scope["sports"] == {"mlb"}
+    assert scope["need_hr"] is True
+    assert scope["prop_sport_markets"] == {"nba": {"pts"}}

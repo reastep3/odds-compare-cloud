@@ -1623,6 +1623,15 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_books = context.user_data["books"]
     skip_mode = context.user_data.get("skip_mode", False)
 
+    # Scope-narrowed fetch: /run_promos with concrete promo scope only
+    # fetches the sports/markets those promos can match. Cuts Odds API
+    # credits from ~30-50 down to as little as ~1 for a targeted promo
+    # like "fd 30% hr". scope=None falls through to the full fetch.
+    scope = None
+    if context.user_data.get("promos_only"):
+        from odds_compare import _derive_promo_scope
+        scope = _derive_promo_scope(promos)
+
     # Build status message
     if skip_mode:
         status_line = "Running odds compare (picks only)..."
@@ -1636,15 +1645,31 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         n_promos = f" + {len(promos)} promo(s)" if promos else ""
         status_line = f"Running odds compare...\n{bankroll_str}{n_promos}"
 
+    if scope is not None:
+        scope_bits = []
+        if scope["sports"]:
+            scope_bits.append(
+                f"{len(scope['sports'])} game-line sport(s)")
+        if scope["prop_sport_markets"]:
+            n_prop = sum(len(m) for m in scope["prop_sport_markets"].values())
+            scope_bits.append(f"{n_prop} prop market(s)")
+        if scope["need_hr"]:   scope_bits.append("HR")
+        if scope["need_golf"]: scope_bits.append("Golf")
+        scope_desc = ", ".join(scope_bits) if scope_bits else "no fetches"
+        fetch_msg = f"Scoped fetch: {scope_desc} — should be quick."
+    else:
+        fetch_msg = "Fetching 8 sports — this takes ~60-90 seconds."
+
     await update.message.reply_text(
-        f"{status_line}\nFetching 8 sports — this takes ~60-90 seconds.",
+        f"{status_line}\n{fetch_msg}",
         reply_markup=ReplyKeyboardRemove(),
     )
 
     context.bot_data["running"] = True
     async with _run_lock:
         try:
-            fetched = await asyncio.to_thread(_run_odds_compare_fetch, dk, fd)
+            fetched = await asyncio.to_thread(
+                _run_odds_compare_fetch, dk, fd, scope)
         except Exception as e:
             context.bot_data["running"] = False
             await context.bot.send_message(chat_id, f"Run failed: {e}")
@@ -1961,10 +1986,11 @@ async def _finalize_and_send(update: Update,
     return ConversationHandler.END
 
 
-def _run_odds_compare_fetch(dk: float, fd: float) -> dict:
+def _run_odds_compare_fetch(dk: float, fd: float,
+                            scope: dict | None = None) -> dict:
     """Thread-safe wrapper around run_headless_fetch."""
     from odds_compare import run_headless_fetch
-    return run_headless_fetch(dk, fd)
+    return run_headless_fetch(dk, fd, scope=scope)
 
 
 def _run_odds_compare_finalize(fetched: dict, promos: list,

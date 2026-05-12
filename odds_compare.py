@@ -574,7 +574,10 @@ def fetch_odds_api(sport: str, session: requests.Session | None = None,
     return all_events, status_summary
 
 
-def fetch_odds_api_props(sport: str) -> list[dict]:
+def fetch_odds_api_props(
+    sport: str,
+    markets: set[str] | None = None,
+) -> list[dict]:
     """
     Fetch player props from The Odds API for a given sport.
 
@@ -583,6 +586,11 @@ def fetch_odds_api_props(sport: str) -> list[dict]:
       1. GET /sports/{sport}/events  (free — 0 credits)
       2. For each event: GET /events/{id}/odds?markets=...  (1 credit per call)
 
+    If `markets` is given, the markets query is restricted to those internal
+    market keys (e.g. {"strikeouts"}) — saves credits when the caller only
+    cares about a subset (e.g. a /run_promos run targeted at one prop).
+    Unknown keys are silently skipped; an empty set after filtering returns [].
+
     Returns a list of raw prop dicts compatible with _merge_raw_props().
     """
     from bot_config import ODDS_API_KEY
@@ -590,6 +598,11 @@ def fetch_odds_api_props(sport: str) -> list[dict]:
     prop_markets = ODDS_API_PROP_MARKETS.get(sport)
     if not prop_markets:
         return []
+
+    if markets is not None:
+        prop_markets = [m for m in prop_markets if m[1] in markets]
+        if not prop_markets:
+            return []
 
     api_sport = ODDS_API_SPORTS.get(sport)
     if not api_sport:
@@ -5743,7 +5756,10 @@ def _merge_raw_props(all_raw: list[dict]) -> list[dict]:
     return result
 
 
-def fetch_player_props(session: requests.Session) -> list[dict]:
+def fetch_player_props(
+    session: requests.Session,
+    sport_markets: dict[str, set[str]] | None = None,
+) -> list[dict]:
     """
     Fetch player props from The Odds API (primary) + Pinnacle guest API
     (supplementary).
@@ -5755,16 +5771,25 @@ def fetch_player_props(session: requests.Session) -> list[dict]:
     All sources are merged by (player, game, market, line, side) using fuzzy
     name matching. Returns the combined list with book_odds keyed by book name
     strings (e.g. "draftkings", "fanduel", "pinnacle").
+
+    If `sport_markets` is given, only fetches those sports and (for The Odds
+    API path) restricts the markets query to the named internal market keys —
+    used by /run_promos when the supplied promos target a specific prop only.
     """
     all_raw: list[dict] = []
-    target_sports = sorted(ODDS_API_PROP_MARKETS.keys())
+    if sport_markets is not None:
+        target_sports = sorted(sport_markets.keys())
+    else:
+        target_sports = sorted(ODDS_API_PROP_MARKETS.keys())
 
     for sport in target_sports:
         sport_raw: list[dict] = []
+        wanted_markets = (sport_markets.get(sport)
+                          if sport_markets is not None else None)
 
         # ── The Odds API (primary — DK, FD, Pinnacle, BetMGM, etc.) ──
         try:
-            api_raw = fetch_odds_api_props(sport)
+            api_raw = fetch_odds_api_props(sport, markets=wanted_markets)
             sport_raw.extend(api_raw)
         except Exception as e:
             print(f"  [Props/OddsAPI/{sport.upper()}] Skipped: {e}")
@@ -6758,13 +6783,94 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
 # Headless entry point (for Telegram bot / automation)
 # ──────────────────────────────────────────────────────────────────────
 
-def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
+# Game-line markets handled by the per-sport fetch.
+_GAME_LINE_MARKETS = frozenset({"h2h", "spreads", "totals"})
+# Player-prop markets, grouped by which sport's prop fetch produces them.
+# Drives both _derive_promo_scope() and the optional filter inside
+# fetch_player_props().
+_PROP_MARKETS_BY_SPORT: dict[str, frozenset[str]] = {
+    "nba": frozenset({"pts", "reb", "ast", "threes", "pra", "dd"}),
+    "mlb": frozenset({"strikeouts", "total_bases", "hits", "rbis"}),
+    "nhl": frozenset({"sog", "nhl_pts"}),
+}
+# Golf markets that flow from fetch_golf_props.
+_GOLF_PROMO_MARKETS = frozenset({"golf_top5", "golf_top10", "golf_top20",
+                                  "golf_win"})
+
+
+def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
+    """Translate a list of promos into a fetch-scope hint.
+
+    Returns None when no narrowing is possible (full fetch required):
+      * No promos given
+      * Any promo with sport="all" or market="all"
+      * Any bonus_bet or parlay promo (these need broad pools to
+        pick the longest-odds line / build leg combos)
+      * Any market we don't recognise (be safe — fall back)
+
+    Otherwise returns a dict:
+      {
+        "sports":             set[str],            # game-line sports to fetch
+        "prop_sport_markets": dict[str, set[str]], # sport → internal market keys
+        "need_hr":            bool,
+        "need_golf":          bool,
+      }
+    Empty `sports`/`prop_sport_markets` mean those fetches can be skipped
+    entirely. The caller is expected to short-circuit accordingly."""
+    if not promos:
+        return None
+
+    sports: set[str] = set()
+    prop_sport_markets: dict[str, set[str]] = {}
+    need_hr = False
+    need_golf = False
+
+    for p in promos:
+        if p.get("promo_type") in ("bonus_bet", "parlay"):
+            return None
+        sport = (p.get("sport") or "all").lower()
+        market = (p.get("market") or "all").lower()
+        if sport == "all" or market == "all":
+            return None
+
+        if market in _GAME_LINE_MARKETS:
+            sports.add(sport)
+        elif market == "hr":
+            need_hr = True
+        elif market in _GOLF_PROMO_MARKETS:
+            need_golf = True
+        else:
+            # Player prop — figure out which sport's fetch produces it.
+            for sp, mks in _PROP_MARKETS_BY_SPORT.items():
+                if market in mks:
+                    prop_sport_markets.setdefault(sp, set()).add(market)
+                    break
+            else:
+                # Unknown market — be safe, fall back to full fetch.
+                return None
+
+    return {
+        "sports":             sports,
+        "prop_sport_markets": prop_sport_markets,
+        "need_hr":            need_hr,
+        "need_golf":          need_golf,
+    }
+
+
+def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
+                       scope: dict | None = None) -> dict:
     """
     Phase 1 of the headless pipeline: fetch odds + props, compute edges.
 
     The slow phase (~60-90s). Independent of any user promos or game
     filters, so the caller can pause here to interactively prompt for
     game-specific promo selections before invoking run_headless_finalize.
+
+    If `scope` is provided (see _derive_promo_scope), fetches are
+    narrowed to only the sports/markets needed by the promos in scope —
+    drops Odds API credit cost from ~30-50 to as little as ~1 for
+    targeted promos like "fd 30% hr". scope=None preserves the full
+    fetch behavior for /run, the auto-scan, and the webapp.
 
     Returns an intermediate state dict consumed by run_headless_finalize.
     """
@@ -6788,8 +6894,23 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
 
     print(f"DraftKings Bankroll: ${dk_bankroll:,.2f}")
     print(f"FanDuel Bankroll:    ${fd_bankroll:,.2f}")
-    print(f"\nFetching {len(AN_SPORTS)} sports in parallel "
-          f"(Odds API → AN fallback)...\n")
+
+    # Narrow per-sport game-line fetch to the scope (if any).
+    if scope is None:
+        sports_to_fetch = list(AN_SPORTS)
+    else:
+        sports_to_fetch = [s for s in AN_SPORTS if s in scope["sports"]]
+        print(f"\n[Scoped run] game-line sports: "
+              f"{sports_to_fetch or 'none'}; "
+              f"player-props: {dict(scope['prop_sport_markets']) or 'none'}; "
+              f"HR props: {scope['need_hr']}; "
+              f"Golf: {scope['need_golf']}")
+    if sports_to_fetch:
+        print(f"\nFetching {len(sports_to_fetch)} sport(s) in parallel "
+              f"(Odds API → AN fallback)...\n")
+    else:
+        print("\nSkipping per-sport game-line fetch (scope has no "
+              "game-line markets).")
 
     # Parallel fetch
     all_edges      = []
@@ -6804,7 +6925,7 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_fetch_sport_all, sport): sport
-                   for sport in AN_SPORTS}
+                   for sport in sports_to_fetch}
         for future in as_completed(futures):
             sport = futures[future]
             try:
@@ -6843,15 +6964,31 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float) -> dict:
         print(f"\n⚠ AN-ONLY RUN — every sport fell back to Action Network "
               f"(Odds API quota likely exhausted)")
 
-    # Fetch player props
-    print(f"\nFetching player props (MLB HR + PGA Golf + O/U Props)...")
+    # Fetch player props — each one can be scope-skipped independently.
     props_session     = make_session()
-    hr_props_raw      = fetch_hr_props(props_session)
-    hr_edges          = find_hr_edges(hr_props_raw) if hr_props_raw else []
-    golf_props_raw    = fetch_golf_props(props_session)
-    golf_edges        = find_golf_edges(golf_props_raw) if golf_props_raw else []
-    pp_props_raw      = fetch_player_props(props_session)
-    player_prop_edges = find_player_prop_edges(pp_props_raw) if pp_props_raw else []
+    do_hr   = (scope is None) or scope["need_hr"]
+    do_golf = (scope is None) or scope["need_golf"]
+    do_pp   = (scope is None) or bool(scope["prop_sport_markets"])
+    pp_filter = (None if scope is None
+                 else scope["prop_sport_markets"] or None)
+
+    bits = []
+    if do_hr:   bits.append("MLB HR")
+    if do_golf: bits.append("PGA Golf")
+    if do_pp:   bits.append("O/U Props")
+    if bits:
+        print(f"\nFetching player props ({' + '.join(bits)})...")
+    else:
+        print("\nSkipping all player-prop fetches (scope doesn't need any).")
+
+    hr_props_raw = fetch_hr_props(props_session) if do_hr else []
+    hr_edges     = find_hr_edges(hr_props_raw) if hr_props_raw else []
+    golf_props_raw = fetch_golf_props(props_session) if do_golf else []
+    golf_edges     = find_golf_edges(golf_props_raw) if golf_props_raw else []
+    pp_props_raw = (fetch_player_props(props_session, sport_markets=pp_filter)
+                    if do_pp else [])
+    player_prop_edges = (find_player_prop_edges(pp_props_raw)
+                         if pp_props_raw else [])
 
     return {
         "all_edges":         all_edges,
