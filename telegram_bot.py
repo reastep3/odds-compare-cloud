@@ -1778,7 +1778,8 @@ async def _prompt_next_game_pick(update: Update,
     while queue:
         promo = queue[0]
         eligible = eligible_games_for_promo(
-            promo, promo_edges, fetched["player_prop_edges"])
+            promo, promo_edges, fetched["player_prop_edges"],
+            hr_edges=fetched.get("hr_edges"))
         if not eligible:
             # No matching games — log + skip
             queue.pop(0)

@@ -2733,9 +2733,11 @@ def write_excel(edges: list[dict], dk_bankroll: float,
 
                 best_edge = None
                 # Use the broader promo_pool (all DK/FD outcomes) so boosts
-                # can turn mildly -EV edges into +EV picks.
+                # can turn mildly -EV edges into +EV picks. HR edges are
+                # included; _promo_matches gates them to HR-targeted promos only.
                 _play_promo_pool = (list(promo_pool or edges)
-                                    + list(player_prop_edges or []))
+                                    + list(player_prop_edges or [])
+                                    + list(hr_edges or []))
                 if is_bonus_bet:
                     _play_promo_pool = sorted(_play_promo_pool,
                                               key=_bonus_sort_key, reverse=True)
@@ -3249,8 +3251,11 @@ def write_excel(edges: list[dict], dk_bankroll: float,
         promo_rows = []
         # Use broader promo_pool (all DK/FD outcomes) so the Promos sheet
         # can include picks that only become +EV once the boost is applied.
+        # HR edges are included; _promo_matches gates them to HR-targeted
+        # promos only.
         _all_for_promos = (list(promo_pool or edges)
-                           + list(player_prop_edges or []))
+                           + list(player_prop_edges or [])
+                           + list(hr_edges or []))
         for promo in promos:
             if promo.get("promo_type") == "bonus_bet":
                 continue   # handled in Play These PROMO PICKS section
@@ -6719,11 +6724,12 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     # Parlay promos use a separate optimisation path
     if promo.get("promo_type") == "parlay":
         return False
-    # HR props: not considered for all-purpose/straight promos. They live
-    # in their own dedicated Excel tab (_build_hr_boost_rows) so the
-    # all-market boost doesn't silently grab a HR prop when the user
-    # meant to apply it to a game line.
-    if edge.get("market") == "hr":
+    # HR props only flow through to promos that *explicitly* target HR
+    # (market="hr"). A generic all-market boost would otherwise silently
+    # grab an HR prop when the user almost always meant a game line.
+    # Explicit HR-targeted promos (e.g. "fd 50% hr") still also appear on
+    # the dedicated HR Props tab via _build_hr_boost_rows.
+    if edge.get("market") == "hr" and promo["market"] != "hr":
         return False
     if promo["sport"] != "all":
         edge_sport = edge["sport"].lower().replace(" ", "")
@@ -6954,8 +6960,9 @@ def run_headless_finalize(fetched: dict,
         play_edges.extend(play_props)
     play_edges.sort(key=lambda e: e["ev_pct"], reverse=True)
 
-    promo_picks = compute_promo_picks(promo_pool, promos,
-                                      extra_edges=player_prop_edges)
+    promo_picks = compute_promo_picks(
+        promo_pool, promos,
+        extra_edges=list(player_prop_edges or []) + list(hr_edges or []))
 
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(
@@ -7100,6 +7107,7 @@ def _promo_no_pick_reason(promo: dict,
 
 def eligible_games_for_promo(promo: dict, all_edges: list[dict],
                              player_prop_edges: list[dict] | None = None,
+                             hr_edges: list[dict] | None = None,
                              ) -> list[str]:
     """List of "Away @ Home" game strings this promo could apply to,
     using all promo filters except game_filter itself.
@@ -7108,9 +7116,12 @@ def eligible_games_for_promo(promo: dict, all_edges: list[dict],
     Accepts the broader promo_pool (all DK/FD outcomes) so games without a
     pre-boost +EV edge still appear — the boost may make them viable.
     For parlay promos, min_odds is not enforced here since the parlay-level
-    odds (not per-leg) must clear the floor.
+    odds (not per-leg) must clear the floor. HR edges are merged in so
+    HR-targeted promos see MLB matchups; _promo_matches still gates them.
     """
-    combined = list(all_edges) + list(player_prop_edges or [])
+    combined = (list(all_edges)
+                + list(player_prop_edges or [])
+                + list(hr_edges or []))
     is_parlay = promo.get("promo_type") == "parlay"
     saved_filter = promo.get("game_filter")
     promo["game_filter"] = None
