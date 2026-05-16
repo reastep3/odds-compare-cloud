@@ -193,6 +193,7 @@ PROMO_MARKET_KEYWORDS = {
     "spreads": "spreads", "spread": "spreads", "ats": "spreads",
     "totals": "totals", "total": "totals", "ou": "totals", "o/u": "totals",
     "hr": "hr", "homerun": "hr", "homeruns": "hr",
+    "homer": "hr", "homers": "hr",
     "strikeouts": "strikeouts", "ks": "strikeouts",
     "hits": "hits",
     "rbi": "rbis", "rbis": "rbis",
@@ -215,6 +216,8 @@ PROMO_MARKET_KEYWORDS = {
 PROMO_MARKET_PHRASES = {
     "first inning": "totals_1st",
     "1st inning":   "totals_1st",
+    "home run":     "hr",
+    "home runs":    "hr",
 }
 
 # Display labels for non-trivial market keys. Markets not listed here fall

@@ -400,6 +400,37 @@ def test_find_player_prop_edges_promo_pool_captures_sub_min_ev_candidates():
     assert books == {"DraftKings", "FanDuel"}
 
 
+# ── parse_promo HR keyword/phrase coverage ─────────────────────────────
+# Regression: "fd mlb 30% home run max:$10" parsed as market="all"
+# because PROMO_MARKET_PHRASES only knew about "first inning" / "1st
+# inning". The scanner then awarded the promo to a generic MLB spread
+# instead of an HR prop, defeating the entire point of an HR-targeted
+# boost.
+
+from telegram_bot import parse_promo
+
+
+def test_parse_promo_two_word_home_run():
+    promo = parse_promo("fd mlb 30% home run max:$10")
+    assert promo is not None
+    assert promo["book"]      == "FanDuel"
+    assert promo["sport"]     == "mlb"
+    assert promo["market"]    == "hr"
+    assert promo["boost_pct"] == 30
+
+
+def test_parse_promo_two_word_home_runs_plural():
+    promo = parse_promo("dk 25% mlb home runs")
+    assert promo is not None
+    assert promo["market"] == "hr"
+
+
+def test_parse_promo_single_token_homer_slang():
+    promo = parse_promo("fd 30% mlb homer")
+    assert promo is not None
+    assert promo["market"] == "hr"
+
+
 def test_find_player_prop_edges_default_promo_pool_none_no_side_effect():
     # Default behaviour (no promo_pool kwarg) is unchanged — callers like
     # run_headless that don't compute promo picks shouldn't pay any cost.
