@@ -2311,6 +2311,8 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 parlay_pool: list = None,
                 script_dir: str = None,
                 promo_pool: list = None,
+                pp_promo_pool: list = None,
+                golf_promo_pool: list = None,
                 an_only: bool = False):
     wb = openpyxl.Workbook()
 
@@ -2748,9 +2750,17 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 # Use the broader promo_pool (all DK/FD outcomes) so boosts
                 # can turn mildly -EV edges into +EV picks. HR edges are
                 # included; _promo_matches gates them to HR-targeted promos only.
+                # pp_promo_pool / golf_promo_pool are the unfiltered versions
+                # of player_prop_edges / golf_edges (populated by find_X_edges
+                # via the side-effect param) so PGA + prop-boost promos can
+                # see candidates that are sub-MIN_EV pre-boost; fall back to
+                # the gated lists when an older caller hasn't supplied them.
                 _play_promo_pool = (list(promo_pool or edges)
-                                    + list(player_prop_edges or [])
-                                    + list(hr_edges or []))
+                                    + list(pp_promo_pool
+                                           or player_prop_edges or [])
+                                    + list(hr_edges or [])
+                                    + list(golf_promo_pool
+                                           or golf_edges or []))
                 if is_bonus_bet:
                     _play_promo_pool = sorted(_play_promo_pool,
                                               key=_bonus_sort_key, reverse=True)
@@ -4133,7 +4143,10 @@ def fetch_golf_props(session: requests.Session) -> list[dict]:
     return results
 
 
-def find_golf_edges(golf_props: list[dict]) -> list[dict]:
+def find_golf_edges(
+    golf_props: list[dict],
+    promo_pool: list[dict] | None = None,
+) -> list[dict]:
     """
     Find +EV golf props on DraftKings / FanDuel using median multi-book consensus.
 
@@ -4143,6 +4156,11 @@ def find_golf_edges(golf_props: list[dict]) -> list[dict]:
       - Require 4+ unique canonical books for a reliable fair line.
       - Outright winner odds for fringe players vary wildly across books;
         canonical dedup prevents phantom edges from state-variant pricing.
+
+    If `promo_pool` is provided, every constructed edge (regardless of EV) is
+    also appended there — mirrors the find_edges pattern so PGA-boost promos
+    can rank candidates by *boosted* EV without the MIN_EV_PERCENT pre-filter
+    discarding outcomes the boost would lift into +EV territory.
     """
     edges: list[dict] = []
 
@@ -4216,31 +4234,36 @@ def find_golf_edges(golf_props: list[dict]) -> list[dict]:
         for display, dec, am, bid in best_target.values():
             ev = calc_ev(fair_prob, dec)
             # For outright winner, skip if fair probability is below 0.2%
-            # (round-number consensus on obscure 150+ player fields is unreliable)
+            # (round-number consensus on obscure 150+ player fields is unreliable).
+            # This clamp applies to the promo pool too — a boost can't rescue
+            # a 0.1%-prob long-shot's fair-price signal.
             if prop["market"] == "golf_win" and fair_prob < 0.002:
                 continue
+            kelly = kelly_bet(fair_prob, dec)
+            edge_dict = {
+                "sport":             prop["sport"],
+                "game":              prop["tournament"],
+                "commence":          prop["commence"],
+                "book":              display,
+                "market":            prop["market"],
+                "outcome":           prop["player"],
+                "point":             None,
+                "odds_american":     am,
+                "odds_decimal":      round(dec, 3),
+                "fair_prob":         round(fair_prob * 100, 2),
+                "implied_prob":      round(decimal_to_implied_prob(dec) * 100, 2),
+                "ev_pct":            round(ev, 2),
+                "kelly_pct":         round(kelly * 100, 2),
+                "num_other_books":   len(other_entries),
+                "best_other_odds":   format_american(best_other_dec),
+                "pinnacle_anchored": False,
+                "all_book_odds":     all_book_display,
+                "market_disp":       prop["market_disp"],
+            }
+            if promo_pool is not None:
+                promo_pool.append(edge_dict)
             if ev >= MIN_EV_PERCENT:
-                kelly = kelly_bet(fair_prob, dec)
-                edges.append({
-                    "sport":             prop["sport"],
-                    "game":              prop["tournament"],
-                    "commence":          prop["commence"],
-                    "book":              display,
-                    "market":            prop["market"],
-                    "outcome":           prop["player"],
-                    "point":             None,
-                    "odds_american":     am,
-                    "odds_decimal":      round(dec, 3),
-                    "fair_prob":         round(fair_prob * 100, 2),
-                    "implied_prob":      round(decimal_to_implied_prob(dec) * 100, 2),
-                    "ev_pct":            round(ev, 2),
-                    "kelly_pct":         round(kelly * 100, 2),
-                    "num_other_books":   len(other_entries),
-                    "best_other_odds":   format_american(best_other_dec),
-                    "pinnacle_anchored": False,
-                    "all_book_odds":     all_book_display,
-                    "market_disp":       prop["market_disp"],
-                })
+                edges.append(edge_dict)
 
     edges.sort(key=lambda x: x["ev_pct"], reverse=True)
     return edges
@@ -5915,9 +5938,19 @@ def _compute_prop_fair_prob(
         return fair_prob, False
 
 
-def find_player_prop_edges(props: list[dict]) -> list[dict]:
+def find_player_prop_edges(
+    props: list[dict],
+    promo_pool: list[dict] | None = None,
+) -> list[dict]:
     """
     Find +EV player prop edges on DraftKings / FanDuel.
+
+    If `promo_pool` is provided, every constructed prop edge (regardless of
+    EV) is also appended there. Mirrors the find_edges pattern so prop-boost
+    promos can rank candidates by boosted EV without the MIN_EV_PERCENT
+    pre-filter discarding outcomes the boost would lift into +EV (notably
+    long-shot binary markets like NBA DD, NBA PRA, and batter_home_runs
+    where the boost is large enough to flip moderately -EV picks).
 
     book_odds keys are string book names (e.g. "draftkings", "fanduel",
     "betmgm", "pinnacle") — not AN integer IDs. TARGET_BOOKS is the set
@@ -6021,39 +6054,42 @@ def find_player_prop_edges(props: list[dict]) -> list[dict]:
 
                 fair_prob = max(0.05, min(0.95, fair_prob))
                 ev = calc_ev(fair_prob, dec)
+                kelly      = kelly_bet(fair_prob, dec)
+                # Binary Yes/No markets (anytime HR, double-double) come
+                # through with line=None — label them Y/N rather than O/U.
+                is_binary  = line is None
+                side_label = (("Y" if side == "over" else "N") if is_binary
+                              else ("O" if side == "over" else "U"))
+                edge_dict = {
+                    "sport":             pair["sport"],
+                    "game":              game,
+                    "commence":          pair["commence"],
+                    "book":              display,
+                    "market":            market,
+                    "outcome":           f"{player} {side_label}",
+                    "point":             line,
+                    "odds_american":     am,
+                    "odds_decimal":      round(dec, 3),
+                    "fair_prob":         round(fair_prob * 100, 1),
+                    "implied_prob":      round(decimal_to_implied_prob(dec) * 100, 1),
+                    "ev_pct":            round(ev, 2),
+                    "kelly_pct":         round(kelly * 100, 2),
+                    "num_other_books":   len(other_entries),
+                    "best_other_odds":   (format_american(best_other_dec)
+                                          if best_other_dec else "—"),
+                    "pinnacle_anchored": pinnacle_anchored,
+                    "all_book_odds":     all_book_display,
+                    "player":            player,
+                    "market_disp":       pair["market_disp"],
+                    "prop_side":         side,
+                    # Odds API IDs for closing-line capture
+                    "event_id":          pair.get("event_id"),
+                    "sport_key":         pair.get("sport_key"),
+                }
+                if promo_pool is not None:
+                    promo_pool.append(edge_dict)
                 if ev >= MIN_EV_PERCENT:
-                    kelly      = kelly_bet(fair_prob, dec)
-                    # Binary Yes/No markets (anytime HR, double-double) come
-                    # through with line=None — label them Y/N rather than O/U.
-                    is_binary  = line is None
-                    side_label = (("Y" if side == "over" else "N") if is_binary
-                                  else ("O" if side == "over" else "U"))
-                    edges.append({
-                        "sport":             pair["sport"],
-                        "game":              game,
-                        "commence":          pair["commence"],
-                        "book":              display,
-                        "market":            market,
-                        "outcome":           f"{player} {side_label}",
-                        "point":             line,
-                        "odds_american":     am,
-                        "odds_decimal":      round(dec, 3),
-                        "fair_prob":         round(fair_prob * 100, 1),
-                        "implied_prob":      round(decimal_to_implied_prob(dec) * 100, 1),
-                        "ev_pct":            round(ev, 2),
-                        "kelly_pct":         round(kelly * 100, 2),
-                        "num_other_books":   len(other_entries),
-                        "best_other_odds":   (format_american(best_other_dec)
-                                              if best_other_dec else "—"),
-                        "pinnacle_anchored": pinnacle_anchored,
-                        "all_book_odds":     all_book_display,
-                        "player":            player,
-                        "market_disp":       pair["market_disp"],
-                        "prop_side":         side,
-                        # Odds API IDs for closing-line capture
-                        "event_id":          pair.get("event_id"),
-                        "sport_key":         pair.get("sport_key"),
-                    })
+                    edges.append(edge_dict)
 
     edges.sort(key=lambda x: x["ev_pct"], reverse=True)
 
@@ -6983,18 +7019,31 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
 
     hr_props_raw = fetch_hr_props(props_session) if do_hr else []
     hr_edges     = find_hr_edges(hr_props_raw) if hr_props_raw else []
+
+    # Parallel pools for golf + player props mirror the game-line promo_pool:
+    # find_X_edges still returns the +EV-only list used by sheet writers and
+    # /play_edges, while the *_promo_pool captures every constructed edge so
+    # compute_promo_picks can rank by boosted EV without losing sub-MIN_EV
+    # candidates that a 25-50% boost would lift into +EV.
+    golf_promo_pool: list[dict] = []
     golf_props_raw = fetch_golf_props(props_session) if do_golf else []
-    golf_edges     = find_golf_edges(golf_props_raw) if golf_props_raw else []
+    golf_edges     = (find_golf_edges(golf_props_raw, promo_pool=golf_promo_pool)
+                      if golf_props_raw else [])
+
+    pp_promo_pool: list[dict] = []
     pp_props_raw = (fetch_player_props(props_session, sport_markets=pp_filter)
                     if do_pp else [])
-    player_prop_edges = (find_player_prop_edges(pp_props_raw)
-                         if pp_props_raw else [])
+    player_prop_edges = (
+        find_player_prop_edges(pp_props_raw, promo_pool=pp_promo_pool)
+        if pp_props_raw else [])
 
     return {
         "all_edges":         all_edges,
         "hr_edges":          hr_edges,
         "golf_edges":        golf_edges,
+        "golf_promo_pool":   golf_promo_pool,
         "player_prop_edges": player_prop_edges,
+        "pp_promo_pool":     pp_promo_pool,
         "parlay_pool":       parlay_pool,
         "promo_pool":        promo_pool,
         "output_path":       output_path,
@@ -7074,6 +7123,11 @@ def run_headless_finalize(fetched: dict,
     hr_edges          = fetched["hr_edges"]
     golf_edges        = fetched["golf_edges"]
     player_prop_edges = fetched["player_prop_edges"]
+    # Unfiltered pools (every constructed prop/golf edge, regardless of EV)
+    # for boost-aware promo selection. Fall back to the gated lists when an
+    # older fetched dict is passed in.
+    golf_promo_pool   = fetched.get("golf_promo_pool", golf_edges)
+    pp_promo_pool     = fetched.get("pp_promo_pool",   player_prop_edges)
     parlay_pool       = fetched["parlay_pool"]
     promo_pool        = fetched.get("promo_pool", all_edges)
     output_path       = fetched["output_path"]
@@ -7095,6 +7149,8 @@ def run_headless_finalize(fetched: dict,
                     promos, hr_edges, golf_edges, player_prop_edges,
                     parlay_pool=parlay_pool, script_dir=script_dir,
                     promo_pool=promo_pool,
+                    pp_promo_pool=pp_promo_pool,
+                    golf_promo_pool=golf_promo_pool,
                     an_only=counters.get("an_only", False))
 
     # Build play_edges for the bot
@@ -7109,7 +7165,9 @@ def run_headless_finalize(fetched: dict,
 
     promo_picks = compute_promo_picks(
         promo_pool, promos,
-        extra_edges=list(player_prop_edges or []) + list(hr_edges or []))
+        extra_edges=(list(pp_promo_pool or [])
+                     + list(hr_edges or [])
+                     + list(golf_promo_pool or [])))
 
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(
@@ -7220,36 +7278,86 @@ def _promo_no_pick_reason(promo: dict,
                           combined: list[dict],
                           matched_all: list[dict],
                           pool: list[dict]) -> str:
-    """Human-readable explanation of why no pick was selected. Only reached
-    when the pool was genuinely empty — with the fallback path in place,
-    any non-empty pool will produce a pick (marked is_fallback if -EV)."""
-    if not matched_all:
-        # Re-check with min_odds relaxed to see whether the slate simply
-        # lacks long-enough lines (common for small slates) versus a
-        # broader filter (sport/market) blocking everything.
-        saved_min = promo.get("min_odds")
+    """Human-readable explanation of why no pick was selected. Walks the
+    promo's filter chain from strictest (min_odds) to loosest (book only)
+    to pinpoint which constraint emptied the pool, so a glance tells the
+    user whether the issue is missing fetched data, a filter mismatch,
+    too-short odds, or another promo claiming the only candidate."""
+    book   = promo["book"]
+    sport  = (promo.get("sport") or "all").lower()
+    market = (promo.get("market") or "all").lower()
+
+    # Pool empty but matches existed → another promo claimed them all.
+    if matched_all and not pool:
+        return (f"All {len(matched_all)} matching candidate(s) already "
+                f"assigned to other promos.")
+
+    saved_min = promo.get("min_odds")
+    saved_mkt = promo.get("market")
+    try:
+        # Step 1: relax min_odds. If anything matches now, the odds floor
+        # was the culprit.
         promo["min_odds"] = None
-        try:
-            no_min = [e for e in combined if _promo_matches(promo, e)]
-        finally:
-            promo["min_odds"] = saved_min
-        if not no_min:
-            return (f"No {promo['book']} outcomes match this promo's "
-                    f"sport/market filters in today's slate.")
-        min_odds = promo.get("min_odds")
-        if min_odds is not None:
-            min_am = format_american(american_to_decimal(min_odds))
+        no_min = [e for e in combined if _promo_matches(promo, e)]
+        if no_min and saved_min is not None:
+            min_am = format_american(american_to_decimal(saved_min))
             longest = max(no_min, key=lambda e: e["odds_decimal"])
             longest_am = format_american(longest["odds_decimal"])
             outcome = longest.get("outcome", "?")
-            return (f"0 {promo['book']} candidates at {min_am} or longer. "
-                    f"Longest {promo['book']} line today: "
-                    f"{outcome} {longest_am}.")
-        return "0 candidates match this promo's filters."
-    if not pool:
-        return (f"All {len(matched_all)} matching candidate(s) already "
-                f"assigned to other promos.")
-    return "No qualifying pick found."
+            filt = "/".join(s for s in (
+                sport.upper() if sport != "all" else "",
+                market.upper() if market != "all" else "",
+            ) if s)
+            filt_label = f"{filt} " if filt else ""
+            return (f"0 {book} candidates at {min_am} or longer "
+                    f"({len(no_min)} {filt_label}edge(s) matched but were too "
+                    f"short). Longest today: {outcome} {longest_am}.")
+        if no_min:
+            return "0 candidates match this promo's filters."
+
+        # Step 2: relax market too. If the sport has data but not on the
+        # promo's market, that's a market-availability gap.
+        if market != "all":
+            promo["market"] = "all"
+            no_market = [e for e in combined if _promo_matches(promo, e)]
+            if no_market:
+                markets_seen = sorted({e["market"].lower() for e in no_market})
+                sample = ", ".join(m.upper() for m in markets_seen[:5])
+                more = (f" (+{len(markets_seen) - 5})"
+                        if len(markets_seen) > 5 else "")
+                return (f"{len(no_market)} {book} {sport.upper()} edge(s) in "
+                        f"slate but none on market={market.upper()}. "
+                        f"Available {sport.upper()} markets today: "
+                        f"{sample}{more}.")
+    finally:
+        promo["min_odds"] = saved_min
+        promo["market"]   = saved_mkt
+
+    # Step 3: book has data for other sports but not this one → the sport's
+    # fetch returned no edges (off-season, no games today, or fetch failed).
+    book_edges = [e for e in combined if e.get("book") == book]
+    if book_edges and sport != "all":
+        sports_seen = sorted({
+            _LEAGUE_TO_SPORT.get(
+                e["sport"].lower().replace(" ", ""),
+                e["sport"].lower().replace(" ", ""),
+            ).upper()
+            for e in book_edges
+        })
+        sample = ", ".join(sports_seen[:6])
+        more = (f" (+{len(sports_seen) - 6})"
+                if len(sports_seen) > 6 else "")
+        return (f"No {book} {sport.upper()} edges built today — "
+                f"{len(book_edges)} {book} outcome(s) loaded on other "
+                f"sports ({sample}{more}). {sport.upper()} fetch likely "
+                f"returned 0 games or pre-edge filters discarded them.")
+    if book_edges:
+        return (f"No qualifying pick found among "
+                f"{len(book_edges)} {book} outcome(s).")
+
+    # Step 4: book has zero outcomes anywhere → fetch failed entirely.
+    return (f"No {book} outcomes loaded today — the {book} fetch may have "
+            f"failed entirely.")
 
 
 def eligible_games_for_promo(promo: dict, all_edges: list[dict],

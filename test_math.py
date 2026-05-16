@@ -246,3 +246,176 @@ def test_scope_union_across_multiple_promos():
     assert scope["sports"] == {"mlb"}
     assert scope["need_hr"] is True
     assert scope["prop_sport_markets"] == {"nba": {"pts"}}
+
+
+# ── _promo_no_pick_reason ──────────────────────────────────────────────
+# The diagnostic message is what the user sees when a promo can't find a
+# pick. Each branch points at a different root cause (odds floor, missing
+# market, missing sport, dead fetch, dedup), so misclassifying them sends
+# the user chasing the wrong fix.
+
+from odds_compare import _promo_no_pick_reason
+
+
+def _edge(book, sport, market, odds_decimal=2.0, outcome="Team A"):
+    """Minimal edge dict that satisfies _promo_matches plumbing."""
+    return {
+        "book":         book,
+        "sport":        sport,
+        "market":       market,
+        "odds_decimal": odds_decimal,
+        "outcome":      outcome,
+        "game":         f"{outcome} game",
+    }
+
+
+def test_no_pick_all_claimed_by_other_promos():
+    promo = {"book": "FanDuel", "sport": "nba", "market": "h2h"}
+    matched_all = [_edge("FanDuel", "NBA", "h2h")]
+    reason = _promo_no_pick_reason(promo, matched_all, matched_all, pool=[])
+    assert "already" in reason.lower()
+    assert "1 matching" in reason
+
+
+def test_no_pick_min_odds_too_tight():
+    # Sport+market match, but every candidate is shorter than min_odds.
+    promo = {"book": "FanDuel", "sport": "nba", "market": "h2h",
+             "min_odds": +300}
+    combined = [
+        _edge("FanDuel", "NBA", "h2h", odds_decimal=1.5, outcome="Lakers"),
+        _edge("FanDuel", "NBA", "h2h", odds_decimal=1.9, outcome="Knicks"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "or longer" in reason
+    # Longest line surfaced so the user sees the gap.
+    assert "Knicks" in reason
+
+
+def test_no_pick_market_missing_but_sport_present():
+    # Sport (MLB) has plenty of game-line data but no HR props today.
+    promo = {"book": "FanDuel", "sport": "mlb", "market": "hr"}
+    combined = [
+        _edge("FanDuel", "MLB", "h2h"),
+        _edge("FanDuel", "MLB", "totals"),
+        _edge("FanDuel", "MLB", "spreads"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "MLB" in reason
+    assert "HR" in reason
+    # Names the markets actually present so the user knows the gap.
+    assert "H2H" in reason or "TOTALS" in reason
+
+
+def test_no_pick_sport_missing_other_sports_loaded():
+    # PGA promo but slate has NBA / MLB only — distinct from market mismatch.
+    promo = {"book": "DraftKings", "sport": "pga", "market": "golf_top5"}
+    combined = [
+        _edge("DraftKings", "NBA", "h2h"),
+        _edge("DraftKings", "MLB", "totals"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "PGA" in reason
+    assert "fetch" in reason.lower()
+    # Other-sport context shown so user can tell the book itself is alive.
+    assert "NBA" in reason or "MLB" in reason
+
+
+def test_no_pick_book_has_no_data():
+    # The whole DK fetch failed — no DK outcomes anywhere in combined.
+    promo = {"book": "DraftKings", "sport": "nba", "market": "h2h"}
+    combined = [
+        _edge("FanDuel", "NBA", "h2h"),
+        _edge("FanDuel", "MLB", "totals"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "DraftKings" in reason
+    assert "failed" in reason.lower() or "no" in reason.lower()
+
+
+# ── find_golf_edges / find_player_prop_edges promo_pool side-effect ────
+# The parallel pool feeds compute_promo_picks WITHOUT the MIN_EV_PERCENT
+# pre-filter — so a 25-50% boost can rank candidates the pure +EV view
+# discards. Skipping these gates by accident would silently re-empty PGA
+# and prop-boost promos for the user.
+
+from odds_compare import find_golf_edges, find_player_prop_edges
+
+
+def test_find_golf_edges_promo_pool_captures_sub_min_ev_candidates():
+    # Build a long-shot outright where every book agrees on roughly the
+    # same implied prob → fair_prob ≈ implied, so EV is near 0 — below
+    # MIN_EV_PERCENT=0.5, but the kind of pick a boost would lift.
+    # Four canonical books required by find_golf_edges for a reliable
+    # fair price; all IDs are real AN_BOOK_IDS entries.
+    golf_props = [{
+        "player":      "Tommy Fleetwood",
+        "tournament":  "PGA Championship",
+        "commence":    "2099-01-01T12:00:00Z",
+        "sport":       "PGA",
+        "market":      "golf_top5",
+        "market_disp": "Top 5 Finish",
+        # 68=DK, 69=FD, 75=BetMGM, 49=Caesars, 71=BetRivers — 5 canonical
+        # books, satisfies the 4+ minimum.
+        "book_odds":   {68: 500, 69: 500, 75: 500, 49: 500, 71: 500},
+    }]
+    promo_pool: list[dict] = []
+    edges = find_golf_edges(golf_props, promo_pool=promo_pool)
+    # Pure +EV view excludes a fair-priced line; pool still captures it
+    # so the boost path can evaluate.
+    assert edges == []
+    assert len(promo_pool) >= 1
+    assert all(e["market"] == "golf_top5" for e in promo_pool)
+    # Both DK and FD priced it, so both must appear so the right
+    # promo's book can pick the candidate.
+    books = {e["book"] for e in promo_pool}
+    assert books == {"DraftKings", "FanDuel"}
+
+
+def test_find_player_prop_edges_promo_pool_captures_sub_min_ev_candidates():
+    # Five books all priced an HR yes at +500 (~16.7% implied); after
+    # the one-sided fallback in _compute_prop_fair_prob the fair_prob
+    # ≈ implied so the line lands at roughly 0% EV — below MIN_EV_PERCENT
+    # but exactly the kind of candidate a 30% HR boost should surface.
+    props = []
+    for book in ("draftkings", "fanduel", "betmgm", "caesars", "betrivers"):
+        props.append({
+            "player":      "Aaron Judge",
+            "game":        "NYY @ BOS",
+            "commence":    "2099-01-01T19:00:00Z",
+            "sport":       "MLB",
+            "market":      "hr",
+            "market_disp": "Anytime HR",
+            "line":        0.5,
+            "side":        "over",
+            "book_odds":   {book: 500},
+        })
+    promo_pool: list[dict] = []
+    edges = find_player_prop_edges(props, promo_pool=promo_pool)
+    # Should not reach the +EV-only return…
+    assert edges == []
+    # …but the parallel pool must hold the boost-eligible candidates.
+    assert len(promo_pool) >= 1
+    assert all(e["market"] == "hr" for e in promo_pool)
+    books = {e["book"] for e in promo_pool}
+    assert books == {"DraftKings", "FanDuel"}
+
+
+def test_find_player_prop_edges_default_promo_pool_none_no_side_effect():
+    # Default behaviour (no promo_pool kwarg) is unchanged — callers like
+    # run_headless that don't compute promo picks shouldn't pay any cost.
+    props = []
+    for book in ("draftkings", "fanduel", "betmgm", "caesars", "betrivers"):
+        props.append({
+            "player":      "Aaron Judge",
+            "game":        "NYY @ BOS",
+            "commence":    "2099-01-01T19:00:00Z",
+            "sport":       "MLB",
+            "market":      "hr",
+            "market_disp": "Anytime HR",
+            "line":        0.5,
+            "side":        "over",
+            "book_odds":   {book: 500},
+        })
+    # Passing nothing should not raise and should not crash on a missing
+    # parallel pool.
+    assert find_player_prop_edges(props) == []
