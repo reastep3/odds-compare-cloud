@@ -358,6 +358,18 @@ MAX_WORKERS    = 6     # parallel sport-fetch threads
 # as the sole reference for EV calculation.
 MIN_PROP_REFERENCE_BOOKS = 2
 
+# Stale-target-line guard for one-sided / outright markets (golf, HR,
+# player-prop yes/no like double-double). For markets where fair_prob is
+# derived from a multi-book median without over/under devig, a single
+# stale or erroneous target-book line shows up as a giant pseudo-EV
+# instead of being smoothed out. Require the target book's implied
+# probability to be at least this fraction of the consensus — anything
+# below means the target line is >2.5x longer than fair, which in
+# practice has always been bad data (e.g. DK at +10500 on a player most
+# books have at +1500), never a real edge. Calibrated against the
+# Maverick McNealy PGA Championship incident — ratio there was ~0.15.
+MIN_TARGET_OUTLIER_PROB_RATIO = 0.4
+
 # Minimum bet amounts enforced by each book
 MIN_BET = {
     "DraftKings": 0.10,
@@ -4239,6 +4251,18 @@ def find_golf_edges(
             # a 0.1%-prob long-shot's fair-price signal.
             if prop["market"] == "golf_win" and fair_prob < 0.002:
                 continue
+            # Stale-target-line guard: if the target book's implied prob is
+            # well below the consensus median, the target line is almost
+            # certainly stale/erroneous (see the McNealy +10500 vs ~+1500
+            # incident). Skip — never present such a pick to the user.
+            target_implied = 1.0 / dec
+            if target_implied < MIN_TARGET_OUTLIER_PROB_RATIO * fair_prob:
+                print(f"  [Golf] Outlier rejected: {prop['player']} "
+                      f"{prop['market']} on {display} at "
+                      f"{format_american(dec)} — consensus implies "
+                      f"~{format_american(1.0 / fair_prob)} "
+                      f"(ratio {target_implied / fair_prob:.2f}, likely stale)")
+                continue
             kelly = kelly_bet(fair_prob, dec)
             edge_dict = {
                 "sport":             prop["sport"],
@@ -4515,6 +4539,16 @@ def find_hr_edges(hr_props: list[dict]) -> list[dict]:
             #      diagnostic instead of surfacing the best available.
             # fair_prob is already clamped to [0.02, 0.60] above, so we
             # can't admit pathological long-shots.
+            # Stale-target-line guard: same protection as golf — if the
+            # target book's implied prob is wildly below consensus, the
+            # line is almost certainly stale data, not a real edge.
+            target_implied = 1.0 / dec
+            if target_implied < MIN_TARGET_OUTLIER_PROB_RATIO * fair_prob:
+                print(f"  [HR] Outlier rejected: {prop['player']} on "
+                      f"{display} at {format_american(dec)} — consensus "
+                      f"implies ~{format_american(1.0 / fair_prob)} "
+                      f"(ratio {target_implied / fair_prob:.2f}, likely stale)")
+                continue
             kelly = kelly_bet(fair_prob, dec)
             edges.append({
                 "sport":           prop["sport"],
@@ -6054,6 +6088,20 @@ def find_player_prop_edges(
 
                 fair_prob = max(0.05, min(0.95, fair_prob))
                 ev = calc_ev(fair_prob, dec)
+                # Stale-target-line guard: if the target book's implied
+                # prob is wildly below the consensus (computed without
+                # this book), the target's price is almost certainly
+                # stale or erroneous, not a real edge — protects against
+                # pathological-EV picks slipping through the boost path.
+                target_implied = 1.0 / dec
+                if target_implied < MIN_TARGET_OUTLIER_PROB_RATIO * fair_prob:
+                    print(f"  [PlayerProp] Outlier rejected: {player} "
+                          f"{market} {side} on {display} at "
+                          f"{format_american(dec)} — consensus implies "
+                          f"~{format_american(1.0 / fair_prob)} "
+                          f"(ratio {target_implied / fair_prob:.2f}, "
+                          f"likely stale)")
+                    continue
                 kelly      = kelly_bet(fair_prob, dec)
                 # Binary Yes/No markets (anytime HR, double-double) come
                 # through with line=None — label them Y/N rather than O/U.

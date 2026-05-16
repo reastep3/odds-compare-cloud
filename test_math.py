@@ -431,6 +431,88 @@ def test_parse_promo_single_token_homer_slang():
     assert promo["market"] == "hr"
 
 
+# ── Stale-target-line outlier guard ────────────────────────────────────
+# Regression: a stale +10500 DK line on Maverick McNealy with the
+# consensus around +1500 produced a 373% pseudo-EV pick. Caused real
+# user-facing harm because the boosted promo path surfaced it. The
+# outlier guard rejects any target line whose implied prob is below
+# MIN_TARGET_OUTLIER_PROB_RATIO * consensus_fair_prob.
+
+from odds_compare import find_hr_edges
+
+
+def test_find_golf_edges_rejects_outlier_target_book():
+    # DK is at a stale +10500 while every other book agrees on +500.
+    # The target's implied prob (~0.94%) is 5% of the consensus (~16.7%),
+    # well below the 0.4 ratio threshold — must be discarded from BOTH
+    # the returned edges and the promo_pool so it never reaches the
+    # scanner via either path.
+    golf_props = [{
+        "player":      "Maverick McNealy",
+        "tournament":  "PGA Championship",
+        "commence":    "2099-01-01T12:00:00Z",
+        "sport":       "PGA",
+        "market":      "golf_win",
+        "market_disp": "Tournament Winner",
+        # 68=DK stale at +10500; 69=FD/75=BetMGM/49=Caesars/71=BetRivers at +500.
+        "book_odds":   {68: 10500, 69: 500, 75: 500, 49: 500, 71: 500},
+    }]
+    promo_pool: list[dict] = []
+    edges = find_golf_edges(golf_props, promo_pool=promo_pool)
+    # DK must not appear anywhere — not in +EV edges, not in promo pool.
+    assert not any(e["book"] == "DraftKings" for e in edges)
+    assert not any(e["book"] == "DraftKings" for e in promo_pool)
+    # FD's clean +500 line is fair-priced, so it lands in the promo pool
+    # (for boost evaluation) but not in the +EV edges (EV ≈ 0).
+    fd_in_pool = [e for e in promo_pool if e["book"] == "FanDuel"]
+    assert len(fd_in_pool) == 1
+
+
+def test_find_hr_edges_rejects_outlier_target_book():
+    # Same pattern for HR props — DK stale at +5000 while consensus +400.
+    hr_props = [{
+        "player":   "Aaron Judge",
+        "game":     "NYY @ BOS",
+        "commence": "2099-01-01T19:00:00Z",
+        "sport":    "MLB",
+        # 68=DK stale, 69=FD/75=BetMGM/49=Caesars at +400 (~20% implied).
+        "book_odds": {68: 5000, 69: 400, 75: 400, 49: 400},
+    }]
+    edges = find_hr_edges(hr_props)
+    assert not any(e["book"] == "DraftKings" for e in edges)
+    # FD's fair-priced line is still an edge (EV near zero, but find_hr_edges
+    # post-dcb9d86 has no MIN_EV gate so it lands in the list).
+    assert any(e["book"] == "FanDuel" for e in edges)
+
+
+def test_find_player_prop_edges_rejects_outlier_target_book():
+    # DK stale at +10500 on an anytime HR while four other books at +500.
+    # _compute_prop_fair_prob excludes the book being evaluated, so the
+    # consensus seen when evaluating DK is the clean 4-book median.
+    props = [{
+        "player": "Aaron Judge", "game": "NYY @ BOS",
+        "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+        "market": "hr", "market_disp": "Anytime HR",
+        "line": 0.5, "side": "over",
+        "book_odds": {"draftkings": 10500},
+    }]
+    for book in ("fanduel", "betmgm", "caesars", "betrivers"):
+        props.append({
+            "player": "Aaron Judge", "game": "NYY @ BOS",
+            "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+            "market": "hr", "market_disp": "Anytime HR",
+            "line": 0.5, "side": "over",
+            "book_odds": {book: 500},
+        })
+    promo_pool: list[dict] = []
+    edges = find_player_prop_edges(props, promo_pool=promo_pool)
+    # DK must not appear — outlier-rejected before edge_dict construction.
+    assert not any(e["book"] == "DraftKings" for e in promo_pool)
+    assert not any(e["book"] == "DraftKings" for e in edges)
+    # FD's fair-priced line still reaches the promo pool.
+    assert any(e["book"] == "FanDuel" for e in promo_pool)
+
+
 def test_find_player_prop_edges_default_promo_pool_none_no_side_effect():
     # Default behaviour (no promo_pool kwarg) is unchanged — callers like
     # run_headless that don't compute promo picks shouldn't pay any cost.
