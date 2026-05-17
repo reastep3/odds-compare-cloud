@@ -357,7 +357,11 @@ def build_app() -> FastAPI:
         from odds_compare import (run_headless_fetch, run_headless_finalize)
 
         def _do_run() -> dict[str, Any]:
-            fetched = run_headless_fetch(dk, fd)
+            # Webapp has no HR-Props UI today, so always skip the
+            # batter_home_runs market — saves ~1 Odds API credit per
+            # MLB event on every webapp scan. Pass promos=[] so
+            # _promos_want_hr returns False and the HR gate fires.
+            fetched = run_headless_fetch(dk, fd, promos=[])
             return run_headless_finalize(fetched, promos=None)
 
         result = await asyncio.to_thread(_do_run)

@@ -238,6 +238,61 @@ def test_scope_player_prop_routed_to_correct_sport():
     assert scope["sports"] == set()
 
 
+from odds_compare import _promos_want_hr
+
+
+def test_promos_want_hr_empty_list_returns_false():
+    # /run with no promos and no scope should not trigger an HR fetch —
+    # nothing downstream would consume the data.
+    assert _promos_want_hr([]) is False
+    assert _promos_want_hr(None) is False
+
+
+def test_promos_want_hr_explicit_hr_promo():
+    assert _promos_want_hr([
+        {"book": "FanDuel", "sport": "mlb", "market": "hr"}
+    ]) is True
+
+
+def test_promos_want_hr_mlb_all_market_promo():
+    # An "fd 30% mlb" boost with market=all could land on HR via the
+    # broader pool selection — must fetch HR so the picker can see it.
+    assert _promos_want_hr([
+        {"book": "FanDuel", "sport": "mlb", "market": "all"}
+    ]) is True
+
+
+def test_promos_want_hr_all_sport_all_market_promo():
+    # Catch-all bonus_bet — picker selects longest-odds line from any
+    # market, and HR is a typical long-odds winner. Must fetch HR.
+    assert _promos_want_hr([
+        {"book": "FanDuel", "sport": "all", "market": "all",
+         "promo_type": "bonus_bet"}
+    ]) is True
+
+
+def test_promos_want_hr_unrelated_promo_returns_false():
+    # An NBA-points promo can't possibly apply to MLB HR — gate fires.
+    assert _promos_want_hr([
+        {"book": "DraftKings", "sport": "nba", "market": "pts"}
+    ]) is False
+
+
+def test_promos_want_hr_mlb_strikeouts_returns_false():
+    # MLB strikeouts is a pitcher prop — wrong market, can't apply to HR.
+    assert _promos_want_hr([
+        {"book": "FanDuel", "sport": "mlb", "market": "strikeouts"}
+    ]) is False
+
+
+def test_promos_want_hr_mixed_list_any_match_wins():
+    # If even one promo applies, fetch HR — the gate is conservative.
+    assert _promos_want_hr([
+        {"book": "DraftKings", "sport": "nba", "market": "pts"},
+        {"book": "FanDuel", "sport": "mlb", "market": "hr"},
+    ]) is True
+
+
 def test_scope_union_across_multiple_promos():
     scope = _derive_promo_scope([
         {"book": "FanDuel", "sport": "mlb", "market": "h2h"},

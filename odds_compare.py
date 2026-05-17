@@ -6750,8 +6750,35 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
     }
 
 
+def _promos_want_hr(promos: list[dict] | None) -> bool:
+    """Return True if at least one promo could apply to an MLB HR pick.
+
+    Used to gate the batter_home_runs market on full /run fetches.
+    Each per-event Odds API prop call costs (markets × regions) credits,
+    so adding HR to the MLB prop list costs ~1 extra credit per MLB
+    event (5 markets vs 4). Skip when no promo could use HR data.
+
+    A promo can apply to HR when its sport is "all" or "mlb" AND its
+    market is "all" or "hr". bonus_bet and parlay promos count — they
+    select longest-odds candidates from a broad pool and HR is a
+    common winner there.
+    """
+    if not promos:
+        return False
+    for p in promos:
+        sport = (p.get("sport") or "all").lower()
+        if sport not in ("all", "mlb"):
+            continue
+        market = (p.get("market") or "all").lower()
+        if market not in ("all", "hr"):
+            continue
+        return True
+    return False
+
+
 def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
-                       scope: dict | None = None) -> dict:
+                       scope: dict | None = None,
+                       promos: list[dict] | None = None) -> dict:
     """
     Phase 1 of the headless pipeline: fetch odds + props, compute edges.
 
@@ -6863,11 +6890,31 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
     pp_filter = (None if scope is None
                  else scope["prop_sport_markets"] or None)
 
+    # Full-fetch HR gating: when scope is None (the /run path) and the
+    # caller passed an explicit promos list, drop batter_home_runs from
+    # the MLB prop fetch unless at least one promo could apply to HR.
+    # Saves ~1 Odds API credit per MLB event on the unscoped path —
+    # adds up to ~15 credits a day on a typical slate when no HR promo
+    # is configured. When promos=None (legacy callers, webapp without
+    # a promos list), keep the original behavior of fetching all MLB
+    # markets so we don't silently break those paths.
+    hr_gated_out = False
+    if scope is None and promos is not None and not _promos_want_hr(promos):
+        pp_filter = {
+            sp: set(mks) - {"hr"}
+            for sp, mks in _PROP_MARKETS_BY_SPORT.items()
+        }
+        pp_filter = {sp: mks for sp, mks in pp_filter.items() if mks}
+        do_pp = bool(pp_filter)
+        hr_gated_out = True
+
     bits = []
     if do_golf: bits.append("PGA Golf")
-    if do_pp:   bits.append("O/U + HR Props")
+    if do_pp:
+        bits.append("O/U Props" if hr_gated_out else "O/U + HR Props")
     if bits:
-        print(f"\nFetching player props ({' + '.join(bits)})...")
+        suffix = " (HR skipped — no HR-applicable promo)" if hr_gated_out else ""
+        print(f"\nFetching player props ({' + '.join(bits)}){suffix}...")
     else:
         print("\nSkipping all player-prop fetches (scope doesn't need any).")
 
@@ -7335,8 +7382,12 @@ def run_headless(dk_bankroll: float, fd_bankroll: float,
                  game_filters: dict[str, str] | None = None) -> dict:
     """Convenience wrapper for non-interactive consumers — runs both phases
     in sequence. Bot path uses fetch + finalize separately so it can prompt
-    the user for game-specific promo selections in between."""
-    fetched = run_headless_fetch(dk_bankroll, fd_bankroll)
+    the user for game-specific promo selections in between.
+
+    The promos list is forwarded to Phase 1 so the HR market is only
+    fetched when at least one promo could apply to HR — saves Odds API
+    credits on the unscoped /run path."""
+    fetched = run_headless_fetch(dk_bankroll, fd_bankroll, promos=promos)
     return run_headless_finalize(fetched, promos, game_filters)
 
 

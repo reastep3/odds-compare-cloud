@@ -1691,8 +1691,12 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.bot_data["running"] = True
     async with _run_lock:
         try:
+            # Pass `promos` even on the full-fetch (scope=None) path so
+            # run_headless_fetch can decide whether to include HR in the
+            # MLB prop call. /run with no HR-applicable promo skips HR
+            # entirely, saving ~1 Odds API credit per MLB event.
             fetched = await asyncio.to_thread(
-                _run_odds_compare_fetch, dk, fd, scope)
+                _run_odds_compare_fetch, dk, fd, scope, promos)
         except Exception as e:
             context.bot_data["running"] = False
             await context.bot.send_message(chat_id, f"Run failed: {e}")
@@ -2010,10 +2014,17 @@ async def _finalize_and_send(update: Update,
 
 
 def _run_odds_compare_fetch(dk: float, fd: float,
-                            scope: dict | None = None) -> dict:
-    """Thread-safe wrapper around run_headless_fetch."""
+                            scope: dict | None = None,
+                            promos: list[dict] | None = None) -> dict:
+    """Thread-safe wrapper around run_headless_fetch.
+
+    `promos` is passed through purely to gate the batter_home_runs market
+    on full-fetch (/run) calls — see _promos_want_hr in odds_compare.
+    Scoped (/run_promos) calls already include or exclude HR via the
+    scope dict, so this parameter is a no-op there.
+    """
     from odds_compare import run_headless_fetch
-    return run_headless_fetch(dk, fd, scope=scope)
+    return run_headless_fetch(dk, fd, scope=scope, promos=promos)
 
 
 def _run_odds_compare_finalize(fetched: dict, promos: list,
@@ -2313,7 +2324,12 @@ async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["running"] = True
     try:
         from odds_compare import run_headless_fetch, run_headless_finalize
-        fetched = await asyncio.to_thread(run_headless_fetch, 0, 0)
+        # Auto-scan has no user-supplied promos and HR isn't in the
+        # Play These filter, so HR data would just feed an empty
+        # HR Props tab. Pass promos=[] so the HR gate fires and we
+        # save the per-MLB-event credit cost on the daily run.
+        fetched = await asyncio.to_thread(
+            run_headless_fetch, 0, 0, None, [])
         result  = await asyncio.to_thread(run_headless_finalize, fetched, None)
         path    = result.get("output_path")
         n_play  = len(result.get("play_edges") or [])
