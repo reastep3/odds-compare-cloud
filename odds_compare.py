@@ -2770,10 +2770,18 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 # via the side-effect param) so PGA + prop-boost promos can
                 # see candidates that are sub-MIN_EV pre-boost; fall back to
                 # the gated lists when an older caller hasn't supplied them.
+                # pp_promo_pool already includes HR (find_player_prop_edges
+                # appends every constructed edge to promo_pool, then skips
+                # HR before the gated edges list). hr_edges is a separate
+                # view used by HR Props rendering but redundant here.
+                # player_prop_edges is the gated fallback for legacy callers
+                # that didn't pass pp_promo_pool — HR is intentionally absent
+                # from that list, so HR-boost lifts only work when the
+                # caller provides pp_promo_pool (always true in the current
+                # run_headless flow).
                 _play_promo_pool = (list(promo_pool or edges)
                                     + list(pp_promo_pool
                                            or player_prop_edges or [])
-                                    + list(hr_edges or [])
                                     + list(golf_promo_pool
                                            or golf_edges or []))
                 if is_bonus_bet:
@@ -3289,8 +3297,10 @@ def write_excel(edges: list[dict], dk_bankroll: float,
         promo_rows = []
         # Use broader promo_pool (all DK/FD outcomes) so the Promos sheet
         # can include picks that only become +EV once the boost is applied.
-        # HR edges are included; _promo_matches gates them to HR-targeted
-        # promos only.
+        # player_prop_edges has no HR (find_player_prop_edges keeps HR out
+        # of the returned list); hr_edges carries the ungated HR pool so a
+        # 30% HR boost can still lift sub-MIN_EV picks. _promo_matches
+        # gates HR edges to HR-targeted promos only.
         _all_for_promos = (list(promo_pool or edges)
                            + list(player_prop_edges or [])
                            + list(hr_edges or []))
@@ -4299,282 +4309,16 @@ def find_golf_edges(
 # ──────────────────────────────────────────────────────────────────────
 # MLB Anytime HR Player Props
 # ──────────────────────────────────────────────────────────────────────
-
-# Action Network prop key for "Anytime Home Run" (1+ HR milestones)
-AN_HR_PROP_KEY = "core_bet_type_433_943_player_home_runs_milestones_1_or_more"
-
-
-def fetch_hr_props(session: requests.Session) -> list[dict]:
-    """
-    Fetch anytime HR player prop odds for all today's MLB games.
-
-    1. Hit AN v2 scoreboard for MLB to get game IDs.
-    2. For each game, hit /web/v2/games/{id}/props to get HR odds.
-    3. Return a list of HR prop dicts with multi-book odds.
-
-    Returns list of:
-      {
-        "player":    "Mike Trout",
-        "game":      "LAA @ NYY",
-        "commence":  "2026-03-29T...",
-        "sport":     "MLB",
-        "book_odds": {68: 320, 69: 310, ...},   # book_id → american odds
-      }
-    """
-    # Step 1: get MLB game IDs from scoreboard
-    book_ids_str = ",".join(str(b) for b in AN_BOOK_IDS)
-    url = f"{ACTION_NETWORK_BASE}/scoreboard/mlb"
-    try:
-        resp = session.get(url, params={"bookIds": book_ids_str}, timeout=30)
-        if resp.status_code != 200:
-            print(f"  [HR Props] MLB scoreboard returned {resp.status_code}")
-            return []
-    except Exception as e:
-        print(f"  [HR Props] MLB scoreboard error: {e}")
-        return []
-
-    games = resp.json().get("games", [])
-    if not games:
-        print("  [HR Props] No MLB games today")
-        return []
-
-    # Filter to bettable (upcoming) games
-    bettable = []
-    skipped = 0
-    for game in games:
-        game_id = game.get("id")
-        if not game_id:
-            continue
-        status = game.get("status", "scheduled")
-        if status not in ("scheduled", "pregame", "delayed", "postponed", ""):
-            skipped += 1
-            continue
-        bettable.append(game)
-
-    if not bettable:
-        print(f"  [HR Props] {len(games)} MLB games found but all are "
-              f"complete/in-progress — run earlier for tomorrow's slate")
-        return []
-
-    print(f"  [HR Props] {len(bettable)} bettable MLB games "
-          f"({skipped} already complete) — fetching props...")
-
-    # Step 2: for each bettable game, fetch HR props
-    hr_props = []
-    for game in bettable:
-
-        # Build game label
-        teams = game.get("teams", [])
-        away_name = home_name = "TBD"
-        away_id = game.get("away_team_id")
-        home_id = game.get("home_team_id")
-        for t in teams:
-            tid = t.get("id")
-            if tid == away_id:
-                away_name = t.get("abbr") or t.get("full_name", "Away")
-            elif tid == home_id:
-                home_name = t.get("abbr") or t.get("full_name", "Home")
-        game_label = f"{away_name} @ {home_name}"
-        commence = game.get("start_time") or game.get("event_date", "")
-
-        # Fetch props
-        props_url = f"{ACTION_NETWORK_BASE}/games/{game_id}/props"
-        try:
-            presp = session.get(props_url, timeout=30)
-            if presp.status_code != 200:
-                continue
-            props_data = presp.json()
-        except Exception:
-            continue
-
-        # Extract HR prop
-        player_props = props_data.get("player_props", {})
-        hr_data = player_props.get(AN_HR_PROP_KEY)
-        if not hr_data:
-            continue
-
-        players_map = props_data.get("players", {})
-
-        # hr_data is a list of player entries
-        entries = hr_data if isinstance(hr_data, list) else [hr_data]
-        for entry in entries:
-            player_id = entry.get("player_id")
-            player_name = "Unknown"
-            if player_id and str(player_id) in players_map:
-                player_name = players_map[str(player_id)].get(
-                    "full_name", "Unknown")
-            elif player_id and player_id in players_map:
-                player_name = players_map[player_id].get(
-                    "full_name", "Unknown")
-            # Fallback to abbreviated name on the entry itself
-            if player_name == "Unknown":
-                player_name = (entry.get("player_abbr")
-                               or entry.get("player_last_name")
-                               or "Unknown")
-
-            lines = entry.get("lines", {})
-            if not lines:
-                continue
-
-            book_odds: dict[int, int] = {}
-            for bid_str, line_data in lines.items():
-                try:
-                    bid = int(bid_str)
-                except ValueError:
-                    continue
-                # line_data can be a list or dict
-                if isinstance(line_data, list):
-                    for ld in line_data:
-                        odds = ld.get("odds")
-                        if odds is not None:
-                            book_odds[bid] = int(odds)
-                            break
-                elif isinstance(line_data, dict):
-                    odds = line_data.get("odds")
-                    if odds is not None:
-                        book_odds[bid] = int(odds)
-
-            if book_odds:
-                hr_props.append({
-                    "player":    player_name,
-                    "game":      game_label,
-                    "commence":  commence,
-                    "sport":     "MLB",
-                    "book_odds": book_odds,
-                })
-
-        # Small delay to avoid hammering the API
-        time.sleep(0.3)
-
-    print(f"  [HR Props] {len(hr_props)} player HR lines across "
-          f"{len(games)} games")
-    return hr_props
-
-
-def find_hr_edges(hr_props: list[dict]) -> list[dict]:
-    """
-    For each HR prop, find +EV opportunities on DraftKings / FanDuel.
-
-    Uses median consensus of all available books as fair probability
-    (Pinnacle doesn't offer HR player props).
-
-    Returns list of edge dicts compatible with the promo system:
-      {
-        "player", "game", "commence", "sport", "book", "market",
-        "outcome", "point", "odds_american", "odds_decimal",
-        "fair_prob", "implied_prob", "ev_pct", "kelly_pct",
-        "num_other_books", "best_other_odds", "pinnacle_anchored",
-        "all_book_odds",
-      }
-    """
-    # Map AN book IDs to canonical keys
-    target_book_ids = set()
-    for bid, name in AN_BOOK_IDS.items():
-        key = _book_key(bid)
-        if key in TARGET_BOOKS:
-            target_book_ids.add(bid)
-
-    edges = []
-    for prop in hr_props:
-        book_odds = prop["book_odds"]
-        if len(book_odds) < 2:
-            continue  # need at least 2 books for consensus
-
-        # Split into target (DK/FD) and other books
-        target_entries = []
-        other_entries = []
-        for bid, am in book_odds.items():
-            dec = american_to_decimal(am)
-            if bid in target_book_ids:
-                bk = _book_key(bid)
-                display = "DraftKings" if bk == "draftkings" else "FanDuel"
-                target_entries.append((display, dec, am, bid))
-            elif bid in AN_BOOK_IDS:
-                other_entries.append((AN_BOOK_IDS[bid], dec, am, bid))
-            else:
-                other_entries.append((f"Book_{bid}", dec, am, bid))
-
-        if not target_entries:
-            continue
-        if not other_entries:
-            continue  # need at least 1 other book
-
-        # Fair probability from median of ALL books (including target)
-        all_probs = sorted(
-            [decimal_to_implied_prob(american_to_decimal(am))
-             for am in book_odds.values()])
-        mid = len(all_probs) // 2
-        if len(all_probs) % 2 == 0:
-            fair_prob = (all_probs[mid - 1] + all_probs[mid]) / 2
-        else:
-            fair_prob = all_probs[mid]
-
-        fair_prob = max(0.02, min(0.60, fair_prob))  # HR probs are typically 5-25%
-
-        best_other_dec = max(d for _, d, _, _ in other_entries)
-
-        # Collect all book odds for comparison
-        all_book_display: dict[str, int] = {}
-        for bid, am in book_odds.items():
-            if bid in AN_BOOK_IDS:
-                name = AN_BOOK_IDS[bid]
-            else:
-                name = f"Book_{bid}"
-            all_book_display[name] = am
-
-        # Dedup target entries by canonical book (keep best odds)
-        best_target: dict[str, tuple] = {}
-        for display, dec, am, bid in target_entries:
-            if display not in best_target or dec > best_target[display][1]:
-                best_target[display] = (display, dec, am, bid)
-
-        for display, dec, am, bid in best_target.values():
-            ev = calc_ev(fair_prob, dec)
-            # No pre-boost EV gate. HR edges feed two consumers:
-            #   1. _build_hr_boost_rows (HR Props tab) — applies its own
-            #      `boosted_ev < 0.5` filter, so trash never appears there.
-            #   2. _build_promo_picks (Play These / Telegram) — ranks by
-            #      *boosted* EV with a least-bad fallback when nothing
-            #      clears MIN_EV_PERCENT, so a 30%+ HR boost can lift
-            #      an underdog with raw EV of -20% or worse into playable
-            #      territory. Gating raw EV here would empty the pool
-            #      for that promo and force the "No outcomes match"
-            #      diagnostic instead of surfacing the best available.
-            # fair_prob is already clamped to [0.02, 0.60] above, so we
-            # can't admit pathological long-shots.
-            # Stale-target-line guard: same protection as golf — if the
-            # target book's implied prob is wildly below consensus, the
-            # line is almost certainly stale data, not a real edge.
-            target_implied = 1.0 / dec
-            if target_implied < MIN_TARGET_OUTLIER_PROB_RATIO * fair_prob:
-                print(f"  [HR] Outlier rejected: {prop['player']} on "
-                      f"{display} at {format_american(dec)} — consensus "
-                      f"implies ~{format_american(1.0 / fair_prob)} "
-                      f"(ratio {target_implied / fair_prob:.2f}, likely stale)")
-                continue
-            kelly = kelly_bet(fair_prob, dec)
-            edges.append({
-                "sport":           prop["sport"],
-                "game":            prop["game"],
-                "commence":        prop["commence"],
-                "book":            display,
-                "market":          "hr",
-                "outcome":         prop["player"],
-                "point":           None,
-                "odds_american":   am,
-                "odds_decimal":    round(dec, 3),
-                "fair_prob":       round(fair_prob * 100, 1),
-                "implied_prob":    round(decimal_to_implied_prob(dec) * 100, 1),
-                "ev_pct":          round(ev, 2),
-                "kelly_pct":       round(kelly * 100, 2),
-                "num_other_books": len(other_entries),
-                "best_other_odds": format_american(best_other_dec),
-                "pinnacle_anchored": False,
-                "all_book_odds":   all_book_display,
-            })
-
-    edges.sort(key=lambda x: x["ev_pct"], reverse=True)
-    return edges
+#
+# 2026-05-17: HR props moved from a dedicated Action Network pipeline
+# (fetch_hr_props + find_hr_edges) to the Odds API batter_home_runs
+# market. The AN scoreboard endpoint flaked near midnight ET, returning
+# empty slates that made HR-targeted promos look broken; the Odds API
+# path also offers Pinnacle-anchored devigged consensus when available,
+# which is methodologically cleaner than AN's "median of all books incl
+# the target" approach. find_player_prop_edges now filters HR to the
+# Yes side, normalizes outcome/point, and routes the result into the
+# hr_edges view derived from pp_promo_pool — see run_headless_fetch.
 
 
 def _build_hr_boost_rows(hr_edges: list[dict], promos: list[dict],
@@ -6038,6 +5782,13 @@ def find_player_prop_edges(
         line = pair["line"]
 
         for side in ("over", "under"):
+            # Anytime HR is binary — a bet on "no HR" isn't a market we
+            # surface (boost terms always say "anytime home run", and the
+            # No side carries different fair-prob math). Emit the Yes side
+            # only so HR edges stay shaped like the prior AN-flavored
+            # output the HR Props tab + promo picker expect.
+            if market == "hr" and side != "over":
+                continue
             side_odds       = pair[side]
             other_side_odds = pair["under" if side == "over" else "over"]
             if not side_odds:
@@ -6108,17 +5859,25 @@ def find_player_prop_edges(
                 kelly      = kelly_bet(fair_prob, dec)
                 # Binary Yes/No markets (anytime HR, double-double) come
                 # through with line=None — label them Y/N rather than O/U.
-                is_binary  = line is None
+                # HR is always binary regardless of whether the Odds API
+                # included a 0.5 line: outcome shows just the player name
+                # (Yes side only — filtered above) and point is normalized
+                # to None so the HR Props tab + telegram output read the
+                # same as the prior AN-flavored shape.
+                is_hr      = market == "hr"
+                is_binary  = is_hr or line is None
                 side_label = (("Y" if side == "over" else "N") if is_binary
                               else ("O" if side == "over" else "U"))
+                outcome    = player if is_hr else f"{player} {side_label}"
+                edge_point = None if is_hr else line
                 edge_dict = {
                     "sport":             pair["sport"],
                     "game":              game,
                     "commence":          pair["commence"],
                     "book":              display,
                     "market":            market,
-                    "outcome":           f"{player} {side_label}",
-                    "point":             line,
+                    "outcome":           outcome,
+                    "point":             edge_point,
                     "odds_american":     am,
                     "odds_decimal":      round(dec, 3),
                     "fair_prob":         round(fair_prob * 100, 1),
@@ -6139,6 +5898,14 @@ def find_player_prop_edges(
                 }
                 if promo_pool is not None:
                     promo_pool.append(edge_dict)
+                # HR stays out of the returned (gated) list — it has its own
+                # hr_edges list derived from promo_pool downstream, and mixing
+                # HR into player_prop_edges would force every caller that
+                # concatenates the two (write_excel, eligible_games_for_promo)
+                # to filter for dedup. Pre-migration `find_hr_edges` already
+                # treated HR as its own pipeline; keep that boundary.
+                if market == "hr":
+                    continue
                 if ev >= MIN_EV_PERCENT:
                     edges.append(edge_dict)
 
@@ -6903,7 +6670,14 @@ _GAME_LINE_MARKETS = frozenset({"h2h", "spreads", "totals"})
 # fetch_player_props().
 _PROP_MARKETS_BY_SPORT: dict[str, frozenset[str]] = {
     "nba": frozenset({"pts", "reb", "ast", "threes", "pra", "dd"}),
-    "mlb": frozenset({"strikeouts", "total_bases", "hits", "rbis"}),
+    # HR routes through the Odds API batter_home_runs market alongside
+    # the other MLB props — Action Network's parallel HR pipeline was
+    # retired because its consensus math (median of all books including
+    # the target) was strictly worse than the Pinnacle-anchored devigged
+    # consensus from _compute_prop_fair_prob, and AN's scoreboard
+    # endpoint flaked near midnight ET, surfacing the "No outcomes
+    # match" diagnostic to users with an HR-targeted promo.
+    "mlb": frozenset({"strikeouts", "total_bases", "hits", "rbis", "hr"}),
     "nhl": frozenset({"sog", "nhl_pts"}),
 }
 # Golf markets that flow from fetch_golf_props.
@@ -6925,17 +6699,21 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
       {
         "sports":             set[str],            # game-line sports to fetch
         "prop_sport_markets": dict[str, set[str]], # sport → internal market keys
-        "need_hr":            bool,
         "need_golf":          bool,
       }
     Empty `sports`/`prop_sport_markets` mean those fetches can be skipped
-    entirely. The caller is expected to short-circuit accordingly."""
+    entirely. The caller is expected to short-circuit accordingly.
+
+    Note: HR used to have its own `need_hr` flag routing to a parallel
+    Action Network fetch. Post-migration HR is just another MLB prop in
+    _PROP_MARKETS_BY_SPORT["mlb"], so an HR-targeted promo lands in
+    prop_sport_markets={"mlb": {"hr"}} and rides the regular Odds API
+    prop pipeline."""
     if not promos:
         return None
 
     sports: set[str] = set()
     prop_sport_markets: dict[str, set[str]] = {}
-    need_hr = False
     need_golf = False
 
     for p in promos:
@@ -6953,8 +6731,6 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
 
         if market in _GAME_LINE_MARKETS:
             sports.add(fetch_sport)
-        elif market == "hr":
-            need_hr = True
         elif market in _GOLF_PROMO_MARKETS:
             need_golf = True
         else:
@@ -6970,7 +6746,6 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
     return {
         "sports":             sports,
         "prop_sport_markets": prop_sport_markets,
-        "need_hr":            need_hr,
         "need_golf":          need_golf,
     }
 
@@ -7021,7 +6796,6 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
         print(f"\n[Scoped run] game-line sports: "
               f"{sports_to_fetch or 'none'}; "
               f"player-props: {dict(scope['prop_sport_markets']) or 'none'}; "
-              f"HR props: {scope['need_hr']}; "
               f"Golf: {scope['need_golf']}")
     if sports_to_fetch:
         print(f"\nFetching {len(sports_to_fetch)} sport(s) in parallel "
@@ -7084,23 +6858,18 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
 
     # Fetch player props — each one can be scope-skipped independently.
     props_session     = make_session()
-    do_hr   = (scope is None) or scope["need_hr"]
     do_golf = (scope is None) or scope["need_golf"]
     do_pp   = (scope is None) or bool(scope["prop_sport_markets"])
     pp_filter = (None if scope is None
                  else scope["prop_sport_markets"] or None)
 
     bits = []
-    if do_hr:   bits.append("MLB HR")
     if do_golf: bits.append("PGA Golf")
-    if do_pp:   bits.append("O/U Props")
+    if do_pp:   bits.append("O/U + HR Props")
     if bits:
         print(f"\nFetching player props ({' + '.join(bits)})...")
     else:
         print("\nSkipping all player-prop fetches (scope doesn't need any).")
-
-    hr_props_raw = fetch_hr_props(props_session) if do_hr else []
-    hr_edges     = find_hr_edges(hr_props_raw) if hr_props_raw else []
 
     # Parallel pools for golf + player props mirror the game-line promo_pool:
     # find_X_edges still returns the +EV-only list used by sheet writers and
@@ -7118,6 +6887,16 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
     player_prop_edges = (
         find_player_prop_edges(pp_props_raw, promo_pool=pp_promo_pool)
         if pp_props_raw else [])
+
+    # HR edges are derived from the Odds API prop output now — find_player_prop_edges
+    # filters batter_home_runs to the Yes side and normalizes outcome/point to
+    # match the shape the HR Props tab + Telegram message expect. The HR list
+    # is split out from the rest of the player_prop_edges so consumers that
+    # only care about HR (HR Props sheet, /hr_picks) don't need to re-filter.
+    # Use the *ungated* pp_promo_pool so sub-MIN_EV picks that a 30%+ HR boost
+    # would lift into playable territory still appear; _build_hr_boost_rows
+    # applies its own `boosted_ev >= 0.5` gate downstream.
+    hr_edges = [e for e in pp_promo_pool if e.get("market") == "hr"]
 
     return {
         "all_edges":         all_edges,
@@ -7245,10 +7024,12 @@ def run_headless_finalize(fetched: dict,
         play_edges.extend(play_props)
     play_edges.sort(key=lambda e: e["ev_pct"], reverse=True)
 
+    # hr_edges is a *view* into pp_promo_pool (filtered to market="hr"), so
+    # including both here would let the same HR pick collide with itself in
+    # used_keys. Drop hr_edges from the union — HR picks ride pp_promo_pool.
     promo_picks = compute_promo_picks(
         promo_pool, promos,
         extra_edges=(list(pp_promo_pool or [])
-                     + list(hr_edges or [])
                      + list(golf_promo_pool or [])))
 
     # Build parlay rows for the bot
@@ -7419,10 +7200,11 @@ def _promo_no_pick_reason(promo: dict,
     if market == "hr":
         hr_in_combined = [e for e in combined if e.get("market") == "hr"]
         if not hr_in_combined:
-            return (f"No MLB HR data fetched today — the Action Network "
-                    f"HR endpoint returned 0 props (no MLB games today, "
-                    f"all games already in progress, or AN endpoint "
-                    f"failure). Try again closer to first pitch.")
+            return (f"No MLB HR data fetched today — the Odds API "
+                    f"batter_home_runs market returned 0 props (no MLB "
+                    f"games today, all games already in progress, or "
+                    f"insufficient book coverage for a consensus). Try "
+                    f"again closer to first pitch.")
         hr_for_book = [e for e in hr_in_combined if e.get("book") == book]
         if not hr_for_book:
             books_with_hr = sorted({e.get("book") for e in hr_in_combined
@@ -7516,6 +7298,8 @@ def eligible_games_for_promo(promo: dict, all_edges: list[dict],
     For parlay promos, min_odds is not enforced here since the parlay-level
     odds (not per-leg) must clear the floor. HR edges are merged in so
     HR-targeted promos see MLB matchups; _promo_matches still gates them.
+    Post-AN-migration: player_prop_edges no longer contains HR, so the
+    hr_edges concat doesn't produce duplicate game entries.
     """
     combined = (list(all_edges)
                 + list(player_prop_edges or [])
@@ -7679,15 +7463,21 @@ def main():
         output_path = output_path.replace(".xlsx", "_ANONLY.xlsx")
         print(f"\n⚠ AN-ONLY RUN — every sport fell back to Action Network")
 
-    # ── Fetch player props: HR, Golf, Strikeouts/TB/Pts/Reb/Ast ────────
-    print(f"\nFetching player props (MLB HR + PGA Golf + O/U Props)...")
+    # ── Fetch player props: Golf, Strikeouts/TB/HR/Pts/Reb/Ast ────────
+    # HR rides the Odds API batter_home_runs market via fetch_player_props
+    # (was a separate AN pipeline pre-migration). pp_promo_pool captures
+    # every constructed edge incl. HR so HR-boost promos can lift
+    # sub-MIN_EV picks; hr_edges is the HR-only view for the HR Props tab.
+    print(f"\nFetching player props (PGA Golf + O/U + HR Props)...")
     props_session  = make_session()
-    hr_props_raw   = fetch_hr_props(props_session)
-    hr_edges       = find_hr_edges(hr_props_raw) if hr_props_raw else []
     golf_props_raw = fetch_golf_props(props_session)
     golf_edges     = find_golf_edges(golf_props_raw) if golf_props_raw else []
+    pp_promo_pool: list[dict] = []
     pp_props_raw       = fetch_player_props(props_session)
-    player_prop_edges  = find_player_prop_edges(pp_props_raw) if pp_props_raw else []
+    player_prop_edges  = (
+        find_player_prop_edges(pp_props_raw, promo_pool=pp_promo_pool)
+        if pp_props_raw else [])
+    hr_edges = [e for e in pp_promo_pool if e.get("market") == "hr"]
 
     # ── Game-specific promo: pick game from the now-fetched slate ─────
     if root is not None and promos and any(p.get("game_specific") for p in promos):

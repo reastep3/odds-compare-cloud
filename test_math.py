@@ -205,15 +205,19 @@ def test_scope_full_fetch_for_unknown_market():
     ]) is None
 
 
-def test_scope_hr_only():
+def test_scope_hr_routes_to_odds_api_mlb_prop_fetch():
+    # Post-2026-05-17 migration: HR is no longer a separate Action Network
+    # pipeline. It rides the Odds API batter_home_runs market alongside
+    # other MLB props, so an HR-targeted promo lands in prop_sport_markets
+    # rather than the old need_hr flag (which no longer exists in scope).
     scope = _derive_promo_scope([
         {"book": "FanDuel", "sport": "mlb", "market": "hr"}
     ])
     assert scope is not None
-    assert scope["need_hr"] is True
-    assert scope["need_golf"] is False
+    assert scope["prop_sport_markets"] == {"mlb": {"hr"}}
     assert scope["sports"] == set()
-    assert scope["prop_sport_markets"] == {}
+    assert scope["need_golf"] is False
+    assert "need_hr" not in scope, "need_hr should be dropped post-AN-migration"
 
 
 def test_scope_game_line():
@@ -222,7 +226,6 @@ def test_scope_game_line():
     ])
     assert scope is not None
     assert scope["sports"] == {"nba"}
-    assert scope["need_hr"] is False
     assert scope["prop_sport_markets"] == {}
 
 
@@ -233,7 +236,6 @@ def test_scope_player_prop_routed_to_correct_sport():
     assert scope is not None
     assert scope["prop_sport_markets"] == {"mlb": {"strikeouts"}}
     assert scope["sports"] == set()
-    assert scope["need_hr"] is False
 
 
 def test_scope_union_across_multiple_promos():
@@ -244,8 +246,9 @@ def test_scope_union_across_multiple_promos():
     ])
     assert scope is not None
     assert scope["sports"] == {"mlb"}
-    assert scope["need_hr"] is True
-    assert scope["prop_sport_markets"] == {"nba": {"pts"}}
+    # HR is now an MLB prop alongside strikeouts/total_bases etc; the
+    # union groups it with pts under prop_sport_markets.
+    assert scope["prop_sport_markets"] == {"mlb": {"hr"}, "nba": {"pts"}}
 
 
 # ── _promo_no_pick_reason ──────────────────────────────────────────────
@@ -295,6 +298,8 @@ def test_no_pick_hr_fetch_returned_empty():
     # HR-specific diagnostic: when no HR edges exist in combined at all,
     # the message names the fetch as the culprit rather than listing
     # game-line markets that wouldn't satisfy a HR promo anyway.
+    # Post-2026-05-17: message references the Odds API batter_home_runs
+    # market (the AN pipeline was retired).
     promo = {"book": "FanDuel", "sport": "mlb", "market": "hr"}
     combined = [
         _edge("FanDuel", "MLB", "h2h"),
@@ -305,6 +310,9 @@ def test_no_pick_hr_fetch_returned_empty():
     assert "HR" in reason
     # Root cause must point at the fetch, not at the game-line markets.
     assert "fetch" in reason.lower() or "no MLB HR data" in reason
+    # New diagnostic references the Odds API by name so the user
+    # doesn't try to debug the retired Action Network path.
+    assert "Odds API" in reason or "batter_home_runs" in reason
 
 
 def test_no_pick_hr_no_coverage_on_target_book():
@@ -470,9 +478,6 @@ def test_parse_promo_single_token_homer_slang():
 # outlier guard rejects any target line whose implied prob is below
 # MIN_TARGET_OUTLIER_PROB_RATIO * consensus_fair_prob.
 
-from odds_compare import find_hr_edges
-
-
 def test_find_golf_edges_rejects_outlier_target_book():
     # DK is at a stale +10500 while every other book agrees on +500.
     # The target's implied prob (~0.94%) is 5% of the consensus (~16.7%),
@@ -498,23 +503,6 @@ def test_find_golf_edges_rejects_outlier_target_book():
     # (for boost evaluation) but not in the +EV edges (EV ≈ 0).
     fd_in_pool = [e for e in promo_pool if e["book"] == "FanDuel"]
     assert len(fd_in_pool) == 1
-
-
-def test_find_hr_edges_rejects_outlier_target_book():
-    # Same pattern for HR props — DK stale at +5000 while consensus +400.
-    hr_props = [{
-        "player":   "Aaron Judge",
-        "game":     "NYY @ BOS",
-        "commence": "2099-01-01T19:00:00Z",
-        "sport":    "MLB",
-        # 68=DK stale, 69=FD/75=BetMGM/49=Caesars at +400 (~20% implied).
-        "book_odds": {68: 5000, 69: 400, 75: 400, 49: 400},
-    }]
-    edges = find_hr_edges(hr_props)
-    assert not any(e["book"] == "DraftKings" for e in edges)
-    # FD's fair-priced line is still an edge (EV near zero, but find_hr_edges
-    # post-dcb9d86 has no MIN_EV gate so it lands in the list).
-    assert any(e["book"] == "FanDuel" for e in edges)
 
 
 def test_find_player_prop_edges_rejects_outlier_target_book():
@@ -564,6 +552,84 @@ def test_find_player_prop_edges_default_promo_pool_none_no_side_effect():
     # Passing nothing should not raise and should not crash on a missing
     # parallel pool.
     assert find_player_prop_edges(props) == []
+
+
+# ── Odds API HR migration regressions ──────────────────────────────────
+# Post-2026-05-17: HR rides the Odds API batter_home_runs market instead
+# of a dedicated Action Network pipeline. Two shape guarantees matter
+# for downstream consumers (HR Props tab, Telegram message, promo
+# matcher): outcome is just the player name (no "Y" suffix) and point
+# is None (not 0.5). Also, the Yes-side-only filter prevents the system
+# from surfacing an N-side "Aaron Judge will NOT homer" pick on an
+# HR-boost promo.
+
+
+def test_find_player_prop_edges_hr_emits_yes_side_only_with_clean_shape():
+    # 5 books price both sides of a binary anytime HR; verify only the
+    # Yes (over) side surfaces, and that the outcome/point are normalized
+    # to the AN-style shape the HR Props tab expects.
+    props = []
+    for book in ("draftkings", "fanduel", "betmgm", "caesars", "betrivers"):
+        props.append({
+            "player": "Aaron Judge", "game": "NYY @ BOS",
+            "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+            "market": "hr", "market_disp": "Anytime HR",
+            "line": 0.5, "side": "over",
+            "book_odds": {book: 500},
+        })
+        # Each book also prices the No side. Without the HR-Yes-only
+        # filter we'd emit "Aaron Judge N" picks too — undesirable
+        # because HR-boost promos always target the Yes side.
+        props.append({
+            "player": "Aaron Judge", "game": "NYY @ BOS",
+            "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+            "market": "hr", "market_disp": "Anytime HR",
+            "line": 0.5, "side": "under",
+            "book_odds": {book: -650},
+        })
+    promo_pool: list[dict] = []
+    find_player_prop_edges(props, promo_pool=promo_pool)
+    hr_edges = [e for e in promo_pool if e["market"] == "hr"]
+    # Should have exactly one entry per target book (DK, FD), Yes-side only.
+    assert len(hr_edges) == 2
+    books = {e["book"] for e in hr_edges}
+    assert books == {"DraftKings", "FanDuel"}
+    for edge in hr_edges:
+        # No "Y"/"N"/"O"/"U" suffix on the outcome — just the player.
+        assert edge["outcome"] == "Aaron Judge"
+        # Point normalized to None for shape parity with the prior AN
+        # pipeline; the binary nature is implicit in market="hr".
+        assert edge["point"] is None
+
+
+def test_find_player_prop_edges_hr_excluded_from_returned_gated_list():
+    # HR edges live only in the side-effect promo_pool, not in the
+    # returned (gated) `edges` list — that's how downstream code knows
+    # to look at `hr_edges` separately from `player_prop_edges`.
+    # Construct a clearly +EV HR scenario: DK at +700 while consensus
+    # has Judge at ~+400 (consensus ~20% implied vs DK 12.5% — DK is
+    # giving you a discount, EV is positive).
+    props = [{
+        "player": "Aaron Judge", "game": "NYY @ BOS",
+        "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+        "market": "hr", "market_disp": "Anytime HR",
+        "line": 0.5, "side": "over",
+        "book_odds": {"draftkings": 700},
+    }]
+    for book in ("fanduel", "betmgm", "caesars", "betrivers"):
+        props.append({
+            "player": "Aaron Judge", "game": "NYY @ BOS",
+            "commence": "2099-01-01T19:00:00Z", "sport": "MLB",
+            "market": "hr", "market_disp": "Anytime HR",
+            "line": 0.5, "side": "over",
+            "book_odds": {book: 400},
+        })
+    promo_pool: list[dict] = []
+    edges = find_player_prop_edges(props, promo_pool=promo_pool)
+    # Returned list (gated +EV) must contain zero HR entries.
+    assert not any(e["market"] == "hr" for e in edges)
+    # The promo_pool still has the HR entries for boost-aware ranking.
+    assert any(e["market"] == "hr" for e in promo_pool)
 
 
 def test_find_golf_edges_rejects_higa_style_outlier_at_tightened_ratio():

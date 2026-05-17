@@ -1677,7 +1677,6 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if scope["prop_sport_markets"]:
             n_prop = sum(len(m) for m in scope["prop_sport_markets"].values())
             scope_bits.append(f"{n_prop} prop market(s)")
-        if scope["need_hr"]:   scope_bits.append("HR")
         if scope["need_golf"]: scope_bits.append("Golf")
         scope_desc = ", ".join(scope_bits) if scope_bits else "no fetches"
         fetch_msg = f"Scoped fetch: {scope_desc} — should be quick."
