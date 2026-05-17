@@ -364,11 +364,14 @@ MIN_PROP_REFERENCE_BOOKS = 2
 # stale or erroneous target-book line shows up as a giant pseudo-EV
 # instead of being smoothed out. Require the target book's implied
 # probability to be at least this fraction of the consensus — anything
-# below means the target line is >2.5x longer than fair, which in
+# below means the target line is >1.8x longer than fair, which in
 # practice has always been bad data (e.g. DK at +10500 on a player most
 # books have at +1500), never a real edge. Calibrated against the
-# Maverick McNealy PGA Championship incident — ratio there was ~0.15.
-MIN_TARGET_OUTLIER_PROB_RATIO = 0.4
+# Maverick McNealy PGA Championship incident (ratio ~0.15) and the
+# Kazuki Higa PGA Top-20 incident 2026-05-16 — DK at +7200 vs consensus
+# implying ~+3000 (ratio ~0.43), which slipped past the prior 0.4
+# threshold and surfaced a pathological +201.8% boosted EV pick.
+MIN_TARGET_OUTLIER_PROB_RATIO = 0.55
 
 # Minimum bet amounts enforced by each book
 MIN_BET = {
@@ -6430,7 +6433,8 @@ PROMO_SPORTS = {
     "nfl":     "NFL",
     "ncaab":   "NCAAB",
     "ncaaf":   "NCAAF",
-    "soccer":  "Soccer",
+    "soccer":          "Soccer",
+    "european_soccer": "European Soccer",
     "ufc":     "UFC",
     "pga":     "PGA Tour",
     "wnba":    "WNBA",
@@ -6792,6 +6796,22 @@ def ask_promos(parent) -> list[dict]:
     return dlg.promos
 
 
+# Odds API sport_keys for the European soccer leagues — used to filter
+# promos with sport="european_soccer" (e.g. "fd 25% epl boost"). Edges
+# get their sport_key from the Odds API event payload; Action Network
+# fallback edges have sport_key=None and are excluded from this filter
+# (we can't prove they're European leagues, so it's safer to skip).
+EUROPEAN_SOCCER_SPORT_KEYS = frozenset({
+    "soccer_epl",
+    "soccer_uefa_champs_league",
+    "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league",
+    "soccer_spain_la_liga",
+    "soccer_italy_serie_a",
+    "soccer_germany_bundesliga",
+    "soccer_france_ligue_one",
+})
+
 # Maps league names from AN to our canonical sport keys for promo matching
 _LEAGUE_TO_SPORT = {
     "nba": "nba", "mlb": "mlb", "nhl": "nhl", "nfl": "nfl",
@@ -6853,7 +6873,16 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     if promo["sport"] != "all":
         edge_sport = edge["sport"].lower().replace(" ", "")
         canonical = _LEAGUE_TO_SPORT.get(edge_sport, edge_sport)
-        if canonical != promo["sport"]:
+        # european_soccer narrows generic soccer edges to the Odds API
+        # sport_keys that belong to the major European leagues. Edges
+        # without sport_key (e.g. AN-fallback) are conservatively
+        # excluded — without league metadata we can't prove eligibility.
+        if promo["sport"] == "european_soccer":
+            if canonical != "soccer":
+                return False
+            if edge.get("sport_key") not in EUROPEAN_SOCCER_SPORT_KEYS:
+                return False
+        elif canonical != promo["sport"]:
             return False
     if promo["market"] != "all":
         if edge["market"].lower() != promo["market"]:
@@ -6917,8 +6946,13 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
         if sport == "all" or market == "all":
             return None
 
+        # european_soccer collapses to the soccer fetch — the Odds API
+        # call pulls every soccer league; the per-league filter is applied
+        # later inside _promo_matches via edge["sport_key"].
+        fetch_sport = "soccer" if sport == "european_soccer" else sport
+
         if market in _GAME_LINE_MARKETS:
-            sports.add(sport)
+            sports.add(fetch_sport)
         elif market == "hr":
             need_hr = True
         elif market in _GOLF_PROMO_MARKETS:
@@ -7339,6 +7373,67 @@ def _promo_no_pick_reason(promo: dict,
     if matched_all and not pool:
         return (f"All {len(matched_all)} matching candidate(s) already "
                 f"assigned to other promos.")
+
+    # european_soccer-targeted promos need a dedicated diagnostic so the
+    # user can tell "no soccer today" from "soccer exists but no European
+    # leagues on this book". Step 3 below would just say "no european_soccer"
+    # and list soccer in the available sports — confusing because the filter
+    # is at the sport_key level, not the sport level.
+    if sport == "european_soccer":
+        book_soccer = [e for e in combined
+                       if e.get("book") == book
+                       and _LEAGUE_TO_SPORT.get(
+                           e["sport"].lower().replace(" ", ""), "") == "soccer"]
+        if not book_soccer:
+            return (f"No {book} soccer edges loaded today — soccer fetch "
+                    f"returned 0 events or pre-edge filters discarded them.")
+        european_book_soccer = [e for e in book_soccer
+                                if e.get("sport_key") in EUROPEAN_SOCCER_SPORT_KEYS]
+        if not european_book_soccer:
+            non_eur = sorted({
+                (e.get("sport_key") or "unknown")
+                .replace("soccer_", "")
+                .replace("_", " ")
+                .title()
+                for e in book_soccer
+            })
+            sample = ", ".join(non_eur[:5])
+            more = f" (+{len(non_eur) - 5})" if len(non_eur) > 5 else ""
+            return (f"{len(book_soccer)} {book} soccer edge(s) loaded but "
+                    f"none from European leagues. Today's soccer slate: "
+                    f"{sample}{more}.")
+        # European edges exist for this book — must have been claimed
+        # by an earlier (higher-boost) european_soccer promo.
+        return (f"All {len(european_book_soccer)} {book} European soccer "
+                f"candidate(s) already assigned to other promos.")
+
+    # HR-targeted promos need a dedicated diagnostic. _promo_matches
+    # rejects HR edges whenever promo.market != "hr" (intentional guard
+    # against generic boosts silently grabbing a HR prop), which means
+    # the relax-to-all path below would always under-count HR availability
+    # and the "Available markets" sample would never include HR. Inspect
+    # `combined` directly so the message reflects what was actually fetched.
+    # NB: matched_all is always empty by the time we get here (the
+    # "all claimed" branch above handles the non-empty case), so we only
+    # report on the existence of HR data, not on dedup.
+    if market == "hr":
+        hr_in_combined = [e for e in combined if e.get("market") == "hr"]
+        if not hr_in_combined:
+            return (f"No MLB HR data fetched today — the Action Network "
+                    f"HR endpoint returned 0 props (no MLB games today, "
+                    f"all games already in progress, or AN endpoint "
+                    f"failure). Try again closer to first pitch.")
+        hr_for_book = [e for e in hr_in_combined if e.get("book") == book]
+        if not hr_for_book:
+            books_with_hr = sorted({e.get("book") for e in hr_in_combined
+                                    if e.get("book")})
+            return (f"{len(hr_in_combined)} MLB HR edge(s) fetched but "
+                    f"none on {book} ({book} HR coverage was empty for "
+                    f"every game). Books with HR today: "
+                    f"{', '.join(books_with_hr) or 'none'}.")
+        # HR edges exist for this book but failed some other filter
+        # (min_odds, start-window, stale-line guard upstream). Fall
+        # through to the generic min_odds / start-window chain below.
 
     saved_min = promo.get("min_odds")
     saved_mkt = promo.get("market")

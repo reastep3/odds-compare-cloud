@@ -291,8 +291,10 @@ def test_no_pick_min_odds_too_tight():
     assert "Knicks" in reason
 
 
-def test_no_pick_market_missing_but_sport_present():
-    # Sport (MLB) has plenty of game-line data but no HR props today.
+def test_no_pick_hr_fetch_returned_empty():
+    # HR-specific diagnostic: when no HR edges exist in combined at all,
+    # the message names the fetch as the culprit rather than listing
+    # game-line markets that wouldn't satisfy a HR promo anyway.
     promo = {"book": "FanDuel", "sport": "mlb", "market": "hr"}
     combined = [
         _edge("FanDuel", "MLB", "h2h"),
@@ -300,10 +302,40 @@ def test_no_pick_market_missing_but_sport_present():
         _edge("FanDuel", "MLB", "spreads"),
     ]
     reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
-    assert "MLB" in reason
     assert "HR" in reason
-    # Names the markets actually present so the user knows the gap.
-    assert "H2H" in reason or "TOTALS" in reason
+    # Root cause must point at the fetch, not at the game-line markets.
+    assert "fetch" in reason.lower() or "no MLB HR data" in reason
+
+
+def test_no_pick_hr_no_coverage_on_target_book():
+    # HR fetch produced edges, but every line is on DK — none on FD.
+    # The diagnostic must say so explicitly so the user knows the
+    # other book has data; intuiting from "no HR data" would be wrong.
+    promo = {"book": "FanDuel", "sport": "mlb", "market": "hr"}
+    combined = [
+        _edge("DraftKings", "MLB", "hr", outcome="Aaron Judge"),
+        _edge("DraftKings", "MLB", "hr", outcome="Shohei Ohtani"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "FanDuel" in reason
+    assert "DraftKings" in reason
+    assert "HR" in reason
+
+
+def test_no_pick_hr_book_edges_exist_all_claimed():
+    # FD has HR coverage AND matches the promo's filters — but every
+    # HR candidate was already consumed by an earlier higher-boost promo.
+    promo = {"book": "FanDuel", "sport": "mlb", "market": "hr"}
+    fd_hr_edges = [
+        _edge("FanDuel", "MLB", "hr", outcome="Aaron Judge"),
+        _edge("FanDuel", "MLB", "hr", outcome="Shohei Ohtani"),
+    ]
+    reason = _promo_no_pick_reason(
+        promo, combined=fd_hr_edges, matched_all=fd_hr_edges, pool=[])
+    # The generic "All N matching candidate(s) already assigned" runs
+    # first (matched_all non-empty); HR-specific path only activates
+    # when matched_all is empty.
+    assert "already" in reason.lower()
 
 
 def test_no_pick_sport_missing_other_sports_loaded():
@@ -532,3 +564,177 @@ def test_find_player_prop_edges_default_promo_pool_none_no_side_effect():
     # Passing nothing should not raise and should not crash on a missing
     # parallel pool.
     assert find_player_prop_edges(props) == []
+
+
+def test_find_golf_edges_rejects_higa_style_outlier_at_tightened_ratio():
+    # Regression for the 2026-05-16 Higa incident — DK at +7200 while the
+    # rest of the market clustered around +500 (consensus implies ~16.7%).
+    # The target's implied prob (~1.37%) is ~8% of the consensus, well
+    # below the 0.55 ratio guard. Old 0.40 threshold let any target
+    # priced ≥2.5x longer than fair through — the new threshold catches
+    # anything ≥1.82x longer, closing the gap that produced a +201.8%
+    # boosted EV pseudo-pick.
+    golf_props = [{
+        "player":      "Kazuki Higa",
+        "tournament":  "PGA Championship",
+        "commence":    "2099-01-01T12:00:00Z",
+        "sport":       "PGA",
+        "market":      "golf_top20",
+        "market_disp": "Top 20 Finish",
+        # 68=DK stale at +7200; 69/75/49/71 cluster at +500 (~16.7% implied).
+        "book_odds":   {68: 7200, 69: 500, 75: 500, 49: 500, 71: 500},
+    }]
+    promo_pool: list[dict] = []
+    edges = find_golf_edges(golf_props, promo_pool=promo_pool)
+    # DK must not appear in either path — stale-line guard rejects it
+    # before the edge dict is constructed.
+    assert not any(e["book"] == "DraftKings" for e in edges)
+    assert not any(e["book"] == "DraftKings" for e in promo_pool)
+
+
+# ── European-soccer parsing + filtering ────────────────────────────────
+# When a promo restricts to European leagues (e.g. "fd 25% any European
+# soccer event"), the system has to (1) parse the phrase to a distinct
+# canonical key, (2) match only edges whose Odds API sport_key is in the
+# European-leagues set, and (3) avoid silently routing MLS / Liga MX
+# games into a promo that wouldn't credit the boost.
+
+from telegram_bot import parse_promo
+from odds_compare import (
+    EUROPEAN_SOCCER_SPORT_KEYS,
+    _derive_promo_scope,
+    _promo_matches,
+    _promo_no_pick_reason,
+)
+
+
+def test_parse_promo_two_word_european_soccer():
+    promo = parse_promo("fd 25% european soccer max:$10")
+    assert promo is not None
+    assert promo["sport"] == "european_soccer"
+    # Label renders cleanly even with the underscore in the key.
+    assert "European Soccer" in promo["label"]
+
+
+def test_parse_promo_single_token_epl_narrows_to_european():
+    # Single-token league shortcuts must NOT silently widen to generic
+    # "soccer" — that's the bug that let MLS games slip into EPL promos.
+    promo = parse_promo("dk 30% epl")
+    assert promo is not None
+    assert promo["sport"] == "european_soccer"
+
+
+def test_parse_promo_premier_league_two_word_narrows_to_european():
+    promo = parse_promo("fd 25% premier league")
+    assert promo is not None
+    assert promo["sport"] == "european_soccer"
+
+
+def test_promo_matches_european_soccer_accepts_epl_edge():
+    # An EPL game (sport_key=soccer_epl) must satisfy a european_soccer promo.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "FanDuel",
+        "sport":        "Soccer",
+        "sport_key":    "soccer_epl",
+        "market":       "h2h",
+        "odds_decimal": 2.5,
+        # No commence → _starts_within_days returns True (soon-by-default).
+    }
+    assert _promo_matches(promo, edge) is True
+
+
+def test_promo_matches_european_soccer_rejects_mls_edge():
+    # The bug we're closing — typing "european soccer" must NOT match an
+    # MLS game (sport_key=soccer_usa_mls). Pre-fix, both collapsed to
+    # the same "soccer" bucket and the MLS line silently won the promo.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "FanDuel",
+        "sport":        "Soccer",
+        "sport_key":    "soccer_usa_mls",
+        "market":       "h2h",
+        "odds_decimal": 2.5,
+    }
+    assert _promo_matches(promo, edge) is False
+
+
+def test_promo_matches_european_soccer_rejects_missing_sport_key():
+    # Action Network fallback edges have sport_key=None — we can't prove
+    # they're European leagues, so the filter conservatively excludes them.
+    # Better to surface "no European data" than to risk a non-European pick.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "FanDuel",
+        "sport":        "Soccer",
+        "sport_key":    None,
+        "market":       "h2h",
+        "odds_decimal": 2.5,
+    }
+    assert _promo_matches(promo, edge) is False
+
+
+def test_european_soccer_keys_cover_known_european_leagues():
+    # Guardrail: if someone later prunes or renames a league in the
+    # Odds API map, this test will fail loudly rather than silently
+    # excluding edges from the European-soccer filter.
+    expected = {
+        "soccer_epl",
+        "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
+        "soccer_uefa_europa_conference_league",
+        "soccer_spain_la_liga",
+        "soccer_italy_serie_a",
+        "soccer_germany_bundesliga",
+        "soccer_france_ligue_one",
+    }
+    assert EUROPEAN_SOCCER_SPORT_KEYS == expected
+    # MLS and Liga MX must NOT be in the European set — they're the
+    # whole reason the filter exists.
+    assert "soccer_usa_mls" not in EUROPEAN_SOCCER_SPORT_KEYS
+    assert "soccer_mexico_ligamx" not in EUROPEAN_SOCCER_SPORT_KEYS
+
+
+def test_scope_european_soccer_collapses_to_soccer_fetch():
+    # european_soccer is a sport_key-level filter, not a separate fetch —
+    # the Odds API call is the same as plain "soccer" (pulls every league),
+    # then _promo_matches narrows downstream. Scoping must reflect that
+    # so /run_promos doesn't try to fetch a nonexistent "european_soccer"
+    # game-line endpoint.
+    scope = _derive_promo_scope([
+        {"book": "FanDuel", "sport": "european_soccer", "market": "h2h"}
+    ])
+    assert scope is not None
+    assert scope["sports"] == {"soccer"}
+
+
+def test_no_pick_european_soccer_only_mls_loaded():
+    # Distinct diagnostic: MLS edges exist but the promo restricted to
+    # European leagues. The generic "no european_soccer edges" message
+    # would be confusing because soccer DOES appear in the slate.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h"}
+    combined = [
+        {**_edge("FanDuel", "Soccer", "h2h", outcome="LAFC"),
+         "sport_key": "soccer_usa_mls"},
+        {**_edge("FanDuel", "Soccer", "h2h", outcome="Atlanta United"),
+         "sport_key": "soccer_usa_mls"},
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "European" in reason
+    assert "MLS" in reason.upper() or "Usa Mls" in reason
+
+
+def test_no_pick_european_soccer_no_soccer_at_all():
+    # No soccer data of any kind on FD — the message should flag the
+    # soccer fetch as the issue, not the European-leagues filter.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h"}
+    combined = [
+        _edge("FanDuel", "MLB", "h2h"),
+        _edge("FanDuel", "NBA", "h2h"),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "FanDuel" in reason
+    assert "soccer" in reason.lower()

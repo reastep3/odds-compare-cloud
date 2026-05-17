@@ -160,8 +160,15 @@ PROMO_SPORT_KEYWORDS = {
     "nfl": "nfl",   "football":   "nfl",
     "ncaab": "ncaab", "cbb":      "ncaab",
     "ncaaf": "ncaaf", "cfb":      "ncaaf",
-    "soccer": "soccer", "epl":    "soccer",
-    "laliga": "soccer", "bundesliga": "soccer",
+    "soccer": "soccer",
+    # Single-token shortcuts for individual European leagues narrow to
+    # the european_soccer canonical key — typing "epl" should never
+    # surface an MLS pick (which would not qualify for the promo).
+    "epl":        "european_soccer",
+    "laliga":     "european_soccer",
+    "bundesliga": "european_soccer",
+    "ucl":        "european_soccer",
+    "uel":        "european_soccer",
     "ufc": "ufc",   "mma":        "ufc",
     "pga": "pga",   "golf":       "pga",
     "wnba": "wnba",
@@ -174,18 +181,25 @@ PROMO_SPORT_KEYWORDS = {
 # Two-word sport phrases checked with one-token lookahead.
 PROMO_SPORT_PHRASES = {
     "ice hockey":         "nhl",
-    "premier league":     "soccer",
+    "premier league":     "european_soccer",
     "college basketball": "ncaab",
     "college football":   "ncaaf",
     "american football":  "nfl",
-    "champions league":   "soccer",
-    "europa league":      "soccer",
-    "serie a":            "soccer",
-    "ligue 1":            "soccer",
+    "champions league":   "european_soccer",
+    "europa league":      "european_soccer",
+    "serie a":            "european_soccer",
+    "ligue 1":            "european_soccer",
     "liga mx":            "soccer",
-    "la liga":            "soccer",
+    "la liga":            "european_soccer",
     "aussie rules":       "afl",
     "australian rules":   "afl",
+    # "european soccer" / "euro soccer" / "europe soccer" all narrow to
+    # the major European leagues so a promo whose terms exclude MLS /
+    # Liga MX doesn't accidentally match a non-European game. The filter
+    # works on the Odds API sport_key tag attached to each edge.
+    "european soccer":    "european_soccer",
+    "europe soccer":      "european_soccer",
+    "euro soccer":        "european_soccer",
 }
 
 PROMO_MARKET_KEYWORDS = {
@@ -457,7 +471,14 @@ def parse_promo(text: str) -> dict | None:
         parts.append(f"{promo['boost_pct']}% boost" if promo["boost_pct"] else "boost")
 
     if promo["sport"] != "all":
-        parts.append(f"/ {promo['sport'].upper()}")
+        # Multi-word sport keys (european_soccer) render as Title Case so
+        # the label reads "European Soccer" rather than "EUROPEAN_SOCCER".
+        sport_key = promo["sport"]
+        if "_" in sport_key:
+            sport_label = " ".join(w.capitalize() for w in sport_key.split("_"))
+        else:
+            sport_label = sport_key.upper()
+        parts.append(f"/ {sport_label}")
     if promo["market"] != "all":
         mkt_label = PROMO_MARKET_DISPLAY.get(
             promo["market"], promo["market"].capitalize())
