@@ -526,6 +526,42 @@ def test_parse_promo_single_token_homer_slang():
     assert promo["market"] == "hr"
 
 
+# ── parse_promo player-points keyword/phrase coverage ─────────────────
+# FanDuel sends "30% profit boost on a player points prop" — a recurring
+# NBA-themed promo. The parser must recognize the two-word "player
+# points" phrase, single-token "points"/"pts", and remap to "nhl_pts"
+# when the user pinned the sport to NHL.
+
+def test_parse_promo_two_word_player_points():
+    promo = parse_promo("fd 30% player points")
+    assert promo is not None
+    assert promo["book"]      == "FanDuel"
+    assert promo["market"]    == "pts"
+    assert promo["boost_pct"] == 30
+
+
+def test_parse_promo_single_token_points():
+    promo = parse_promo("fd 30% nba points")
+    assert promo is not None
+    assert promo["sport"]  == "nba"
+    assert promo["market"] == "pts"
+
+
+def test_parse_promo_player_points_nhl_remaps_to_nhl_pts():
+    promo = parse_promo("fd 30% nhl player points")
+    assert promo is not None
+    assert promo["sport"]  == "nhl"
+    assert promo["market"] == "nhl_pts"
+
+
+def test_parse_promo_player_points_with_filler():
+    # Near-verbatim FanDuel wording: "30% profit boost on a player points prop"
+    promo = parse_promo("fd 30% profit boost player points")
+    assert promo is not None
+    assert promo["market"]    == "pts"
+    assert promo["boost_pct"] == 30
+
+
 # ── Stale-target-line outlier guard ────────────────────────────────────
 # Regression: a stale +10500 DK line on Maverick McNealy with the
 # consensus around +1500 produced a 373% pseudo-EV pick. Caused real

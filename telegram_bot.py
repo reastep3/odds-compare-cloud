@@ -215,6 +215,12 @@ PROMO_MARKET_KEYWORDS = {
     "pra": "pra",
     "dd": "dd", "doubledouble": "dd",
     "sog": "sog", "shotsongoal": "sog",
+    # NBA player points (Odds API "player_points"). Single-token forms;
+    # the two-word "player points" phrase is caught by PROMO_MARKET_PHRASES.
+    # Defaults to NBA's "pts" market key; remapped to "nhl_pts" downstream
+    # when the promo's sport is explicitly NHL.
+    "pts": "pts", "points": "pts",
+    "player_points": "pts", "player-points": "pts", "playerpoints": "pts",
     # First-inning total runs (MLB) — used for FanDuel "First Inning Friday"
     # and similar promos. Single-token forms; multi-token "first inning" is
     # caught by PROMO_MARKET_PHRASES below.
@@ -232,12 +238,15 @@ PROMO_MARKET_PHRASES = {
     "1st inning":   "totals_1st",
     "home run":     "hr",
     "home runs":    "hr",
+    "player points": "pts",
 }
 
 # Display labels for non-trivial market keys. Markets not listed here fall
 # back to mkt.capitalize() in the promo label builder.
 PROMO_MARKET_DISPLAY = {
     "totals_1st": "1st Inning",
+    "pts":        "Player Points",
+    "nhl_pts":    "Player Points",
 }
 
 # Natural-language filler tokens that carry no semantic weight for the
@@ -457,6 +466,13 @@ def parse_promo(text: str) -> dict | None:
             continue
 
         i += 1
+
+    # NHL's "player_points" Odds API market is stored under the internal
+    # key "nhl_pts" to avoid clashing with NBA's "pts". Remap when the
+    # user pinned the sport to NHL so the edge filter matches the right
+    # market.
+    if promo["sport"] == "nhl" and promo["market"] == "pts":
+        promo["market"] = "nhl_pts"
 
     # Build label
     parts = [book]
