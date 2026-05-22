@@ -92,6 +92,8 @@ try:
 except ImportError:
     pass  # dotenv optional; env vars may be set by the OS
 
+import credit_tracker
+
 EASTERN = ZoneInfo("America/New_York")
 
 # ── Runtime paths (cloud-aware) ──────────────────────────────────────
@@ -590,6 +592,7 @@ def fetch_odds_api(sport: str, session: requests.Session | None = None,
                 timeout=30,
             )
             remaining = r.headers.get("x-requests-remaining", "?")
+            credit_tracker.record(remaining)
             if r.status_code != 200:
                 print(f"  [OddsAPI/{sport_key}] HTTP {r.status_code}")
                 continue
@@ -693,6 +696,7 @@ def fetch_odds_api_props(
                 timeout=15,
             )
             remaining = r2.headers.get("x-requests-remaining", remaining)
+            credit_tracker.record(remaining)
             if r2.status_code != 200:
                 continue
             ev_data = r2.json()
@@ -828,6 +832,7 @@ def fetch_odds_api_first_inning(sport: str) -> list[dict]:
                 timeout=15,
             )
             remaining = r2.headers.get("x-requests-remaining", remaining)
+            credit_tracker.record(remaining)
             if r2.status_code != 200:
                 continue
             ev_data = r2.json()

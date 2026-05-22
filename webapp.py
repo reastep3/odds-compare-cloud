@@ -243,9 +243,18 @@ def build_app() -> FastAPI:
 
     @api.get("/api/health")
     async def health() -> dict[str, Any]:
+        # credit_status mirrors credit_tracker.get_status() so operators
+        # can see the CLV pause-switch state without SSH'ing in. Lazy
+        # import so a broken tracker file can't crash the health probe.
+        try:
+            import credit_tracker
+            credit_status = credit_tracker.get_status()
+        except Exception:  # pragma: no cover — defensive
+            credit_status = None
         return {"status": "ok",
-                "configured": bool(_WEBAPP_PASSWORD),
-                "ts": int(time.time())}
+                "configured":    bool(_WEBAPP_PASSWORD),
+                "credit_status": credit_status,
+                "ts":            int(time.time())}
 
     @api.post("/api/login")
     async def login(req: Request) -> dict[str, Any]:

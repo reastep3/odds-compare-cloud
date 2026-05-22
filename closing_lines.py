@@ -25,6 +25,7 @@ from typing import Iterable
 
 import requests
 
+import credit_tracker
 from bot_config import ODDS_API_KEY
 from odds_compare import (
     ODDS_API_BASE,
@@ -197,6 +198,7 @@ def _fetch_event_odds(sport_key: str, event_id: str,
     except requests.RequestException as e:
         log.warning("[closing-lines] event %s fetch error: %s", event_id, e)
         return None
+    credit_tracker.record(r.headers.get("x-requests-remaining"))
     if r.status_code != 200:
         log.info("[closing-lines] event %s HTTP %s", event_id, r.status_code)
         return None
@@ -399,7 +401,27 @@ def capture_pending_closes(output_dir: str | None = None) -> dict:
     output_dir = output_dir or OUTPUT_DIR
     now_utc = datetime.now(timezone.utc)
     files = _list_recent_pending_files(output_dir)
-    stats = {"captured": 0, "no_match": 0, "scanned": 0, "files": files}
+    stats = {"captured": 0, "no_match": 0, "scanned": 0, "files": files,
+             "credit_paused": False}
+
+    # Credit budget gate. CLV captures are the lowest-priority Odds API
+    # consumer — when we're approaching monthly quota, conserve credits
+    # for active scanning (which generates new +EV picks) and resume
+    # captures automatically after rollover. See credit_tracker.py for
+    # the threshold rationale.
+    if credit_tracker.should_pause_clv():
+        status = credit_tracker.get_status()
+        log.info(
+            "[closing-lines] PAUSED — credits at %.1f%% used "
+            "(remaining=%s, peak=%s, threshold=%.0f%%); "
+            "captures will resume after month rollover",
+            (status.get("usage_pct") or 0) * 100,
+            status.get("remaining"),
+            status.get("peak"),
+            status.get("threshold_pct", 0) * 100,
+        )
+        stats["credit_paused"] = True
+        return stats
 
     for path in files:
         payload = _load_pending(path)
