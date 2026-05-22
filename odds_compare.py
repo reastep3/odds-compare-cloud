@@ -373,6 +373,29 @@ MIN_PROP_REFERENCE_BOOKS = 2
 # threshold and surfaced a pathological +201.8% boosted EV pick.
 MIN_TARGET_OUTLIER_PROB_RATIO = 0.55
 
+# Golf outright markets (golf_win / golf_top5 / golf_top20) are
+# disabled 2026-05-22 after a third stale-line incident in three weeks:
+#
+#   Si Woo Kim, CJ Cup Byron Nelson — system read DK at +1275 while the
+#   actual DK app showed +600. The 20% profit boost on +1275 surfaced
+#   a 115.3% boosted EV pick that was entirely fictional. The +1275
+#   number passed the MIN_TARGET_OUTLIER_PROB_RATIO=0.55 guard at
+#   exactly 0.55 (target implied 7.3% vs consensus 13.2%).
+#
+# The structural problem: PGA outright winners are futures markets on
+# 150+ player fields. Books update long-shot odds infrequently — when
+# one book leaves a week-old number while peers move, our consensus
+# picks the stale book up as a +EV target. Each calibration cycle has
+# had to push the outlier-ratio higher (0.4 → 0.55) and the boosted-EV
+# asymmetry (small bet, looks-like-100%-EV) is exactly the wrong shape
+# for promo optimization.
+#
+# When this flips back to False, also re-enable the three
+# find_golf_edges tests guarded by GOLF_DISABLED in test_math.py and
+# confirm fresh stale-line guards (per-market-class, time-decay-aware)
+# are in place upstream of find_golf_edges.
+GOLF_DISABLED = True
+
 # Minimum bet amounts enforced by each book
 MIN_BET = {
     "DraftKings": 0.10,
@@ -4118,7 +4141,14 @@ def fetch_golf_props(session: requests.Session) -> list[dict]:
         "market_disp":  "Top 5 Finish",
         "book_odds":    {68: 345, 69: 340, ...},   # book_id → american
       }
+
+    When GOLF_DISABLED is set (2026-05-22 stale-line shutdown), returns
+    an empty list without making the AN scoreboard request — both saves
+    a scraper hit and guarantees no golf data ever enters downstream
+    pools, even if find_golf_edges's own guard were bypassed.
     """
+    if GOLF_DISABLED:
+        return []
     try:
         resp = session.get(
             f"{ACTION_NETWORK_BASE}/scoreboard/pga",
@@ -4215,7 +4245,16 @@ def find_golf_edges(
     also appended there — mirrors the find_edges pattern so PGA-boost promos
     can rank candidates by *boosted* EV without the MIN_EV_PERCENT pre-filter
     discarding outcomes the boost would lift into +EV territory.
+
+    GOLF_DISABLED short-circuit: if the module-level flag is set, the
+    function returns [] immediately and never touches promo_pool — even
+    if a caller (e.g. backtest replay, a test, or a stale code path)
+    constructed golf_props by hand. See the GOLF_DISABLED constant for
+    the stale-line history that motivated the kill-switch.
     """
+    if GOLF_DISABLED:
+        return []
+
     edges: list[dict] = []
 
     for prop in golf_props:

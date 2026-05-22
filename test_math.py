@@ -433,9 +433,42 @@ def test_no_pick_book_has_no_data():
 # discards. Skipping these gates by accident would silently re-empty PGA
 # and prop-boost promos for the user.
 
-from odds_compare import find_golf_edges, find_player_prop_edges
+from odds_compare import find_golf_edges, find_player_prop_edges, GOLF_DISABLED
 
 
+# The three find_golf_edges tests below assert internal behaviors (promo
+# pool population, McNealy outlier rejection, Higa outlier rejection)
+# that only matter when golf is active. The 2026-05-22 Si Woo Kim
+# incident turned GOLF_DISABLED on; when it flips off, these tests must
+# pass again as the safety net that re-enables golf relies on.
+_skip_if_golf_off = pytest.mark.skipif(
+    GOLF_DISABLED, reason="GOLF_DISABLED — golf pipeline is intentionally off."
+)
+
+
+def test_find_golf_edges_returns_empty_when_disabled():
+    # Kill-switch regression. Even if a caller constructs perfectly valid
+    # golf props (and a promo pool), find_golf_edges must return [] and
+    # leave the pool untouched. Without this guard, a stale +1275 line
+    # could still surface as a 100%+ boosted EV promo pick.
+    if not GOLF_DISABLED:
+        pytest.skip("Only meaningful while GOLF_DISABLED is True.")
+    golf_props = [{
+        "player":      "Si Woo Kim",
+        "tournament":  "THE CJ CUP Byron Nelson",
+        "commence":    "2099-01-01T12:00:00Z",
+        "sport":       "PGA",
+        "market":      "golf_win",
+        "market_disp": "Tournament Winner",
+        "book_odds":   {68: 1275, 69: 600, 75: 600, 49: 600, 71: 600},
+    }]
+    promo_pool: list[dict] = []
+    edges = find_golf_edges(golf_props, promo_pool=promo_pool)
+    assert edges == []
+    assert promo_pool == []
+
+
+@_skip_if_golf_off
 def test_find_golf_edges_promo_pool_captures_sub_min_ev_candidates():
     # Build a long-shot outright where every book agrees on roughly the
     # same implied prob → fair_prob ≈ implied, so EV is near 0 — below
@@ -569,6 +602,7 @@ def test_parse_promo_player_points_with_filler():
 # outlier guard rejects any target line whose implied prob is below
 # MIN_TARGET_OUTLIER_PROB_RATIO * consensus_fair_prob.
 
+@_skip_if_golf_off
 def test_find_golf_edges_rejects_outlier_target_book():
     # DK is at a stale +10500 while every other book agrees on +500.
     # The target's implied prob (~0.94%) is 5% of the consensus (~16.7%),
@@ -723,6 +757,7 @@ def test_find_player_prop_edges_hr_excluded_from_returned_gated_list():
     assert any(e["market"] == "hr" for e in promo_pool)
 
 
+@_skip_if_golf_off
 def test_find_golf_edges_rejects_higa_style_outlier_at_tightened_ratio():
     # Regression for the 2026-05-16 Higa incident — DK at +7200 while the
     # rest of the market clustered around +500 (consensus implies ~16.7%).
