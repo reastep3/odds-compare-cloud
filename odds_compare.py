@@ -2186,30 +2186,35 @@ _BLOCKED_SOCCER = frozenset({
 def _qualifies(e):
     """Return True if an edge qualifies for the 'Play These' tab.
 
-    Recalibrated 2026-04-27 against the 30-day backtest (2026-03-28 → 04-27,
-    2553 +EV picks). The PT subset was underperforming the broad pool
-    (-4.1% ROI vs -3.2%); three issues drove almost all the bleed:
+    Recalibrated 2026-05-22 against the 12-day backtest (2026-05-05 → 05-16,
+    922 broad +EV picks, 189 PT picks at -24.1% ROI). Five changes:
 
-      1. TOTALS market accounted for -$14.32 of -$14.83 PT P&L (96%).
-         Non-Pinnacle totals lose at every EV tier, including ≥4%
-         (-16.2% ROI). Pinnacle-anchored totals are ~breakeven (-1.3%
-         on 370 picks). Fix: drop the non-Pinn consensus path for
-         totals — Pinnacle anchor required.
+      1. EV ≥ 5% cap restored on ALL game lines. PT bucket ran 0-9
+         ($-42.58, -100% ROI) — driven by Pinn-anchored MLB picks at
+         55.7%/7.0%/6.6%/5.6% (all losses) and MLB spreads at 5–5.5%
+         (5 losses post-stale-guard). Broad pool ≥5% was -47.9%
+         across 83 picks. The 2026-04-16 lift of this cap inverted
+         once the soft-line tail showed up; a book offering 5%+ over
+         Pinnacle is almost always a stale-line trap.
 
-      2. MLS H2H added to the H2H whitelist. MLS H2H went +9.7% ROI
-         on 75 broad picks — the second-best H2H sport behind MLB.
-         Previously blocked by the MLB-only restriction.
+      2. TENNIS H2H added (non-Pinn ≥ 2.0%, Pinn ≥ 1.0%). Broad pool
+         was +8.3% on 266 picks; the 2–5% slice was +10.1% on 77.
+         Biggest pick-volume add available. Cap at <5% catches the
+         retire-out tail (≥5% had many NO_RESULT picks).
 
-    Recalibrated 2026-04-16 (v2). Non-Pinnacle EV threshold bumped from
-    2.0% → 2.5% for H2H/spreads/totals. The EV 1–3% non-Pinnacle band
-    produced -8.8% ROI over 235 picks (30-day) and -6.8% ROI over the
-    78 dropped picks in the past-week simulation. Pinnacle-anchored
-    picks unchanged (still qualify at EV ≥ 1.0%).
+      3. BOXING H2H added (non-Pinn ≥ 1.0%, Pinn ≥ 1.0%). Broad 1–5%
+         slice was +11.7% on 14 picks; ≥5% drops to -2.5% on 12, so
+         the EV cap above handles the upper bound.
 
-    Recalibrated 2026-04-16. Heavy-mispricing EV cap removed — the ≥ 5% EV
-    tier showed +32% ROI (month) / +28% ROI (week) across the raw +EV pool,
-    and spreads/totals at EV ≥ 4% hit ~70%+ WR. These are now allowed
-    through rather than filtered as suspected stale lines.
+      4. WNBA spreads non-Pinn floor lowered to 1.0% (general floor
+         stays at 2.0%). Broad WNBA spreads 1.0–2.5% was +13.6% on
+         18 picks; the existing 2.5% floor was excluding the
+         profitable lower band.
+
+      5. Spreads general non-Pinn floor 2.5% → 2.0%. Broad 1.0–2.0%
+         slice was +14.1% on 70; the 2.0–2.5% pocket (-17% on 17)
+         is the dead zone — we accept that small drag in exchange
+         for the larger 1.5–5% positive band.
     """
     pinn  = e.get("pinnacle_anchored", False)
     ev    = e["ev_pct"]
@@ -2222,21 +2227,27 @@ def _qualifies(e):
     if books < 4:
         return False
 
+    # Universal EV cap — books offering 5%+ over Pinnacle are nearly
+    # always trap lines (stale on news, mismatched markets, model edge
+    # cases). Even Pinn-anchored picks at ≥5% lost ~$43 over 12 days.
+    if ev >= 5.0:
+        return False
+
     # Block European soccer — negative ROI across the board without Pinnacle
     if sport in _BLOCKED_SOCCER:
         return False
 
     # Block NBA game lines (spreads/totals/h2h) — -18.9% ROI lifetime.
-    # NBA pts props handled by _qualifies_prop().
+    # NBA pts props handled by _qualifies_prop(). Recent 12d broad pool
+    # showed NBA h2h flipping to +14% but on n=21 — keep blocked until
+    # 30-day sample supports re-enable.
     if sport == "NBA":
         return False
 
-    # H2H: MLB (+16.6% ROI broad, +26.4% lifetime) and MLS (+9.7% on 75 picks).
-    # All other sports' H2H is blocked.
-    # MLB non-Pinn upper cap (2026-05-09): EV-tier slice of the 30d All Picks
-    # showed 2.5–3% at +22.7% ROI on 23 picks (the sweet spot), but every
-    # bucket ≥3% combined ran 1W/12L (-79% ROI) — classic stale-line trap on
-    # books moving early on lineup/weather news. Pinn anchors stay uncapped.
+    # H2H: MLB / MLS / TENNIS / BOXING.
+    # MLB non-Pinn keeps the 2.5–3.0% upper cap (lineup/weather stale-line
+    # trap above 3% non-Pinn). All Pinn-anchored paths qualify ≥1%
+    # (subject to the universal <5% cap above).
     if mkt == "h2h":
         if sport == "MLB":
             if pinn and ev >= 1.0:
@@ -2246,12 +2257,24 @@ def _qualifies(e):
             if pinn and ev >= 1.0:
                 return True
             return ev >= 2.5
+        if sport == "TENNIS":
+            if pinn and ev >= 1.0:
+                return True
+            return ev >= 2.0
+        if sport == "BOXING":
+            if pinn and ev >= 1.0:
+                return True
+            return ev >= 1.0
         return False
 
     if mkt == "spreads":
         if pinn and ev >= 1.0:
             return True
-        return ev >= 2.5
+        # WNBA spreads non-Pinn floor lowered to 1.0% — the 1.0–2.5%
+        # slice is the highest-ROI WNBA-spreads pocket.
+        if sport == "WNBA":
+            return ev >= 1.0
+        return ev >= 2.0
 
     # Totals: MLB-only, Pinnacle-anchored. The non-MLB totals tail
     # bleeds even with the Pinnacle gate — 2026-05-06 30d backtest had
@@ -2268,30 +2291,36 @@ def _qualifies(e):
 def _qualifies_prop(e):
     """Return True if a player prop edge qualifies for 'Play These'.
 
-    Recalibrated 2026-05-08 with per-market non-Pinn thresholds. The
-    flat 3% gate from 2026-05-06 was too tight for MLB props — recent
-    runs detected only 1 PT-eligible total_bases or strikeout pick
-    across 3 scans, because consensus pricing on those markets is
-    tighter than NBA points so most edges sit in the 1–3% band. EV-tier
-    slice of the 30-day backtest (2026-04-06 → 05-06):
+    Recalibrated 2026-05-22 against the 12-day backtest (2026-05-05 →
+    05-16, 241 broad PP picks). Two threshold changes:
 
-      pts (NBA):    1–2% +0.2% / 2–3% -0.1% / 3–5% +10.8% / 5%+ +53.4%
-                    → 3% threshold correct, 1–3% bucket is breakeven.
-      strikeouts:   1–2% -1.0% / 2–3% +6.9% / 3–5% +25.6% / 5%+ +66.2%
-                    → drop to 2% to capture the +6.9% bucket.
-      total_bases:  1–2% +11.7% / 2–3% +32.7% / 3–5% -20.9% / 5%+ +100.6%
-                    → drop to 1.5% — both 1–2% and 2–3% are solidly
-                    profitable; the 3–5% dip is only 6 picks (noise).
+      pts:        12-day broad EV-tier slice was 1–2% +24.9% on 13 picks,
+                  2–3% +35.3% on 4, 3–4% -15.2% on 2, 4–5% +92.1% on 2.
+                  Total +27.6% on 25 picks. The 3% gate from 2026-05-08
+                  was tuned on the NBA-only 30-day window where 1–3% ran
+                  breakeven; the recent re-test shows 2–3% is the highest-
+                  ROI pocket. Drop to 2.0%.
 
-    2026-05-06: added MLB total_bases + strikeouts after the grader
-    fixes made these markets visible. Initial threshold was 3%;
-    recalibration above relaxes that.
+      strikeouts: 12-day broad slice 1–2% -10.4% on 15, 2–3% -38.0% on 6,
+                  4–5% -4.1% on 2, ≥5% -19.8% on 2. Total -22.2% on 40.
+                  The 2.0% floor (from 2026-05-08 against the +6.9% 2–3%
+                  bucket in 30d) has inverted — current data shows the
+                  1–3% strikeouts band is a -22% bleed. Raise to 4.0% to
+                  drop the bleed; live volume falls but PnL improves.
 
-    Calibrated 2026-04-12 against 149 settled NBA points picks:
-      pts: 56% WR, +22.5% ROI this week (+9.1% lifetime) — profitable
-           even without Pinnacle and with low book counts.
-      reb/ast: negative ROI — excluded.
-    EV cap removed 2026-04-16 to stay consistent with game-line qualifier.
+      total_bases: 12-day broad 1–2% +47.6% on 3, 4–5% -100% on 2.
+                  Sample too small to recalibrate. Keep 1.5% floor.
+
+    Earlier history (kept for reference):
+
+    2026-05-08 — per-market non-Pinn thresholds introduced (pts 3.0,
+                 strikeouts 2.0, total_bases 1.5) replacing flat 3.0%
+                 gate.
+    2026-05-06 — added MLB total_bases + strikeouts after grader fixes.
+    2026-04-12 — initial NBA-only pts calibration (3.0%, no Pinn req).
+    2026-04-16 — EV cap removed for parity with game-line qualifier.
+                 (Re-evaluating; props don't show the ≥5% stale-line
+                 trap that game lines do.)
     """
     ev    = e["ev_pct"]
     mkt   = e["market"]
@@ -2308,9 +2337,9 @@ def _qualifies_prop(e):
 
     # Per-market non-Pinn thresholds — see EV-tier table in docstring.
     if mkt == "pts":
-        return ev >= 3.0
-    if mkt == "strikeouts":
         return ev >= 2.0
+    if mkt == "strikeouts":
+        return ev >= 4.0
     if mkt == "total_bases":
         return ev >= 1.5
 

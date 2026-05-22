@@ -895,3 +895,142 @@ def test_no_pick_european_soccer_no_soccer_at_all():
     reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
     assert "FanDuel" in reason
     assert "soccer" in reason.lower()
+
+
+# ── _qualifies / _qualifies_prop (2026-05-22 recalibration) ────────────
+# Covers the changes from the 12-day backtest (2026-05-05 → 05-16):
+#   - Universal EV ≥ 5% cap on game lines
+#   - Tennis/Boxing H2H added
+#   - WNBA spreads non-Pinn floor 1.0%
+#   - Spreads general non-Pinn floor 2.0%
+#   - pts non-Pinn 2.0%, strikeouts non-Pinn 4.0%
+
+from odds_compare import _qualifies, _qualifies_prop
+
+
+def _q(sport, market, ev, *, pinn=False, books=8):
+    """Build a minimal edge dict that exercises the qualifier."""
+    return {
+        "sport": sport,
+        "market": market,
+        "ev_pct": ev,
+        "pinnacle_anchored": pinn,
+        "num_other_books": books,
+        # no commence → _starts_within_days treats as soon
+    }
+
+
+def test_qualifies_ev_cap_blocks_pinn_mlb_h2h_at_or_above_5():
+    # The headline 2026-05-22 fix: Pinn-anchored MLB H2H at ≥5% was the
+    # single biggest bleed source ($-32 across 4 picks in 12 days).
+    assert not _qualifies(_q("MLB", "h2h", 5.0, pinn=True))
+    assert not _qualifies(_q("MLB", "h2h", 55.7, pinn=True))
+
+
+def test_qualifies_ev_cap_blocks_pinn_mlb_spreads_at_or_above_5():
+    # 5 MLB spreads picks at 5.0–5.5% (all Pinn-anchored) all lost
+    # post-stale-guard tightening (5/13–5/16).
+    assert not _qualifies(_q("MLB", "spreads", 5.0, pinn=True))
+    assert not _qualifies(_q("MLB", "spreads", 7.5, pinn=True))
+
+
+def test_qualifies_pinn_mlb_h2h_below_cap_still_qualifies():
+    assert _qualifies(_q("MLB", "h2h", 4.9, pinn=True))
+    assert _qualifies(_q("MLB", "h2h", 1.0, pinn=True))
+
+
+def test_qualifies_tennis_h2h_non_pinn_floor_2pct():
+    # Was fully blocked; broad pool +8.3% on 266 picks.
+    assert not _qualifies(_q("TENNIS", "h2h", 1.9))
+    assert _qualifies(_q("TENNIS", "h2h", 2.0))
+    assert _qualifies(_q("TENNIS", "h2h", 4.9))
+    # Above the universal cap.
+    assert not _qualifies(_q("TENNIS", "h2h", 5.0))
+
+
+def test_qualifies_tennis_h2h_pinn_qualifies_at_1pct():
+    assert _qualifies(_q("TENNIS", "h2h", 1.0, pinn=True))
+    assert not _qualifies(_q("TENNIS", "h2h", 0.9, pinn=True))
+
+
+def test_qualifies_boxing_h2h_non_pinn_floor_1pct():
+    # Broad 1–5% +11.7% on 14 picks; ≥5% drops to -2.5% — universal cap
+    # handles the upper bound.
+    assert not _qualifies(_q("BOXING", "h2h", 0.9))
+    assert _qualifies(_q("BOXING", "h2h", 1.0))
+    assert _qualifies(_q("BOXING", "h2h", 4.9))
+    assert not _qualifies(_q("BOXING", "h2h", 5.0))
+
+
+def test_qualifies_wnba_spreads_non_pinn_floor_1pct():
+    # WNBA spreads non-Pinn floor 2.5% → 1.0%. Broad 1.0–2.5% slice
+    # was +13.6% on 18 picks — the existing 2.5% gate was dropping
+    # the highest-ROI band.
+    assert _qualifies(_q("WNBA", "spreads", 1.0))
+    assert _qualifies(_q("WNBA", "spreads", 2.4))
+    assert not _qualifies(_q("WNBA", "spreads", 0.9))
+
+
+def test_qualifies_spreads_general_non_pinn_floor_2pct():
+    # General spreads non-Pinn 2.5% → 2.0% (anything except WNBA).
+    assert _qualifies(_q("MLB", "spreads", 2.0))
+    assert _qualifies(_q("NHL", "spreads", 2.5))
+    assert not _qualifies(_q("MLB", "spreads", 1.9))
+
+
+def test_qualifies_mlb_h2h_non_pinn_upper_cap_preserved():
+    # Existing 2.5–3.0% cap on non-Pinn MLB H2H must still hold —
+    # the >3% non-Pinn band was 1W/12L (-79%) in the 30d backtest.
+    assert _qualifies(_q("MLB", "h2h", 2.5))
+    assert _qualifies(_q("MLB", "h2h", 3.0))
+    assert not _qualifies(_q("MLB", "h2h", 3.1))
+    assert not _qualifies(_q("MLB", "h2h", 2.4))
+
+
+def test_qualifies_blocked_sports_still_blocked():
+    # NBA game lines and European soccer remain blocked.
+    assert not _qualifies(_q("NBA", "h2h", 3.0, pinn=True))
+    assert not _qualifies(_q("NBA", "spreads", 4.0, pinn=True))
+    assert not _qualifies(_q("EPL", "h2h", 3.0, pinn=True))
+    assert not _qualifies(_q("BUNDESLIGA", "h2h", 4.0, pinn=True))
+
+
+def test_qualifies_totals_still_mlb_pinn_only():
+    # Totals path unchanged: MLB + Pinn ≥ 1% only.
+    assert _qualifies(_q("MLB", "totals", 1.0, pinn=True))
+    assert not _qualifies(_q("MLB", "totals", 1.0, pinn=False))
+    assert not _qualifies(_q("WNBA", "totals", 3.0, pinn=True))
+    # Universal cap also catches Pinn MLB totals.
+    assert not _qualifies(_q("MLB", "totals", 5.0, pinn=True))
+
+
+def test_qualifies_book_count_floor_unchanged():
+    # books < 4 still blocks.
+    assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, books=3))
+
+
+def test_qualifies_prop_pts_floor_2pct():
+    # pts threshold 3.0% → 2.0%; broad 2–3% pts +35.3%.
+    e_in  = {"market": "pts", "ev_pct": 2.0}
+    e_out = {"market": "pts", "ev_pct": 1.9}
+    assert _qualifies_prop(e_in)
+    assert not _qualifies_prop(e_out)
+
+
+def test_qualifies_prop_strikeouts_floor_4pct():
+    # strikeouts threshold 2.0% → 4.0%; the 1–3% band was -22% in 12 days.
+    assert not _qualifies_prop({"market": "strikeouts", "ev_pct": 3.9})
+    assert _qualifies_prop({"market": "strikeouts", "ev_pct": 4.0})
+
+
+def test_qualifies_prop_total_bases_unchanged():
+    # total_bases still 1.5%.
+    assert _qualifies_prop({"market": "total_bases", "ev_pct": 1.5})
+    assert not _qualifies_prop({"market": "total_bases", "ev_pct": 1.4})
+
+
+def test_qualifies_prop_other_markets_blocked():
+    # reb/ast remain excluded; unknown markets blocked.
+    assert not _qualifies_prop({"market": "rebounds", "ev_pct": 10.0})
+    assert not _qualifies_prop({"market": "assists", "ev_pct": 10.0})
+    assert not _qualifies_prop({"market": "made_threes", "ev_pct": 10.0})
