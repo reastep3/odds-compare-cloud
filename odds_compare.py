@@ -6800,7 +6800,14 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
         if market in _GAME_LINE_MARKETS:
             sports.add(fetch_sport)
         elif market in _GOLF_PROMO_MARKETS:
-            need_golf = True
+            # GOLF_DISABLED: silently drop golf-market promos from the
+            # scope. Without this, a golf-only promo would either set
+            # need_golf=True (a no-op given the kill-switch but wastes
+            # a fetch_golf_props call), or fall through to the "unknown
+            # market" branch and trigger a full-slate fetch — which
+            # would actually waste Odds API credits. The promo just
+            # gets "no pick" downstream.
+            continue
         else:
             # Player prop — figure out which sport's fetch produces it.
             for sp, mks in _PROP_MARKETS_BY_SPORT.items():
@@ -6953,7 +6960,10 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
 
     # Fetch player props — each one can be scope-skipped independently.
     props_session     = make_session()
-    do_golf = (scope is None) or scope["need_golf"]
+    # do_golf removed 2026-05-22: GOLF_DISABLED kills the path entirely
+    # (see odds_compare.GOLF_DISABLED). golf_props_raw / golf_edges /
+    # golf_promo_pool are kept as empty lists for compatibility with the
+    # write_excel signature and downstream pool concatenations.
     do_pp   = (scope is None) or bool(scope["prop_sport_markets"])
     pp_filter = (None if scope is None
                  else scope["prop_sport_markets"] or None)
@@ -6977,7 +6987,6 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
         hr_gated_out = True
 
     bits = []
-    if do_golf: bits.append("PGA Golf")
     if do_pp:
         bits.append("O/U Props" if hr_gated_out else "O/U + HR Props")
     if bits:
@@ -6986,15 +6995,18 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
     else:
         print("\nSkipping all player-prop fetches (scope doesn't need any).")
 
-    # Parallel pools for golf + player props mirror the game-line promo_pool:
-    # find_X_edges still returns the +EV-only list used by sheet writers and
-    # /play_edges, while the *_promo_pool captures every constructed edge so
-    # compute_promo_picks can rank by boosted EV without losing sub-MIN_EV
-    # candidates that a 25-50% boost would lift into +EV.
+    # GOLF_DISABLED: empty placeholders. The fetch_golf_props /
+    # find_golf_edges call-chain is removed from the live path; the
+    # constants exist only so write_excel and pool-concatenation lines
+    # downstream don't need to special-case golf's absence.
     golf_promo_pool: list[dict] = []
-    golf_props_raw = fetch_golf_props(props_session) if do_golf else []
-    golf_edges     = (find_golf_edges(golf_props_raw, promo_pool=golf_promo_pool)
-                      if golf_props_raw else [])
+    golf_edges:      list[dict] = []
+
+    # Player-prop pool mirrors the game-line promo_pool: find_X_edges
+    # returns the +EV-only list used by sheet writers and /play_edges,
+    # while pp_promo_pool captures every constructed edge so
+    # compute_promo_picks can rank by boosted EV without losing
+    # sub-MIN_EV candidates that a 25-50% boost would lift into +EV.
 
     pp_promo_pool: list[dict] = []
     pp_props_raw = (fetch_player_props(props_session, sport_markets=pp_filter)
@@ -7582,15 +7594,15 @@ def main():
         output_path = output_path.replace(".xlsx", "_ANONLY.xlsx")
         print(f"\n⚠ AN-ONLY RUN — every sport fell back to Action Network")
 
-    # ── Fetch player props: Golf, Strikeouts/TB/HR/Pts/Reb/Ast ────────
+    # ── Fetch player props: Strikeouts/TB/HR/Pts/Reb/Ast ──────────────
     # HR rides the Odds API batter_home_runs market via fetch_player_props
     # (was a separate AN pipeline pre-migration). pp_promo_pool captures
     # every constructed edge incl. HR so HR-boost promos can lift
     # sub-MIN_EV picks; hr_edges is the HR-only view for the HR Props tab.
-    print(f"\nFetching player props (PGA Golf + O/U + HR Props)...")
+    # Golf was removed 2026-05-22 (see GOLF_DISABLED).
+    print(f"\nFetching player props (O/U + HR Props)...")
     props_session  = make_session()
-    golf_props_raw = fetch_golf_props(props_session)
-    golf_edges     = find_golf_edges(golf_props_raw) if golf_props_raw else []
+    golf_edges:    list[dict] = []
     pp_promo_pool: list[dict] = []
     pp_props_raw       = fetch_player_props(props_session)
     player_prop_edges  = (

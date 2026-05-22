@@ -446,6 +446,30 @@ _skip_if_golf_off = pytest.mark.skipif(
 )
 
 
+def test_scope_golf_only_promo_returns_empty_not_full_fetch():
+    # GOLF_DISABLED cleanup: a golf-only promo must NOT collapse the
+    # scope to None (which would trigger a full-slate Odds API fetch
+    # and cost real credits). Instead the golf market is silently
+    # dropped — the scope ends up empty and run_headless_fetch
+    # produces nothing, so the promo just reports "no pick".
+    if not GOLF_DISABLED:
+        pytest.skip("Only meaningful while GOLF_DISABLED is True.")
+    from odds_compare import _derive_promo_scope
+    scope = _derive_promo_scope([
+        {"book": "DraftKings", "sport": "pga", "market": "golf_win"}
+    ])
+    assert scope is not None, (
+        "Golf-only promo should produce an empty scope, NOT None "
+        "(None triggers a full-slate Odds API fetch)."
+    )
+    assert scope["sports"] == set()
+    assert scope["prop_sport_markets"] == {}
+    assert scope["need_golf"] is False, (
+        "GOLF_DISABLED means need_golf must stay False even when a "
+        "golf-market promo is in the list."
+    )
+
+
 def test_find_golf_edges_returns_empty_when_disabled():
     # Kill-switch regression. Even if a caller constructs perfectly valid
     # golf props (and a promo pool), find_golf_edges must return [] and
