@@ -360,18 +360,34 @@ def build_app() -> FastAPI:
         fd = float(body.get("fd_bankroll") or
                     os.environ.get("DEFAULT_FD_BANKROLL", 100))
 
+        # Parse the optional promos string (one promo per non-empty line)
+        # using the bot's existing parser. Lets HR-applicable promos
+        # unlock the batter_home_runs fetch via _promos_want_hr and
+        # flow into compute_promo_picks for boost-aware picking.
+        promos_raw = (body.get("promos") or "").strip()
+        parsed_promos: list[dict[str, Any]] = []
+        if promos_raw:
+            from telegram_bot import parse_promo
+            for line in promos_raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parsed = parse_promo(line)
+                if parsed is not None:
+                    parsed_promos.append(parsed)
+
         # Run the existing pipeline in a thread so we don't block the
         # asyncio loop (which is also serving Telegram polling).
         import asyncio
         from odds_compare import (run_headless_fetch, run_headless_finalize)
 
         def _do_run() -> dict[str, Any]:
-            # Webapp has no HR-Props UI today, so always skip the
-            # batter_home_runs market — saves ~1 Odds API credit per
-            # MLB event on every webapp scan. Pass promos=[] so
-            # _promos_want_hr returns False and the HR gate fires.
-            fetched = run_headless_fetch(dk, fd, promos=[])
-            return run_headless_finalize(fetched, promos=None)
+            # When no promos are entered, pass promos=[] so the HR gate
+            # fires and we save ~1 Odds API credit per MLB event. When
+            # the user supplies HR-applicable promos, _promos_want_hr
+            # unblocks the batter_home_runs fetch automatically.
+            fetched = run_headless_fetch(dk, fd, promos=parsed_promos)
+            return run_headless_finalize(fetched, promos=parsed_promos)
 
         result = await asyncio.to_thread(_do_run)
         return _shape_run_result(result)
@@ -742,6 +758,40 @@ def _shape_edge(e: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shape_promo_pick(p: dict[str, Any]) -> dict[str, Any]:
+    """Shape one entry from compute_promo_picks() for the PWA.
+
+    Each pick has shape {promo, edge, copy_idx, copy_of, reason,
+    is_fallback}. When `edge` is None (no qualifying pick found), only
+    the promo label + reason are surfaced so the UI can show the miss.
+    """
+    from odds_compare import apply_profit_boost, calc_ev
+    promo = p.get("promo") or {}
+    edge  = p.get("edge")
+    out: dict[str, Any] = {
+        "promo_label":  promo.get("label"),
+        "boost_pct":    promo.get("boost_pct"),
+        "promo_type":   promo.get("promo_type"),
+        "copy_idx":     p.get("copy_idx"),
+        "copy_of":      p.get("copy_of"),
+        "is_fallback":  bool(p.get("is_fallback")),
+        "reason":       p.get("reason"),
+    }
+    if edge is None:
+        return out
+    out.update(_shape_edge(edge))
+    # Add boosted fields when there's a profit-boost promo. apply_profit_boost
+    # is a no-op for bonus_bet promos (boost_pct=None), which keeps the
+    # bonus-bet path showing original odds.
+    boost_pct = promo.get("boost_pct")
+    if boost_pct and edge.get("odds_decimal"):
+        boost_dec = apply_profit_boost(edge["odds_decimal"], boost_pct)
+        fair_prob = (edge.get("fair_prob") or 0) / 100
+        out["boost_decimal"] = boost_dec
+        out["boost_ev_pct"]  = round(calc_ev(fair_prob, boost_dec), 2)
+    return out
+
+
 def _shape_run_result(result: dict[str, Any]) -> dict[str, Any]:
     summary = result.get("summary", {})
     return {
@@ -753,9 +803,10 @@ def _shape_run_result(result: dict[str, Any]) -> dict[str, Any]:
             "an_count":      summary.get("an_count", 0),
             "api_count":     summary.get("api_count", 0),
         },
-        "play_edges": [_shape_edge(e) for e in result.get("play_edges", [])],
-        "all_edges":  [_shape_edge(e) for e in result.get("all_edges",  [])],
-        "promo_picks": result.get("promo_picks", []),
+        "play_edges":  [_shape_edge(e) for e in result.get("play_edges", [])],
+        "all_edges":   [_shape_edge(e) for e in result.get("all_edges",  [])],
+        "promo_picks": [_shape_promo_pick(p)
+                        for p in result.get("promo_picks", [])],
         "output_path": (os.path.basename(result["output_path"])
                         if result.get("output_path") else None),
     }

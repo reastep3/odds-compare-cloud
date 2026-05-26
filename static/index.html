@@ -190,10 +190,21 @@
           </label>
         </div>
 
+        <label>Promos <span class="muted">(one per line, optional)</span>
+          <textarea id="run-promos" rows="3" spellcheck="false"
+            placeholder="fd 50% anytime home run&#10;dk 25% 3+ nhl +100 $10"></textarea>
+        </label>
+        <p class="muted" style="font-size:12px; margin:-6px 0 10px;">Unlocks HR picks and boost-aware promo picks. Same syntax as the bot.</p>
+
         <button id="run-btn"      class="primary-btn">▶ Run scan</button>
         <button id="run-live-btn" class="secondary-btn">⚡ Live edges only</button>
 
         <div id="run-status" class="status" hidden></div>
+      </div>
+
+      <div id="run-promo-section" class="card" hidden>
+        <h3>Promo Picks <span class="count" id="run-promo-count"></span></h3>
+        <div class="table-wrap"><table id="run-promo-table"></table></div>
       </div>
 
       <div id="run-summary" class="card" hidden>

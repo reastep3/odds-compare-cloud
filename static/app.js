@@ -771,9 +771,20 @@ function renderRunSummary(s) {
   $("#run-anonly-banner").hidden = !s.an_only;
 }
 
+// Restore the promos textarea from localStorage so a paste persists across
+// sessions. Re-saved on every Run scan.
+(function restorePromos() {
+  const ta = $("#run-promos");
+  if (!ta) return;
+  const saved = localStorage.getItem("arbyx.promos");
+  if (saved) ta.value = saved;
+})();
+
 $("#run-btn").addEventListener("click", async () => {
   const dk = parseFloat($("#dk-br").value || "100");
   const fd = parseFloat($("#fd-br").value || "100");
+  const promos = ($("#run-promos")?.value || "").trim();
+  localStorage.setItem("arbyx.promos", promos);
   $("#run-btn").disabled = true;
   $("#run-live-btn").disabled = true;
   setStatus($("#run-status"), "Running scan — this can take 60-90 seconds…",
@@ -781,11 +792,12 @@ $("#run-btn").addEventListener("click", async () => {
   try {
     const j = await apiJSON("/api/run", {
       method: "POST",
-      body: JSON.stringify({ dk_bankroll: dk, fd_bankroll: fd }),
+      body: JSON.stringify({ dk_bankroll: dk, fd_bankroll: fd, promos }),
     });
     setStatus($("#run-status"), "");
     renderRunSummary(j.summary);
     renderEdges(j.play_edges);
+    renderRunPromoPicks(j.promo_picks);
     if (j.output_path) {
       loadArchives();
       loadDashboard();   // refresh the left-pane board with the new run
@@ -797,6 +809,57 @@ $("#run-btn").addEventListener("click", async () => {
     $("#run-live-btn").disabled = false;
   }
 });
+
+function renderRunPromoPicks(picks) {
+  const section = $("#run-promo-section");
+  const tbl = $("#run-promo-table");
+  if (!section || !tbl) return;
+  picks = picks || [];
+  if (!picks.length) {
+    section.hidden = true;
+    return;
+  }
+  $("#run-promo-count").textContent = `(${picks.length})`;
+  const rows = picks.map((p) => {
+    const label = p.promo_label || "";
+    const copyTag = (p.copy_of && p.copy_of > 1)
+      ? ` <span class="muted">#${(p.copy_idx ?? 0) + 1}/${p.copy_of}</span>` : "";
+    if (!p.book) {
+      const reason = p.reason || "No qualifying pick.";
+      return `<tr>
+        <td data-label="Promo">${label}${copyTag}</td>
+        <td data-label="Pick" colspan="5" class="muted">${reason}</td>
+      </tr>`;
+    }
+    const evDisplay = (p.boost_ev_pct != null) ? p.boost_ev_pct : p.ev_pct;
+    const evClass = (evDisplay ?? 0) > 0 ? "pos" : "neg";
+    const boostStr = (p.boost_decimal != null)
+      ? fmtAmerican(decimalToAmerican(p.boost_decimal))
+      : "—";
+    const fallback = p.is_fallback ? ' <span class="muted">(fallback)</span>' : "";
+    return `<tr>
+      <td data-label="Promo">${label}${copyTag}${fallback}</td>
+      <td data-label="Sport" class="cell-sport">${(p.sport || "").toUpperCase()}</td>
+      <td data-label="Game" class="cell-game">${p.game ?? ""}</td>
+      <td data-label="Book" class="${bookCls(p.book)}">${p.book ?? ""}</td>
+      <td data-label="Pick">${p.outcome ?? ""}${p.line != null ? ` (${p.line})` : ""}</td>
+      <td data-label="Odds" class="num">${fmtAmerican(p.odds)} → <strong>${boostStr}</strong></td>
+      <td data-label="EV" class="num ${evClass}">${fmtPct(evDisplay, 1)}</td>
+    </tr>`;
+  }).join("");
+  tbl.innerHTML = `
+    <thead><tr>
+      <th>Promo</th><th>Sport</th><th>Game</th><th>Book</th>
+      <th>Pick</th><th>Odds → Boosted</th><th>EV</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+  section.hidden = false;
+}
+
+function decimalToAmerican(d) {
+  if (d == null || !isFinite(d) || d <= 1) return null;
+  return d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1));
+}
 
 $("#run-live-btn").addEventListener("click", async () => {
   $("#run-btn").disabled = true;

@@ -231,7 +231,7 @@ label {
   font-size: 13px; color: var(--muted);
   margin-bottom: 10px;
 }
-input, select {
+input, select, textarea {
   width: 100%;
   background: var(--bg);
   color: var(--text);
@@ -241,7 +241,13 @@ input, select {
   font-size: 16px;
   margin-top: 4px;
 }
-input:focus, select:focus {
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  resize: vertical;
+  min-height: 60px;
+}
+input:focus, select:focus, textarea:focus {
   outline: 2px solid var(--primary);
   outline-offset: -1px;
 }
