@@ -4411,14 +4411,15 @@ def _build_hr_boost_rows(hr_edges: list[dict], promos: list[dict],
 
     Each row includes original odds, boosted odds, and boosted EV.
     """
-    # Find HR-applicable promos (sport=mlb or all, market=hr or all)
+    # HR-applicable = explicit market="hr". Tightened 2026-05-26 to match
+    # _promos_want_hr's fetch gate — _promo_matches already requires the
+    # same explicit market for HR picks, so promos with market="all"
+    # would render an empty HR Props tab anyway.
     hr_promos = []
     for promo in promos:
         if promo.get("promo_type") == "bonus_bet":
             continue
-        if promo["sport"] not in ("all", "mlb"):
-            continue
-        if promo["market"] not in ("all", "hr"):
+        if promo["market"] != "hr":
             continue
         hr_promos.append(promo)
 
@@ -6840,28 +6841,29 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
 
 
 def _promos_want_hr(promos: list[dict] | None) -> bool:
-    """Return True if at least one promo could apply to an MLB HR pick.
+    """Return True if at least one promo *explicitly* targets HR (market="hr").
 
     Used to gate the batter_home_runs market on full /run fetches.
     Each per-event Odds API prop call costs (markets × regions) credits,
     so adding HR to the MLB prop list costs ~1 extra credit per MLB
-    event (5 markets vs 4). Skip when no promo could use HR data.
+    event. Skip unless the user asked for HR by name.
 
-    A promo can apply to HR when its sport is "all" or "mlb" AND its
-    market is "all" or "hr". bonus_bet and parlay promos count — they
-    select longest-odds candidates from a broad pool and HR is a
-    common winner there.
+    Tightened 2026-05-26: previously any "all-market" promo (including
+    bonus_bet and generic "fd 25%" boosts) unlocked the HR fetch on the
+    theory that the picker might select an HR long-shot. In practice
+    _promo_matches has *always* blocked HR edges from non-HR-market
+    promos (see odds_compare.py around the "HR props only flow through
+    to promos that explicitly target HR" comment) — so the data fetched
+    for generic promos was never consumed. The looser gate was burning
+    ~15 Odds API credits per scan for nothing. Now: only an explicit
+    market="hr" promo unlocks the fetch.
     """
     if not promos:
         return False
     for p in promos:
-        sport = (p.get("sport") or "all").lower()
-        if sport not in ("all", "mlb"):
-            continue
         market = (p.get("market") or "all").lower()
-        if market not in ("all", "hr"):
-            continue
-        return True
+        if market == "hr":
+            return True
     return False
 
 

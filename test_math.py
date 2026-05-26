@@ -254,21 +254,23 @@ def test_promos_want_hr_explicit_hr_promo():
     ]) is True
 
 
-def test_promos_want_hr_mlb_all_market_promo():
-    # An "fd 30% mlb" boost with market=all could land on HR via the
-    # broader pool selection — must fetch HR so the picker can see it.
+def test_promos_want_hr_mlb_all_market_promo_no_longer_triggers():
+    # Tightened 2026-05-26: a generic "fd 30% mlb" boost with market=all
+    # does NOT trigger the HR fetch. _promo_matches has always blocked
+    # HR edges from non-HR-market promos, so the data was never used.
     assert _promos_want_hr([
         {"book": "FanDuel", "sport": "mlb", "market": "all"}
-    ]) is True
+    ]) is False
 
 
-def test_promos_want_hr_all_sport_all_market_promo():
-    # Catch-all bonus_bet — picker selects longest-odds line from any
-    # market, and HR is a typical long-odds winner. Must fetch HR.
+def test_promos_want_hr_all_sport_all_market_promo_no_longer_triggers():
+    # Tightened 2026-05-26: catch-all bonus_bet does NOT trigger HR.
+    # Picker's _promo_matches blocks HR edges for non-HR-market promos,
+    # so fetching them was burning credits with zero downstream use.
     assert _promos_want_hr([
         {"book": "FanDuel", "sport": "all", "market": "all",
          "promo_type": "bonus_bet"}
-    ]) is True
+    ]) is False
 
 
 def test_promos_want_hr_unrelated_promo_returns_false():
