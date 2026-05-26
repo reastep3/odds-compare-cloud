@@ -6867,6 +6867,132 @@ def _promos_want_hr(promos: list[dict] | None) -> bool:
     return False
 
 
+# Map from internal book name back to Odds API bookmaker key. Used by
+# _hr_no_data_diagnostic to identify whether the user's specific book
+# has posted HR data. Mirrors the book mapping in fetch_odds_api_props.
+_USER_BOOK_TO_API_KEY = {
+    "DraftKings": "draftkings",
+    "FanDuel":    "fanduel",
+}
+
+
+def _hr_no_data_diagnostic(book: str) -> str:
+    """When no HR edges made it through the merge phase, probe the Odds API
+    directly (free /events call + one cheap /odds call) to tell the user
+    *why* — and when to come back.
+
+    Three distinct failure modes worth distinguishing:
+      1. No MLB events visible at all (rare — usually means off-season
+         or full slate already finished).
+      2. Events exist but `book` hasn't posted HR yet (most common at
+         night — DK/FD typically post HR 2–6h before first pitch,
+         after lineups confirm).
+      3. Events exist, `book` has HR, but only one book total — fails
+         the MIN_PROP_REFERENCE_BOOKS=2 consensus floor.
+
+    The /events call is free (0 credits). The probe /odds call costs
+    1 credit but only runs once, only on the earliest event, and only
+    when the user already paid for a full HR fetch that came back
+    empty — so it's marginal vs the already-spent credits.
+    """
+    from datetime import datetime, timezone
+    from bot_config import ODDS_API_KEY
+
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/baseball_mlb/events",
+            params={"apiKey": ODDS_API_KEY},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return ("No MLB HR (batter_home_runs) data fetched and couldn't "
+                    f"probe the Odds API (HTTP {r.status_code}). Try again "
+                    f"closer to first pitch.")
+        events = r.json() or []
+    except Exception as e:
+        return (f"No MLB HR (batter_home_runs) data fetched and the Odds "
+                f"API probe failed ({type(e).__name__}). Try again closer "
+                f"to first pitch.")
+
+    now = datetime.now(timezone.utc)
+    upcoming = []
+    for ev in events:
+        try:
+            ct = datetime.fromisoformat(
+                ev["commence_time"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ct > now:
+            upcoming.append((ct, ev))
+    upcoming.sort(key=lambda t: t[0])
+
+    if not upcoming:
+        return ("No upcoming MLB games visible to the Odds API right now — "
+                "off-day, schedule break, or all of today's games are "
+                "already in progress / finished. No HR (batter_home_runs) "
+                "data to fetch.")
+
+    soonest_ct, soonest_ev = upcoming[0]
+    hours_out = (soonest_ct - now).total_seconds() / 3600
+    when_str = soonest_ct.strftime("%H:%M UTC")
+    matchup = (f"{soonest_ev.get('away_team','?')} @ "
+               f"{soonest_ev.get('home_team','?')}")
+
+    # One probe call on the soonest event to see who actually has HR yet.
+    try:
+        r2 = requests.get(
+            f"{ODDS_API_BASE}/sports/baseball_mlb/events/{soonest_ev['id']}/odds",
+            params={
+                "apiKey":     ODDS_API_KEY,
+                "regions":    "us",
+                "markets":    "batter_home_runs",
+                "oddsFormat": "american",
+            },
+            timeout=10,
+        )
+        if r2.status_code == 200:
+            data = r2.json() or {}
+            books_with_hr = sorted({
+                bm.get("key", "")
+                for bm in data.get("bookmakers", [])
+                if any(m.get("key") == "batter_home_runs"
+                       for m in bm.get("markets", []))
+            })
+        else:
+            books_with_hr = []
+    except Exception:
+        books_with_hr = []
+
+    user_book_key = _USER_BOOK_TO_API_KEY.get(book, book.lower())
+    user_has_it = user_book_key in books_with_hr
+
+    if not books_with_hr:
+        return (f"No book has posted batter_home_runs yet — soonest game "
+                f"({matchup}) is in {hours_out:.1f}h ({when_str}). DK/FD "
+                f"usually post HR lines 2–6h before first pitch, after "
+                f"lineups confirm. Try again then.")
+
+    pretty_books = ", ".join(b.replace("williamhill_us", "Caesars")
+                                .replace("draftkings", "DraftKings")
+                                .replace("fanduel", "FanDuel")
+                                .replace("betmgm", "BetMGM")
+                                .replace("espnbet", "ESPN BET")
+                                .title()
+                             for b in books_with_hr)
+
+    if not user_has_it:
+        return (f"{book} hasn't posted batter_home_runs yet for the "
+                f"soonest game ({matchup}, {hours_out:.1f}h out / "
+                f"{when_str}). Books that have it now: {pretty_books}. "
+                f"{book} usually fills in 2–6h before first pitch.")
+
+    # User's book has HR but consensus failed → only 1-2 books total.
+    return (f"{book} has batter_home_runs lines for the soonest game "
+            f"({matchup}, {hours_out:.1f}h out) but only {len(books_with_hr)} "
+            f"book(s) total ({pretty_books}) — needs 2+ books for a "
+            f"reliable fair price. Wait for more books to post.")
+
+
 def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
                        scope: dict | None = None,
                        promos: list[dict] | None = None) -> dict:
@@ -7343,11 +7469,7 @@ def _promo_no_pick_reason(promo: dict,
     if market == "hr":
         hr_in_combined = [e for e in combined if e.get("market") == "hr"]
         if not hr_in_combined:
-            return (f"No MLB HR data fetched today — the Odds API "
-                    f"batter_home_runs market returned 0 props (no MLB "
-                    f"games today, all games already in progress, or "
-                    f"insufficient book coverage for a consensus). Try "
-                    f"again closer to first pitch.")
+            return _hr_no_data_diagnostic(book)
         hr_for_book = [e for e in hr_in_combined if e.get("book") == book]
         if not hr_for_book:
             books_with_hr = sorted({e.get("book") for e in hr_in_combined
