@@ -233,11 +233,21 @@ ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
         ("player_double_double",             "dd",          "Double-Double"),
     ],
     "mlb": [
-        ("pitcher_strikeouts",  "strikeouts",  "Strikeouts"),
-        ("batter_total_bases",  "total_bases", "Total Bases"),
-        ("batter_home_runs",    "hr",          "Anytime HR"),
-        ("batter_hits",         "hits",        "Hits"),
-        ("batter_rbis",         "rbis",        "RBIs"),
+        ("pitcher_strikeouts",          "strikeouts",  "Strikeouts"),
+        ("batter_total_bases",          "total_bases", "Total Bases"),
+        # HR routes through the ALTERNATE market key because DraftKings
+        # and FanDuel (the bet-target books) only expose home-run odds
+        # via batter_home_runs_alternate — they don't surface the plain
+        # batter_home_runs market to the Odds API at all. The standard
+        # market is exposed by Caesars / Fliff / ESPN BET, but losing
+        # them is acceptable: we still keep ESPN BET + Hard Rock as
+        # reference books via the alternate, and the user's primary
+        # action is on DK/FD. Parser filters to point=0.5 (= "1+ HR" =
+        # anytime). Discovered 2026-05-26 after the user reported
+        # FanDuel showing HR prices in-app that the bot couldn't fetch.
+        ("batter_home_runs_alternate",  "hr",          "Anytime HR"),
+        ("batter_hits",                 "hits",        "Hits"),
+        ("batter_rbis",                 "rbis",        "RBIs"),
     ],
     "nhl": [
         ("player_shots_on_goal", "sog",     "Shots on Goal"),
@@ -733,6 +743,19 @@ def fetch_odds_api_props(
                     try:
                         line = float(line) if line is not None else None
                     except (ValueError, TypeError):
+                        line = None
+
+                    # batter_home_runs_alternate exposes multiple lines per
+                    # player (0.5 = anytime / 1+, 1.5 = 2+, etc.). Anytime
+                    # HR is the 0.5 line; the higher lines are different
+                    # markets — keep them out so the consensus stays clean
+                    # and the HR Props tab doesn't list "2+ HR" as if it
+                    # were anytime HR. Normalize line to None so the edge
+                    # dict matches the schema of the legacy batter_home_runs
+                    # market (no line displayed for binary anytime props).
+                    if api_mkt_key == "batter_home_runs_alternate":
+                        if line != 0.5:
+                            continue
                         line = None
 
                     if not player:
@@ -6939,13 +6962,16 @@ def _hr_no_data_diagnostic(book: str) -> str:
                f"{soonest_ev.get('home_team','?')}")
 
     # One probe call on the soonest event to see who actually has HR yet.
+    # Ask for both the standard and alternate market keys because
+    # different books expose HR under different keys (DK/FD use only
+    # batter_home_runs_alternate; Caesars uses only batter_home_runs).
     try:
         r2 = requests.get(
             f"{ODDS_API_BASE}/sports/baseball_mlb/events/{soonest_ev['id']}/odds",
             params={
                 "apiKey":     ODDS_API_KEY,
-                "regions":    "us",
-                "markets":    "batter_home_runs",
+                "regions":    "us,us2",
+                "markets":    "batter_home_runs,batter_home_runs_alternate",
                 "oddsFormat": "american",
             },
             timeout=10,
@@ -6955,7 +6981,7 @@ def _hr_no_data_diagnostic(book: str) -> str:
             books_with_hr = sorted({
                 bm.get("key", "")
                 for bm in data.get("bookmakers", [])
-                if any(m.get("key") == "batter_home_runs"
+                if any(m.get("key", "").startswith("batter_home_runs")
                        for m in bm.get("markets", []))
             })
         else:
