@@ -1047,11 +1047,29 @@ def test_qualifies_mlb_h2h_non_pinn_upper_cap_preserved():
 
 
 def test_qualifies_blocked_sports_still_blocked():
-    # NBA game lines and European soccer remain blocked.
+    # NBA H2H + totals remain blocked. NBA spreads has its own narrow
+    # re-enable — see test_qualifies_nba_spreads_narrow_reenable.
+    # European soccer remains fully blocked.
     assert not _qualifies(_q("NBA", "h2h", 3.0, pinn=True))
-    assert not _qualifies(_q("NBA", "spreads", 4.0, pinn=True))
+    assert not _qualifies(_q("NBA", "totals", 2.0, pinn=True))
     assert not _qualifies(_q("EPL", "h2h", 3.0, pinn=True))
     assert not _qualifies(_q("BUNDESLIGA", "h2h", 4.0, pinn=True))
+
+
+def test_qualifies_nba_spreads_narrow_reenable():
+    # 60d backtest (2026-03-26 → 2026-05-26): NBA spreads non-Pinn
+    # 1–2% +24.6% on 52 picks, 2–3% +12.9% on 21 picks. Re-enabled
+    # at 1.0–3.0% only; 3%+ stays blocked (small-sample losses in
+    # 3–5% band).
+    assert _qualifies(_q("NBA", "spreads", 1.0))
+    assert _qualifies(_q("NBA", "spreads", 2.9))
+    assert _qualifies(_q("NBA", "spreads", 1.5, pinn=True))
+    # Below floor and at/above 3% upper cap both blocked.
+    assert not _qualifies(_q("NBA", "spreads", 0.9))
+    assert not _qualifies(_q("NBA", "spreads", 3.0))
+    assert not _qualifies(_q("NBA", "spreads", 4.0))
+    # Pinn at 3%+ also blocked (matches non-Pinn upper cap).
+    assert not _qualifies(_q("NBA", "spreads", 3.5, pinn=True))
 
 
 def test_qualifies_totals_still_mlb_pinn_only():

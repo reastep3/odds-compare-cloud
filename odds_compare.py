@@ -2265,11 +2265,20 @@ def _qualifies(e):
     if sport in _BLOCKED_SOCCER:
         return False
 
-    # Block NBA game lines (spreads/totals/h2h) — -18.9% ROI lifetime.
-    # NBA pts props handled by _qualifies_prop(). Recent 12d broad pool
-    # showed NBA h2h flipping to +14% but on n=21 — keep blocked until
-    # 30-day sample supports re-enable.
+    # NBA game lines: narrow re-enable for SPREADS only after 60-day
+    # backtest (2026-03-26 → 2026-05-26, post-recalibration replay)
+    # showed NBA spreads non-Pinn 1–2% at +24.6% on 52 picks and 2–3%
+    # at +12.9% on 21 picks. H2H also positive (+5.9% on 189) but
+    # smaller per-bucket samples + matchup variance — defer until
+    # next season's data. Totals stay blocked (-6.8% on 167). Capped
+    # at <3% because 3–5% had small-sample losses (4 picks, -100%).
+    # NBA pts props remain handled by _qualifies_prop().
     if sport == "NBA":
+        if mkt == "spreads":
+            # <3% cap applies to both Pinn and non-Pinn — NBA-spreads
+            # Pinn at higher EVs is too rare to have a reliable signal
+            # in 60d, and the positive band is 1.0–3.0% non-Pinn.
+            return 1.0 <= ev < 3.0
         return False
 
     # H2H: MLB / MLS / TENNIS / BOXING.
