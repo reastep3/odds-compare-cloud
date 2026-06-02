@@ -21,6 +21,11 @@ Archive/
 Backups/
 Backtest Archives/
 *.xlsx
+*.zip
+
+# Claude Code harness state (worktrees etc.) — keep out of the build context
+.claude/
+.github/
 
 # State (persisted in the Fly volume)
 prev_play_keys.json

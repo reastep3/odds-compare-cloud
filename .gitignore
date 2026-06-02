@@ -22,6 +22,10 @@ output/
 Archive/
 Backups/
 Backtest Archives/
+backtest_*.zip
+
+# Claude Code harness state (worktrees, session data) — local only
+.claude/
 
 # State files (machine-local; persistent volume in cloud)
 prev_play_keys.json

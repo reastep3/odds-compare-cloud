@@ -820,6 +820,7 @@ def test_find_golf_edges_rejects_higa_style_outlier_at_tightened_ratio():
 from telegram_bot import parse_promo
 from odds_compare import (
     EUROPEAN_SOCCER_SPORT_KEYS,
+    _canonical_promo_sport,
     _derive_promo_scope,
     _promo_matches,
     _promo_no_pick_reason,
@@ -891,6 +892,76 @@ def test_promo_matches_european_soccer_rejects_missing_sport_key():
         "sport_key":    None,
         "market":       "h2h",
         "odds_decimal": 2.5,
+    }
+    assert _promo_matches(promo, edge) is False
+
+
+# ── Tennis promo matching ──────────────────────────────────────────────
+# The Odds API tags tennis events with the tournament title ("ATP Italian
+# Open", "WTA Madrid Open"), not a flat "Tennis". Before the
+# _canonical_promo_sport fix, these never collapsed to "tennis", so a
+# tennis-targeted promo silently matched nothing despite the data being
+# fetched (tennis h2h/spreads/totals ride the regular game-line fetch).
+
+@pytest.mark.parametrize("raw_sport,expected", [
+    ("ATP Italian Open", "tennis"),
+    ("WTA Madrid Open",  "tennis"),
+    ("ATP French Open",  "tennis"),
+    ("Tennis",           "tennis"),
+    ("atp",              "tennis"),
+    ("wta",              "tennis"),
+    # Non-tennis sports are unaffected — same result as the old
+    # _LEAGUE_TO_SPORT.get(key, key) lookup.
+    ("MLB",              "mlb"),
+    ("Soccer",           "soccer"),
+    ("EPL",              "soccer"),
+    ("NBA",              "nba"),
+    ("Unknownsport",     "unknownsport"),
+])
+def test_canonical_promo_sport(raw_sport, expected):
+    assert _canonical_promo_sport(raw_sport) == expected
+
+
+def test_promo_matches_tennis_promo_accepts_atp_tournament_edge():
+    # The bug we're closing: an ATP-tournament edge must satisfy a
+    # tennis-targeted promo.
+    promo = {"book": "DraftKings", "sport": "tennis", "market": "h2h",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "DraftKings",
+        "sport":        "ATP Italian Open",
+        "sport_key":    "tennis_atp_italian_open",
+        "market":       "h2h",
+        "odds_decimal": 1.8,
+    }
+    assert _promo_matches(promo, edge) is True
+
+
+def test_promo_matches_tennis_promo_accepts_wta_totals_edge():
+    # Tennis totals (total games over/under) ride the game-line fetch and
+    # must match a tennis totals promo.
+    promo = {"book": "FanDuel", "sport": "tennis", "market": "totals",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "FanDuel",
+        "sport":        "WTA Madrid Open",
+        "sport_key":    "tennis_wta_madrid_open",
+        "market":       "totals",
+        "odds_decimal": 1.95,
+    }
+    assert _promo_matches(promo, edge) is True
+
+
+def test_promo_matches_tennis_promo_rejects_non_tennis_edge():
+    # A tennis promo must not grab a baseball edge.
+    promo = {"book": "DraftKings", "sport": "tennis", "market": "h2h",
+             "promo_type": "straight", "min_odds": None}
+    edge = {
+        "book":         "DraftKings",
+        "sport":        "MLB",
+        "sport_key":    "baseball_mlb",
+        "market":       "h2h",
+        "odds_decimal": 1.8,
     }
     assert _promo_matches(promo, edge) is False
 
@@ -1014,6 +1085,18 @@ def test_qualifies_tennis_h2h_pinn_qualifies_at_1pct():
     assert not _qualifies(_q("TENNIS", "h2h", 0.9, pinn=True))
 
 
+def test_qualifies_tennis_tournament_title_activates():
+    # 2026-06-02 regression guard: live edges are tagged with the Odds API
+    # tournament title ("ATP Italian Open"), NOT a flat "TENNIS". Before the
+    # fix the TENNIS branch never fired live (the older tests above used the
+    # already-canonical "TENNIS" string and so missed this). These assert the
+    # real-world labels now qualify.
+    assert _qualifies(_q("ATP Italian Open", "h2h", 2.5))
+    assert _qualifies(_q("WTA Madrid Open", "h2h", 2.5))
+    assert not _qualifies(_q("ATP Italian Open", "h2h", 1.9))   # below 2.0 gate
+    assert not _qualifies(_q("WTA Madrid Open", "h2h", 5.0))    # universal cap
+
+
 def test_qualifies_boxing_h2h_non_pinn_floor_1pct():
     # Broad 1–5% +11.7% on 14 picks; ≥5% drops to -2.5% — universal cap
     # handles the upper bound.
@@ -1088,12 +1171,13 @@ def test_qualifies_book_count_floor_unchanged():
     assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, books=3))
 
 
-def test_qualifies_prop_pts_floor_2pct():
-    # pts threshold 3.0% → 2.0%; broad 2–3% pts +35.3%.
-    e_in  = {"market": "pts", "ev_pct": 2.0}
-    e_out = {"market": "pts", "ev_pct": 1.9}
-    assert _qualifies_prop(e_in)
-    assert not _qualifies_prop(e_out)
+def test_qualifies_prop_pts_floor_3pct():
+    # 2026-06-02: pts threshold 2.0% → 3.0%. The ~2-month replay showed the
+    # 2–3% band at -6.8% ROI / -8.2% flat (n=54); positive signal is 3%+.
+    assert _qualifies_prop({"market": "pts", "ev_pct": 3.0})
+    assert not _qualifies_prop({"market": "pts", "ev_pct": 2.9})
+    # The old 2.0–3.0 inclusion band is now excluded.
+    assert not _qualifies_prop({"market": "pts", "ev_pct": 2.0})
 
 
 def test_qualifies_prop_strikeouts_floor_4pct():

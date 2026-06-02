@@ -2237,6 +2237,15 @@ _BLOCKED_SOCCER = frozenset({
 def _qualifies(e):
     """Return True if an edge qualifies for the 'Play These' tab.
 
+    2026-06-02 — TENNIS activated. The 2026-05-22 add never fired live: the
+    Odds API tags tennis edges with the tournament title ("ATP Italian
+    Open"), so sport never equalled "TENNIS" (now collapsed below). A ~2-month
+    broad-pool replay (2026-04→05, all non-Pinn since tennis has no Pinnacle)
+    shows tennis h2h +8.0% ROI / +8.2% flat on n=124; the qualifying 2–5%
+    slice is +22.7% ROI / +5.1% flat on n=32. Clears the "30+ day data before
+    enabling a new sport" bar. No threshold change — the existing non-Pinn
+    ev≥2.0 gate (capped <5.0) catches the positive bands.
+
     Recalibrated 2026-05-22 against the 12-day backtest (2026-05-05 → 05-16,
     922 broad +EV picks, 189 PT picks at -24.1% ROI). Five changes:
 
@@ -2272,6 +2281,15 @@ def _qualifies(e):
     books = e["num_other_books"]
     mkt   = e["market"]
     sport = e.get("sport", "").upper()
+    # The Odds API tags tennis events with the tournament title
+    # ("ATP Italian Open", "WTA Madrid Open"), never a flat "TENNIS", so
+    # the TENNIS branch below never fired live — tennis silently never
+    # reached Play These despite being added 2026-05-22. Collapse the
+    # ATP/WTA prefixes (same rule as _canonical_promo_sport and
+    # backtest.py's grader). Tennis has no Pinnacle coverage, so every
+    # tennis edge is non-Pinn.
+    if sport.startswith("ATP") or sport.startswith("WTA"):
+        sport = "TENNIS"
 
     if not _starts_within_days(e, MAX_PLAY_DAYS):
         return False
@@ -2351,6 +2369,14 @@ def _qualifies(e):
 def _qualifies_prop(e):
     """Return True if a player prop edge qualifies for 'Play These'.
 
+    2026-06-02 — pts raised 2.0 → 3.0. A ~2-month broad-pool replay
+    (2026-04→05, n=247 NBA pts, all non-Pinn) refuted the 2026-05-22 read
+    that the 2–3% band was the best pocket: 2–3% is now -6.8% ROI / -8.2%
+    flat on n=54, while the positive signal sits at 3%+ (3–5% breakeven,
+    5%+ thin-but-strong). Dropping the 2–3% band lifts the whole included
+    prop set from +24.7% ROI / +11.1% flat to +33.9% / +20.7% (n 163→109).
+    strikeouts (4.0) and total_bases (1.5) held up — left unchanged.
+
     Recalibrated 2026-05-22 against the 12-day backtest (2026-05-05 →
     05-16, 241 broad PP picks). Two threshold changes:
 
@@ -2397,7 +2423,7 @@ def _qualifies_prop(e):
 
     # Per-market non-Pinn thresholds — see EV-tier table in docstring.
     if mkt == "pts":
-        return ev >= 2.0
+        return ev >= 3.0
     if mkt == "strikeouts":
         return ev >= 4.0
     if mkt == "total_bases":
@@ -6096,9 +6122,7 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
             if game_filter and edge.get("game") != game_filter:
                 continue
             if promo["sport"] != "all":
-                edge_sport = edge["sport"].lower().replace(" ", "")
-                canonical = _LEAGUE_TO_SPORT.get(edge_sport, edge_sport)
-                if canonical != promo["sport"]:
+                if _canonical_promo_sport(edge["sport"]) != promo["sport"]:
                     continue
             if promo["market"] != "all":
                 if edge["market"].lower() != promo["market"]:
@@ -6704,6 +6728,27 @@ _LEAGUE_TO_SPORT = {
     "tennis": "tennis", "atp": "tennis", "wta": "tennis",
 }
 
+
+def _canonical_promo_sport(raw_sport: str) -> str:
+    """Collapse an edge's raw sport label to a canonical promo-sport key.
+
+    Most leagues map 1:1 via _LEAGUE_TO_SPORT, but tennis is special: The
+    Odds API tags each event with the *tournament* title ("ATP Italian
+    Open", "WTA Madrid Open") rather than a flat "Tennis". A literal
+    _LEAGUE_TO_SPORT lookup ("atpitalianopen") therefore misses, the edge
+    never canonicalises to "tennis", and every tennis-targeted promo
+    silently matches nothing. Collapse any "atp…"/"wta…" title to "tennis"
+    first (the same rule backtest.py uses when grading), then fall back to
+    the league map. Returns the normalised key unchanged when nothing
+    matches — mirroring the previous `.get(key, key)` default so non-tennis
+    sports behave exactly as before.
+    """
+    key = raw_sport.lower().replace(" ", "")
+    if key.startswith("atp") or key.startswith("wta"):
+        return "tennis"
+    return _LEAGUE_TO_SPORT.get(key, key)
+
+
 # Golf market internal keys (for quick membership tests)
 _GOLF_MARKETS = {"golf_top5", "golf_top10", "golf_top20", "golf_win"}
 
@@ -6744,8 +6789,7 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     if edge.get("market") == "hr" and promo["market"] != "hr":
         return False
     if promo["sport"] != "all":
-        edge_sport = edge["sport"].lower().replace(" ", "")
-        canonical = _LEAGUE_TO_SPORT.get(edge_sport, edge_sport)
+        canonical = _canonical_promo_sport(edge["sport"])
         # european_soccer narrows generic soccer edges to the Odds API
         # sport_keys that belong to the major European leagues. Edges
         # without sport_key (e.g. AN-fallback) are conservatively
@@ -7458,8 +7502,7 @@ def _promo_no_pick_reason(promo: dict,
     if sport == "european_soccer":
         book_soccer = [e for e in combined
                        if e.get("book") == book
-                       and _LEAGUE_TO_SPORT.get(
-                           e["sport"].lower().replace(" ", ""), "") == "soccer"]
+                       and _canonical_promo_sport(e["sport"]) == "soccer"]
         if not book_soccer:
             return (f"No {book} soccer edges loaded today — soccer fetch "
                     f"returned 0 events or pre-edge filters discarded them.")
@@ -7554,10 +7597,7 @@ def _promo_no_pick_reason(promo: dict,
     book_edges = [e for e in combined if e.get("book") == book]
     if book_edges and sport != "all":
         sports_seen = sorted({
-            _LEAGUE_TO_SPORT.get(
-                e["sport"].lower().replace(" ", ""),
-                e["sport"].lower().replace(" ", ""),
-            ).upper()
+            _canonical_promo_sport(e["sport"]).upper()
             for e in book_edges
         })
         sample = ", ".join(sports_seen[:6])
@@ -7607,9 +7647,7 @@ def eligible_games_for_promo(promo: dict, all_edges: list[dict],
                 and _starts_within_days(e, MAX_PROMO_DAYS)
                 and e.get("market") != "hr"
                 and (promo["sport"] == "all"
-                     or _LEAGUE_TO_SPORT.get(
-                         e["sport"].lower().replace(" ", ""),
-                         e["sport"].lower().replace(" ", "")) == promo["sport"])
+                     or _canonical_promo_sport(e["sport"]) == promo["sport"])
                 and (promo["market"] == "all"
                      or e["market"].lower() == promo["market"])
             })
