@@ -1468,3 +1468,41 @@ def test_backtest_promo_goalscorer_grades_manual():
             "pick": "Raul Jimenez", "bet_amount": 5.0}
     run_backtest_promo([pick])
     assert pick["result"] == "MANUAL"
+
+
+def test_wc_window_message_when_next_game_beyond_promo_window():
+    # The exact 2:22 AM ET scenario from launch eve: 72 fixtures fetched,
+    # zero in the 1-day promo window. The diagnostic must say WHEN to
+    # re-run, not imply the fetch broke.
+    from datetime import datetime, timezone
+    from odds_compare import _format_wc_window_msg
+    now = datetime(2026, 6, 10, 6, 22, tzinfo=timezone.utc)
+    events = [
+        {"commence_time": "2026-06-11T19:00:00Z",
+         "away_team": "South Africa", "home_team": "Mexico"},
+        {"commence_time": "2026-06-12T02:00:00Z",
+         "away_team": "Czech Republic", "home_team": "South Korea"},
+    ]
+    msg = _format_wc_window_msg(events, "DraftKings", now=now)
+    assert msg is not None
+    assert "South Africa @ Mexico" in msg
+    assert "36.6h" in msg
+    # Window opens 24h before kickoff: 06/10 3:00 PM EDT.
+    assert "Re-run after 06/10 03:00 PM" in msg
+    assert "DraftKings" in msg
+
+
+def test_wc_window_message_silent_when_explanation_is_elsewhere():
+    from datetime import datetime, timezone
+    from odds_compare import _format_wc_window_msg
+    now = datetime(2026, 6, 10, 6, 22, tzinfo=timezone.utc)
+    # Soonest game inside the window → timing isn't the story; fall
+    # through to the generic subset diagnostics.
+    in_window = [{"commence_time": "2026-06-10T19:00:00Z",
+                  "away_team": "A", "home_team": "B"}]
+    assert _format_wc_window_msg(in_window, "DraftKings", now=now) is None
+    # No future fixtures at all (tournament over) → same.
+    assert _format_wc_window_msg([], "DraftKings", now=now) is None
+    past = [{"commence_time": "2026-06-09T19:00:00Z",
+             "away_team": "A", "home_team": "B"}]
+    assert _format_wc_window_msg(past, "DraftKings", now=now) is None

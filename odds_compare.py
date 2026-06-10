@@ -6810,6 +6810,74 @@ _SOCCER_SUBSET_LABELS = {
     "world_cup":       ("the FIFA World Cup", "World Cup"),
 }
 
+
+def _format_wc_window_msg(events: list[dict], book: str,
+                          now: datetime | None = None) -> str | None:
+    """Build the "World Cup odds are up but no match is inside the pick
+    window yet" message from a soccer_fifa_world_cup /events payload.
+
+    During a tournament the fixture list spans weeks, so a late-night
+    run the day before a match finds 72 events fetched and zero edges —
+    the generic "soccer fetch returned 0 events" diagnostic reads like
+    a breakage when the real story is "come back within 24h of
+    kickoff". Returns None when timing is NOT the explanation (no
+    future fixtures, or the soonest game is already inside the promo
+    window) so callers fall through to the generic subset diagnostics.
+    Split from the network probe for unit-testability.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    soonest = None  # (commence_dt, away, home)
+    for ev in events:
+        try:
+            ct = datetime.fromisoformat(
+                str(ev.get("commence_time", "")).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if ct <= now:
+            continue
+        if soonest is None or ct < soonest[0]:
+            soonest = (ct, ev.get("away_team", "?"), ev.get("home_team", "?"))
+    if soonest is None:
+        return None
+    ct, away, home = soonest
+    window = timedelta(days=MAX_PROMO_DAYS)
+    if ct - now <= window:
+        return None   # in window — absence has some other cause
+    hours_out  = (ct - now).total_seconds() / 3600.0
+    when_str   = ct.astimezone(EASTERN).strftime("%m/%d %I:%M %p %Z")
+    unlock_str = ((ct - window).astimezone(EASTERN)
+                  .strftime("%m/%d %I:%M %p %Z"))
+    return (f"World Cup odds are up ({len(events)} matches on the board) "
+            f"but the next match ({away} @ {home}, {when_str}) is "
+            f"{hours_out:.1f}h out — beyond the {MAX_PROMO_DAYS}-day promo "
+            f"pick window. Re-run after {unlock_str} and the {book} "
+            f"World Cup picks will populate.")
+
+
+def _wc_next_game_diagnostic(book: str) -> str | None:
+    """Probe upcoming World Cup fixtures (free /events call — 0 credits)
+    when a world_cup promo found nothing to pick. Returns the timing
+    message, or None when timing isn't the explanation (no fixtures,
+    probe failure, or a game already inside the window) — callers fall
+    through to the generic subset messages.
+    """
+    from bot_config import ODDS_API_KEY
+    if not ODDS_API_KEY:
+        return None   # offline / test environment — skip the probe
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/soccer_fifa_world_cup/events",
+            params={"apiKey": ODDS_API_KEY},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        events = r.json() or []
+    except Exception:
+        return None
+    return _format_wc_window_msg(events, book)
+
 # Maps league names from AN to our canonical sport keys for promo matching
 _LEAGUE_TO_SPORT = {
     "nba": "nba", "mlb": "mlb", "nhl": "nhl", "nfl": "nfl",
@@ -7635,11 +7703,22 @@ def _promo_no_pick_reason(promo: dict,
                        if e.get("book") == book
                        and _canonical_promo_sport(e["sport"]) == "soccer"]
         if not book_soccer:
+            # World Cup: distinguish "tournament fixtures exist but the
+            # next match is beyond the pick window" (the 2 AM-the-day-
+            # before case) from a genuinely dead fetch.
+            if sport == "world_cup":
+                timing = _wc_next_game_diagnostic(book)
+                if timing:
+                    return timing
             return (f"No {book} soccer edges loaded today — soccer fetch "
                     f"returned 0 events or pre-edge filters discarded them.")
         subset_book_soccer = [e for e in book_soccer
                               if e.get("sport_key") in subset_keys]
         if not subset_book_soccer:
+            if sport == "world_cup":
+                timing = _wc_next_game_diagnostic(book)
+                if timing:
+                    return timing
             outside = sorted({
                 (e.get("sport_key") or "unknown")
                 .replace("soccer_", "")

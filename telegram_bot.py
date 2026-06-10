@@ -1725,7 +1725,9 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         scope_desc = ", ".join(scope_bits) if scope_bits else "no fetches"
         fetch_msg = f"Scoped fetch: {scope_desc} — should be quick."
     else:
-        fetch_msg = "Fetching 8 sports — this takes ~60-90 seconds."
+        from odds_compare import AN_SPORTS
+        fetch_msg = (f"Fetching {len(AN_SPORTS)} sports — this takes "
+                     f"~60-90 seconds.")
 
     await update.message.reply_text(
         f"{status_line}\n{fetch_msg}",
