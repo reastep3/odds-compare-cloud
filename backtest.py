@@ -86,6 +86,9 @@ ESPN_SPORT_MAP = {
     "europa":        "soccer/uefa.europa",
     "conference":    "soccer/uefa.europa.conf",
     "ligamx":        "soccer/mex.1",
+    # FIFA World Cup 2026 — slug verified 2026-06-10 (returns the Jun 11
+    # openers). Promo-driven picks (tournament-wide boosts) grade here.
+    "world_cup":     "soccer/fifa.world",
     # AFL / Boxing / Cricket / Tennis are not auto-graded via ESPN — they
     # surface in the picks output but skip backtest grading. (ESPN's
     # AFL coverage is intermittent and tennis/cricket use different slug
@@ -176,6 +179,10 @@ _SPORT_NORM: dict[str, str] = {
     "liga mx":                          "ligamx",
     "mexico liga mx":                   "ligamx",
     "mex.1":                            "ligamx",
+    # Soccer — FIFA World Cup (Odds API sport_title is "FIFA World Cup")
+    "fifa world cup":                   "world_cup",
+    "world cup":                        "world_cup",
+    "fifa.world":                       "world_cup",
     # WNBA
     "wnba":                             "wnba",
     "women's national basketball association": "wnba",

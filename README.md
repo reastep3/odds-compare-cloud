@@ -10,7 +10,7 @@ Runs on [Fly.io](https://fly.io) as a single always-on machine. The Telegram bot
 
 ## What it does
 
-- **Scans 13 sports** for game lines (NBA, MLB, NHL, NFL, NCAAB, NCAAF, UFC, soccer — MLS + 9 European leagues, WNBA, AFL, Boxing, Cricket, Tennis) and player props for NBA / MLB / NHL.
+- **Scans 13 sports** for game lines (NBA, MLB, NHL, NFL, NCAAB, NCAAF, UFC, soccer — MLS, Liga MX, 8 European leagues + the **2026 FIFA World Cup**, WNBA, AFL, Boxing, Cricket, Tennis) and player props for NBA / MLB / NHL.
 - **Anchors fair probability on Pinnacle** when available (~2% vig); falls back to a consensus of ~13 books.
 - **Captures closing lines** automatically — every +EV pick is re-queried 0–15 min before commence so each bet gets a CLV (closing-line value) measurement.
 - **Outputs**:
@@ -27,7 +27,7 @@ Runs on [Fly.io](https://fly.io) as a single always-on machine. The Telegram bot
 **Pinnacle direct guest API** (`PINNACLE_GUEST_KEY`) for game-line coverage. Pinnacle's prices weight 65% of the fair-probability estimate when available.
 
 **Result grading** (for `/backtest`):
-- ESPN scoreboard — most US team sports, major European soccer, IPL cricket via numeric league IDs
+- ESPN scoreboard — most US team sports, major European soccer, the FIFA World Cup, IPL cricket via numeric league IDs
 - TennisExplorer (scraped) — ATP / WTA singles
 - BoxLive (scraped) — boxing
 - Squiggle (free API) — AFL
@@ -42,6 +42,7 @@ Promos are parsed from a compact string syntax (filler words like "any", "event"
 ```
 dk 25% 3+ nhl +100 $10
 dk 25% any ice hockey event, 3+ leg parlays, $10 max wager, +100 min
+fd 50% profit boost on all world cup bets
 ```
 
 Supported modifiers:
@@ -54,6 +55,7 @@ Supported modifiers:
 - `$10` — max bet
 - `2x`, `3x` — count: multiple identical copies of the promo
 - Sport aliases: `hockey`/`nhl`, `basketball`/`nba`, `football`/`nfl`, `baseball`/`mlb`, `golf`/`pga`, `mma`/`ufc`, plus phrases like `ice hockey`, `premier league`, `college basketball`
+- Competition-scoped sports: `world cup`/`wc`/`fifa` restricts to FIFA World Cup games only (Club World Cup, qualifiers and futures never qualify); `european soccer`/`epl`/`ucl` etc. restrict to the major European leagues — so a pick can never land on a game outside the promo's terms
 
 ### Photo → promo via Claude vision
 
@@ -106,12 +108,12 @@ CLV converges on whether a model has a real edge much faster than win/loss does 
 
 **Play These qualifying rules** (calibrated against backtest cohorts; see docstrings on `_qualifies()` / `_qualifies_prop()` in `odds_compare.py` for the per-rule numbers):
 
-- Game lines need ≥1.0% EV with Pinnacle anchor, otherwise ≥2.5%, plus a minimum of 4 reference books.
-- H2H: MLB and MLS only.
-- Spreads: any sport.
+- Game lines need ≥1.0% EV with Pinnacle anchor, otherwise ≥2.0–2.5% depending on market, plus a minimum of 4 reference books. EV ≥ 5% is rejected outright (stale-line traps).
+- H2H: MLB, MLS, Tennis, and Boxing only.
+- Spreads: any non-blocked sport; NBA spreads only in the 1–3% EV band.
 - Totals: MLB only AND Pinnacle-anchored.
-- NBA game lines blocked entirely. European soccer (EPL, Bundesliga, Champions, Europa, LaLiga, Ligue 1, Serie A) blocked.
-- Player props: per-market thresholds — `pts` ≥ 3.0%, `strikeouts` ≥ 2.0%, `total_bases` ≥ 1.5%. Other prop markets (rebounds, assists, hits, RBIs, etc.) excluded for negative ROI.
+- NBA H2H/totals blocked. European soccer (EPL, Bundesliga, Champions, Europa, Conference, LaLiga, Ligue 1, Serie A), Liga MX, and the FIFA World Cup (promo-only until 30+ days of backtest data) blocked.
+- Player props: per-market thresholds — `pts` ≥ 3.0%, `strikeouts` ≥ 4.0%, `total_bases` ≥ 1.5%. Other prop markets (rebounds, assists, hits, RBIs, etc.) excluded for negative ROI.
 - Game must commence within 1 day.
 
 **Profit boost**: `boosted_profit = profit × (1 + boost%/100)`. The promo picker ranks candidates by **boosted** EV, so long-shot bets that are -EV pre-boost but +EV post-boost can still win the pick — which a pre-boost-only search would miss.

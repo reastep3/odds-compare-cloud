@@ -1342,3 +1342,13 @@ def test_no_pick_world_cup_names_the_slate():
     reason = _promo_no_pick_reason(promo, [mls], matched_all=[], pool=[])
     assert "FIFA World Cup" in reason
     assert "Usa Mls" in reason
+
+
+def test_backtest_grades_world_cup_via_espn():
+    # Without these mappings, World Cup picks fall through to the "soccer"
+    # default (MLS scoreboard), never match, and silently skip grading
+    # for the whole tournament.
+    from backtest import ESPN_SPORT_MAP, _normalise_sport
+    assert _normalise_sport("FIFA World Cup") == "world_cup"
+    assert _normalise_sport("world cup") == "world_cup"
+    assert ESPN_SPORT_MAP["world_cup"] == "soccer/fifa.world"
