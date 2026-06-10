@@ -161,6 +161,13 @@ PROMO_SPORT_KEYWORDS = {
     "ncaab": "ncaab", "cbb":      "ncaab",
     "ncaaf": "ncaaf", "cfb":      "ncaaf",
     "soccer": "soccer",
+    # World Cup promos ("50% boost on all World Cup bets") narrow to the
+    # FIFA World Cup sport_key only — an MLS or Club World Cup pick
+    # would not qualify for the promo's terms. "fifa" alone counts:
+    # during the tournament that's how the books abbreviate it.
+    "worldcup": "world_cup",
+    "wc":       "world_cup",
+    "fifa":     "world_cup",
     # Single-token shortcuts for individual European leagues narrow to
     # the european_soccer canonical key — typing "epl" should never
     # surface an MLS pick (which would not qualify for the promo).
@@ -181,6 +188,11 @@ PROMO_SPORT_KEYWORDS = {
 # Two-word sport phrases checked with one-token lookahead.
 PROMO_SPORT_PHRASES = {
     "ice hockey":         "nhl",
+    # "fifa world" (not "fifa world cup") because phrases are two-token;
+    # the trailing "cup" falls through as an unknown token and is
+    # ignored. Bare "world cup" covers the common phrasing.
+    "world cup":          "world_cup",
+    "fifa world":         "world_cup",
     "premier league":     "european_soccer",
     "college basketball": "ncaab",
     "college football":   "ncaaf",
@@ -279,6 +291,7 @@ def parse_promo(text: str) -> dict | None:
         dk 25% 3-leg nba
         dk 25% 3+ ice hockey $10 +100
         dk 20% mlb game
+        dk 50% all world cup bets
     """
     text = text.strip().lower()
     if not text:
@@ -1000,7 +1013,8 @@ async def _send_promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "  • Filler words (<code>any</code>, <code>event</code>, "
             "<code>min</code>, <code>max</code>, commas) are ignored\n\n"
             "<i>Sports:</i> nba/basketball · mlb/baseball · nhl/hockey · "
-            "nfl/football · soccer · ufc · pga/golf · ncaab · ncaaf\n"
+            "nfl/football · soccer · world cup/wc · ufc · pga/golf · "
+            "ncaab · ncaaf\n"
             "<i>Markets:</i> ml · spreads/ats · totals/ou · hr · strikeouts"
         )
 

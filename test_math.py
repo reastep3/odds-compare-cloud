@@ -1197,3 +1197,148 @@ def test_qualifies_prop_other_markets_blocked():
     assert not _qualifies_prop({"market": "rebounds", "ev_pct": 10.0})
     assert not _qualifies_prop({"market": "assists", "ev_pct": 10.0})
     assert not _qualifies_prop({"market": "made_threes", "ev_pct": 10.0})
+
+
+# ── World Cup promo support (2026 FIFA World Cup) ──────────────────────
+# Tournament-wide boosts ("50% profit boost on all World Cup bets") need
+# sport="world_cup" to narrow to the exact soccer_fifa_world_cup
+# sport_key. The Odds API also exposes soccer_fifa_club_world_cup,
+# _qualifiers_*, _womens and _winner as SEPARATE keys — none of them
+# qualify under a World Cup promo's terms, so exact key matching (not
+# prefix matching) is load-bearing here.
+
+from odds_compare import (_canonical_promo_sport, _promo_matches,
+                          ODDS_API_SPORTS, WORLD_CUP_SPORT_KEYS)
+
+
+def _wc_edge(**overrides):
+    """Edge as the soccer fetch produces it for a World Cup game:
+    sport is the Odds API sport_title verbatim, sport_key carries the
+    competition identity used for subset narrowing."""
+    edge = {
+        "book":         "DraftKings",
+        "sport":        "FIFA World Cup",
+        "sport_key":    "soccer_fifa_world_cup",
+        "market":       "h2h",
+        "odds_decimal": 2.4,
+        "outcome":      "Mexico",
+        "game":         "Mexico @ South Africa",
+    }
+    edge.update(overrides)
+    return edge
+
+
+def _wc_promo(**overrides):
+    promo = {
+        "book":        "DraftKings",
+        "sport":       "world_cup",
+        "market":      "all",
+        "promo_type":  "straight",
+        "min_odds":    None,
+        "game_filter": None,
+    }
+    promo.update(overrides)
+    return promo
+
+
+def test_parse_promo_world_cup_phrase():
+    promo = parse_promo("dk 50% world cup")
+    assert promo is not None
+    assert promo["book"]      == "DraftKings"
+    assert promo["sport"]     == "world_cup"
+    assert promo["market"]    == "all"
+    assert promo["boost_pct"] == 50
+    assert "World Cup" in promo["label"]
+
+
+def test_parse_promo_world_cup_near_verbatim_slip():
+    # What the user would paste from the books' promo copy. "fifa world"
+    # is the two-token phrase; the trailing "cup" and the filler words
+    # must fall away silently.
+    promo = parse_promo("fd 50% profit boost on all fifa world cup bets")
+    assert promo is not None
+    assert promo["book"]      == "FanDuel"
+    assert promo["sport"]     == "world_cup"
+    assert promo["boost_pct"] == 50
+
+
+def test_parse_promo_wc_keyword_with_market():
+    promo = parse_promo("dk 25% wc ml")
+    assert promo is not None
+    assert promo["sport"]  == "world_cup"
+    assert promo["market"] == "h2h"
+
+
+def test_promo_matches_world_cup_edge():
+    assert _promo_matches(_wc_promo(), _wc_edge())
+
+
+def test_promo_matches_world_cup_rejects_other_fifa_competitions():
+    # Same "FIFA …" title family, different competitions — prefix
+    # matching on either title or sport_key would wrongly admit these.
+    club = _wc_edge(sport="FIFA Club World Cup",
+                    sport_key="soccer_fifa_club_world_cup")
+    qual = _wc_edge(sport="FIFA World Cup Qualifiers - Europe",
+                    sport_key="soccer_fifa_world_cup_qualifiers_europe")
+    assert not _promo_matches(_wc_promo(), club)
+    assert not _promo_matches(_wc_promo(), qual)
+
+
+def test_promo_matches_world_cup_rejects_mls_and_keyless_edges():
+    mls = _wc_edge(sport="MLS", sport_key="soccer_usa_mls")
+    assert not _promo_matches(_wc_promo(), mls)
+    # AN-fallback edges carry no sport_key — without competition
+    # metadata we can't prove eligibility, so they're excluded.
+    keyless = _wc_edge(sport_key=None)
+    assert not _promo_matches(_wc_promo(), keyless)
+
+
+def test_promo_matches_subset_promos_dont_cross():
+    eur_promo = _wc_promo(sport="european_soccer")
+    assert not _promo_matches(eur_promo, _wc_edge())
+    epl = _wc_edge(sport="EPL", sport_key="soccer_epl")
+    assert not _promo_matches(_wc_promo(), epl)
+    assert _promo_matches(eur_promo, epl)
+
+
+def test_generic_soccer_promo_covers_world_cup():
+    # FIFA titles collapse to canonical "soccer", so a plain soccer
+    # boost (no subset narrowing) covers World Cup games too.
+    assert _canonical_promo_sport("FIFA World Cup") == "soccer"
+    assert _promo_matches(_wc_promo(sport="soccer"), _wc_edge())
+
+
+def test_scope_world_cup_collapses_to_soccer_fetch():
+    scope = _derive_promo_scope([
+        {"book": "DraftKings", "sport": "world_cup", "market": "h2h"},
+    ])
+    assert scope is not None
+    assert scope["sports"] == {"soccer"}
+    assert scope["prop_sport_markets"] == {}
+
+
+def test_world_cup_key_wired_into_soccer_fetch():
+    # The subset filter is meaningless if the fetch never pulls the
+    # tournament; removing the key from the fetch list must fail loudly.
+    assert "soccer_fifa_world_cup" in ODDS_API_SPORTS["soccer"]
+    assert WORLD_CUP_SPORT_KEYS == {"soccer_fifa_world_cup"}
+
+
+def test_qualifies_blocks_world_cup_from_play_these():
+    # 2026-06-10: no backtest history yet (30+ day bar, see tennis
+    # precedent) — World Cup is promo-only. Spreads would otherwise
+    # pass the generic gate on day one.
+    assert not _qualifies(_q("FIFA World Cup", "spreads", 2.5, pinn=True))
+    assert not _qualifies(_q("FIFA World Cup", "spreads", 2.5))
+    assert not _qualifies(_q("FIFA World Cup", "h2h", 3.0, pinn=True))
+
+
+def test_no_pick_world_cup_names_the_slate():
+    # Soccer loaded but no World Cup games on the slate: the diagnostic
+    # must say which competitions DID load, not just "no world_cup".
+    promo = {"book": "DraftKings", "sport": "world_cup", "market": "all"}
+    mls = _edge("DraftKings", "MLS", "h2h")
+    mls["sport_key"] = "soccer_usa_mls"
+    reason = _promo_no_pick_reason(promo, [mls], matched_all=[], pool=[])
+    assert "FIFA World Cup" in reason
+    assert "Usa Mls" in reason

@@ -199,6 +199,12 @@ ODDS_API_SPORTS: dict[str, str | list[str]] = {
         "soccer_germany_bundesliga",
         "soccer_france_ligue_one",
         "soccer_mexico_ligamx",
+        # FIFA World Cup 2026 (Jun 11 – Jul 19, US/MEX/CAN). Key verified
+        # active on the /sports endpoint 2026-06-10; returns [] at no
+        # credit cost once the tournament ends. The _qualifiers_* /
+        # _womens / club-WC / _winner (outrights) keys are intentionally
+        # NOT listed — they are separate competitions.
+        "soccer_fifa_world_cup",
     ],
     # Other sports
     "afl":     "aussierules_afl",
@@ -2228,9 +2234,16 @@ def _starts_within_days(e, max_days: int) -> bool:
 # 2026-05-09 (30d backtest, broad-pool tail): LIGAMX 0/4 (-99% ROI),
 #   CONFERENCE 1/2 (-46% ROI). Same pattern as the European leagues —
 #   non-Pinnacle consensus pricing on second-tier soccer is unreliable.
+# 2026-06-10: FIFA WORLD CUP blocked pre-emptively — zero backtest
+# history (tournament starts 2026-06-11) and the bar is 30+ days of data
+# before a new sport reaches Play These (see the tennis activation note
+# in _qualifies). Without this entry, World Cup spreads would slip
+# through the generic spreads gate on day one. Promo picks are
+# unaffected: they draw from promo_pool, which bypasses _qualifies().
 _BLOCKED_SOCCER = frozenset({
     "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA", "LALIGA",
     "LIGUE1", "SERIEA", "LIGAMX", "CONFERENCE",
+    "FIFA WORLD CUP",
 })
 
 
@@ -6332,6 +6345,7 @@ PROMO_SPORTS = {
     "ncaaf":   "NCAAF",
     "soccer":          "Soccer",
     "european_soccer": "European Soccer",
+    "world_cup":       "World Cup",
     "ufc":     "UFC",
     "pga":     "PGA Tour",
     "wnba":    "WNBA",
@@ -6709,6 +6723,33 @@ EUROPEAN_SOCCER_SPORT_KEYS = frozenset({
     "soccer_france_ligue_one",
 })
 
+# Odds API sport_keys eligible for sport="world_cup" promos (e.g.
+# "dk 50% world cup" — tournament-wide boosts for the 2026 FIFA World
+# Cup). Exact-match on purpose: the Odds API also exposes
+# soccer_fifa_club_world_cup, soccer_fifa_world_cup_qualifiers_*,
+# soccer_fifa_world_cup_womens and soccer_fifa_world_cup_winner
+# (outrights) as SEPARATE keys, and a World Cup promo's terms cover none
+# of them — so no prefix matching here.
+WORLD_CUP_SPORT_KEYS = frozenset({
+    "soccer_fifa_world_cup",
+})
+
+# Promo sports that narrow generic soccer edges to a subset of Odds API
+# sport_keys. Maps promo-sport key → eligible sport_key set. Drives
+# _promo_matches (edge filter), _derive_promo_scope (collapse to the
+# "soccer" fetch) and _promo_no_pick_reason (subset-aware diagnostics).
+_SOCCER_SUBSET_PROMOS: dict[str, frozenset[str]] = {
+    "european_soccer": EUROPEAN_SOCCER_SPORT_KEYS,
+    "world_cup":       WORLD_CUP_SPORT_KEYS,
+}
+
+# Diagnostic wording per subset promo-sport:
+# (phrase for "none from …", short label for "All N … candidates").
+_SOCCER_SUBSET_LABELS = {
+    "european_soccer": ("European leagues", "European soccer"),
+    "world_cup":       ("the FIFA World Cup", "World Cup"),
+}
+
 # Maps league names from AN to our canonical sport keys for promo matching
 _LEAGUE_TO_SPORT = {
     "nba": "nba", "mlb": "mlb", "nhl": "nhl", "nfl": "nfl",
@@ -6746,6 +6787,13 @@ def _canonical_promo_sport(raw_sport: str) -> str:
     key = raw_sport.lower().replace(" ", "")
     if key.startswith("atp") or key.startswith("wta"):
         return "tennis"
+    # FIFA competition titles ("FIFA World Cup", "FIFA Club World Cup",
+    # the qualifiers) are all soccer; collapse like the ATP/WTA rule
+    # above so generic soccer promos match them. World-Cup-only
+    # narrowing happens at the sport_key level in _promo_matches, not
+    # here.
+    if key.startswith("fifa"):
+        return "soccer"
     return _LEAGUE_TO_SPORT.get(key, key)
 
 
@@ -6790,14 +6838,15 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
         return False
     if promo["sport"] != "all":
         canonical = _canonical_promo_sport(edge["sport"])
-        # european_soccer narrows generic soccer edges to the Odds API
-        # sport_keys that belong to the major European leagues. Edges
-        # without sport_key (e.g. AN-fallback) are conservatively
+        # Soccer-subset promos (european_soccer, world_cup) narrow
+        # generic soccer edges to a fixed set of Odds API sport_keys.
+        # Edges without sport_key (e.g. AN-fallback) are conservatively
         # excluded — without league metadata we can't prove eligibility.
-        if promo["sport"] == "european_soccer":
+        subset_keys = _SOCCER_SUBSET_PROMOS.get(promo["sport"])
+        if subset_keys is not None:
             if canonical != "soccer":
                 return False
-            if edge.get("sport_key") not in EUROPEAN_SOCCER_SPORT_KEYS:
+            if edge.get("sport_key") not in subset_keys:
                 return False
         elif canonical != promo["sport"]:
             return False
@@ -6874,10 +6923,11 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
         if sport == "all" or market == "all":
             return None
 
-        # european_soccer collapses to the soccer fetch — the Odds API
-        # call pulls every soccer league; the per-league filter is applied
-        # later inside _promo_matches via edge["sport_key"].
-        fetch_sport = "soccer" if sport == "european_soccer" else sport
+        # Soccer-subset promos (european_soccer, world_cup) collapse to
+        # the soccer fetch — the Odds API call pulls every soccer league;
+        # the per-league filter is applied later inside _promo_matches
+        # via edge["sport_key"].
+        fetch_sport = "soccer" if sport in _SOCCER_SUBSET_PROMOS else sport
 
         if market in _GAME_LINE_MARKETS:
             sports.add(fetch_sport)
@@ -7494,36 +7544,39 @@ def _promo_no_pick_reason(promo: dict,
         return (f"All {len(matched_all)} matching candidate(s) already "
                 f"assigned to other promos.")
 
-    # european_soccer-targeted promos need a dedicated diagnostic so the
-    # user can tell "no soccer today" from "soccer exists but no European
-    # leagues on this book". Step 3 below would just say "no european_soccer"
-    # and list soccer in the available sports — confusing because the filter
-    # is at the sport_key level, not the sport level.
-    if sport == "european_soccer":
+    # Soccer-subset promos (european_soccer, world_cup) need a dedicated
+    # diagnostic so the user can tell "no soccer today" from "soccer
+    # exists but none from the eligible competitions on this book".
+    # Step 3 below would just say "no european_soccer" / "no world_cup"
+    # and list soccer in the available sports — confusing because the
+    # filter is at the sport_key level, not the sport level.
+    subset_keys = _SOCCER_SUBSET_PROMOS.get(sport)
+    if subset_keys is not None:
+        in_slate_phrase, short_label = _SOCCER_SUBSET_LABELS[sport]
         book_soccer = [e for e in combined
                        if e.get("book") == book
                        and _canonical_promo_sport(e["sport"]) == "soccer"]
         if not book_soccer:
             return (f"No {book} soccer edges loaded today — soccer fetch "
                     f"returned 0 events or pre-edge filters discarded them.")
-        european_book_soccer = [e for e in book_soccer
-                                if e.get("sport_key") in EUROPEAN_SOCCER_SPORT_KEYS]
-        if not european_book_soccer:
-            non_eur = sorted({
+        subset_book_soccer = [e for e in book_soccer
+                              if e.get("sport_key") in subset_keys]
+        if not subset_book_soccer:
+            outside = sorted({
                 (e.get("sport_key") or "unknown")
                 .replace("soccer_", "")
                 .replace("_", " ")
                 .title()
                 for e in book_soccer
             })
-            sample = ", ".join(non_eur[:5])
-            more = f" (+{len(non_eur) - 5})" if len(non_eur) > 5 else ""
+            sample = ", ".join(outside[:5])
+            more = f" (+{len(outside) - 5})" if len(outside) > 5 else ""
             return (f"{len(book_soccer)} {book} soccer edge(s) loaded but "
-                    f"none from European leagues. Today's soccer slate: "
+                    f"none from {in_slate_phrase}. Today's soccer slate: "
                     f"{sample}{more}.")
-        # European edges exist for this book — must have been claimed
-        # by an earlier (higher-boost) european_soccer promo.
-        return (f"All {len(european_book_soccer)} {book} European soccer "
+        # Eligible edges exist for this book — must have been claimed
+        # by an earlier (higher-boost) promo of the same kind.
+        return (f"All {len(subset_book_soccer)} {book} {short_label} "
                 f"candidate(s) already assigned to other promos.")
 
     # HR-targeted promos need a dedicated diagnostic. _promo_matches
