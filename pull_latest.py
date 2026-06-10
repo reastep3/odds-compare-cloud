@@ -70,7 +70,12 @@ def pull_latest(kind: str) -> None:
     sftp_get(remote, local)
     print(f"Saved: {local}")
     try:
-        os.startfile(local)
+        if sys.platform == "win32":
+            os.startfile(local)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", local], check=False)
+        else:
+            subprocess.run(["xdg-open", local], check=False)
     except OSError:
         pass
 
