@@ -23,8 +23,7 @@ Backtest Archives/
 *.xlsx
 *.zip
 
-# Claude Code harness state (worktrees etc.) — keep out of the build context
-.claude/
+# Keep out of the build context
 .github/
 
 # State (persisted in the Fly volume)
