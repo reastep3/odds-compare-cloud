@@ -206,6 +206,12 @@ ODDS_API_SPORTS: dict[str, str | list[str]] = {
         # NOT listed — they are separate competitions.
         "soccer_fifa_world_cup",
     ],
+    # World Cup prop-fetch handle. Game lines for the tournament ride
+    # the "soccer" list above; this dedicated key exists because the
+    # prop pipeline (fetch_odds_api_props) resolves one sport_key per
+    # prop sport — resolving "soccer" would pick the first list entry
+    # (MLS) and miss the tournament entirely.
+    "world_cup": "soccer_fifa_world_cup",
     # Other sports
     "afl":     "aussierules_afl",
     "boxing":  "boxing_boxing",
@@ -258,6 +264,18 @@ ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
     "nhl": [
         ("player_shots_on_goal", "sog",     "Shots on Goal"),
         ("player_points",        "nhl_pts", "Points"),
+    ],
+    # FIFA World Cup 2026. Anytime goalscorer is Yes-only on every book
+    # (verified 2026-06-10: DK 46 / FD 46 / Pinnacle 39 / BetRivers 40
+    # outcomes, all name="Yes" with the player in description) — it
+    # rides the same one-sided consensus path as anytime HR. The other
+    # WC props the API exposes are skipped on purpose: shots /
+    # shots-on-target are FanDuel+BetRivers only (fails the 2-reference
+    # floor when pricing FD), first/last goalscorer is unpickable
+    # variance, cards lack FD, and btts / draw_no_bet add little over
+    # the h2h/totals lines the soccer fetch already pulls.
+    "world_cup": [
+        ("player_goal_scorer_anytime", "goal", "Anytime Goalscorer"),
     ],
 }
 
@@ -685,6 +703,33 @@ def fetch_odds_api_props(
         print(f"  [OddsAPI Props/{sport.upper()}] Events error: {e}")
         return []
 
+    if not event_list:
+        return []
+
+    # Credit guard: cap the per-event loop to games starting within ~26h
+    # (find_edges' standard window). The /events list spans the API's
+    # full lookahead — for soccer_fifa_world_cup that's the ENTIRE
+    # tournament (72 events) — and each event here costs credits to
+    # price. Promo matching only admits games inside MAX_PROMO_DAYS
+    # (1 day) anyway. No lower bound: in-progress games keep their
+    # props for /run_live use.
+    from datetime import timedelta as _td
+    _horizon = datetime.now(timezone.utc) + _td(hours=26)
+    _kept: list[dict] = []
+    for ev_info in event_list:
+        try:
+            ct = datetime.fromisoformat(
+                str(ev_info.get("commence_time", "")).replace("Z", "+00:00"))
+            if ct > _horizon:
+                continue
+        except (ValueError, AttributeError, TypeError):
+            pass  # unparseable timestamp — keep the event
+        _kept.append(ev_info)
+    if len(_kept) < len(event_list):
+        print(f"  [OddsAPI Props/{sport.upper()}] skipped "
+              f"{len(event_list) - len(_kept)} event(s) beyond 26h "
+              f"(credit guard)")
+    event_list = _kept
     if not event_list:
         return []
 
@@ -5864,6 +5909,13 @@ def _compute_prop_fair_prob(
         return fair_prob, False
 
 
+# Binary Yes-only prop markets — books post a "Yes" price per player and
+# no "No" side (anytime HR, WC anytime goalscorer). They share shaping
+# rules in find_player_prop_edges: Yes side only, outcome is the bare
+# player name, no line displayed.
+_YES_ONLY_PROP_MARKETS = frozenset({"hr", "goal"})
+
+
 def find_player_prop_edges(
     props: list[dict],
     promo_pool: list[dict] | None = None,
@@ -5927,12 +5979,13 @@ def find_player_prop_edges(
         line = pair["line"]
 
         for side in ("over", "under"):
-            # Anytime HR is binary — a bet on "no HR" isn't a market we
-            # surface (boost terms always say "anytime home run", and the
-            # No side carries different fair-prob math). Emit the Yes side
-            # only so HR edges stay shaped like the prior AN-flavored
-            # output the HR Props tab + promo picker expect.
-            if market == "hr" and side != "over":
+            # Yes-only binaries (anytime HR / anytime goalscorer) — a bet
+            # on the "No" side isn't a market we surface (boost terms
+            # always say "anytime ...", and the No side carries different
+            # fair-prob math). Emit the Yes side only so these edges stay
+            # shaped like the prior AN-flavored output the HR Props tab +
+            # promo picker expect.
+            if market in _YES_ONLY_PROP_MARKETS and side != "over":
                 continue
             side_odds       = pair[side]
             other_side_odds = pair["under" if side == "over" else "over"]
@@ -6004,17 +6057,18 @@ def find_player_prop_edges(
                 kelly      = kelly_bet(fair_prob, dec)
                 # Binary Yes/No markets (anytime HR, double-double) come
                 # through with line=None — label them Y/N rather than O/U.
-                # HR is always binary regardless of whether the Odds API
-                # included a 0.5 line: outcome shows just the player name
-                # (Yes side only — filtered above) and point is normalized
-                # to None so the HR Props tab + telegram output read the
-                # same as the prior AN-flavored shape.
-                is_hr      = market == "hr"
-                is_binary  = is_hr or line is None
-                side_label = (("Y" if side == "over" else "N") if is_binary
-                              else ("O" if side == "over" else "U"))
-                outcome    = player if is_hr else f"{player} {side_label}"
-                edge_point = None if is_hr else line
+                # Yes-only markets (HR, goalscorer) are always binary
+                # regardless of whether the Odds API included a 0.5 line:
+                # outcome shows just the player name (Yes side only —
+                # filtered above) and point is normalized to None so the
+                # HR Props tab + telegram output read the same as the
+                # prior AN-flavored shape.
+                is_yes_only = market in _YES_ONLY_PROP_MARKETS
+                is_binary   = is_yes_only or line is None
+                side_label  = (("Y" if side == "over" else "N") if is_binary
+                               else ("O" if side == "over" else "U"))
+                outcome     = player if is_yes_only else f"{player} {side_label}"
+                edge_point  = None if is_yes_only else line
                 edge_dict = {
                     "sport":             pair["sport"],
                     "game":              game,
@@ -6049,6 +6103,10 @@ def find_player_prop_edges(
                 # concatenates the two (write_excel, eligible_games_for_promo)
                 # to filter for dedup. Pre-migration `find_hr_edges` already
                 # treated HR as its own pipeline; keep that boundary.
+                # Goalscorer ("goal") deliberately STAYS in the returned
+                # list: it has no legacy parallel tab, and inclusion gives
+                # it the Player Props sheet + CLV registration for free
+                # while _qualifies_prop keeps it out of Play These.
                 if market == "hr":
                     continue
                 if ev >= MIN_EV_PERCENT:
@@ -6377,6 +6435,8 @@ PROMO_MARKETS = {
     # NHL props
     "sog":         "NHL Shots on Goal",
     "nhl_pts":     "NHL Points",
+    # Soccer props
+    "goal":        "Anytime Goalscorer",
     # Golf props
     "golf_top5":   "Golf Top 5 Finish",
     "golf_top10":  "Golf Top 10 Finish",
@@ -6760,6 +6820,11 @@ _LEAGUE_TO_SPORT = {
     "championsleague": "soccer", "uefachampions": "soccer",
     "europaleague": "soccer", "uefaeuropa": "soccer",
     "ligamx": "soccer",
+    # WC goalscorer prop edges carry sport="WORLD_CUP" (the prop-sport
+    # slug, uppercased by _merge_raw_props) rather than the Odds API
+    # title "FIFA World Cup" the game-line edges get — canonicalise to
+    # soccer so the subset filter's sport_key check takes over.
+    "world_cup": "soccer",
     "pga": "pga",
     # New API-only sports
     "wnba": "wnba",
@@ -6836,6 +6901,15 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     # the dedicated HR Props tab via _build_hr_boost_rows.
     if edge.get("market") == "hr" and promo["market"] != "hr":
         return False
+    # Anytime-goalscorer props flow to promos that either name the market
+    # ("dk 30% goals") or are tournament-wide World Cup boosts
+    # ("dk 50% world cup", market="all"). The canonical use of a WC boost
+    # IS a goalscorer long-shot, so unlike HR the sport-pinned all-market
+    # promo admits them; generic all-sport boosts ("fd 25%") stay
+    # game-lines-only, same reasoning as the HR guard above.
+    if edge.get("market") == "goal" and promo["market"] != "goal":
+        if not (promo["sport"] == "world_cup" and promo["market"] == "all"):
+            return False
     if promo["sport"] != "all":
         canonical = _canonical_promo_sport(edge["sport"])
         # Soccer-subset promos (european_soccer, world_cup) narrow
@@ -6878,6 +6952,10 @@ _PROP_MARKETS_BY_SPORT: dict[str, frozenset[str]] = {
     # match" diagnostic to users with an HR-targeted promo.
     "mlb": frozenset({"strikeouts", "total_bases", "hits", "rbis", "hr"}),
     "nhl": frozenset({"sog", "nhl_pts"}),
+    # WC anytime goalscorer — fetched per-event from soccer_fifa_world_cup
+    # (see ODDS_API_SPORTS["world_cup"]), so a scoped "dk 30% wc goals"
+    # run costs only the handful of per-event calls inside 26h.
+    "world_cup": frozenset({"goal"}),
 }
 # Golf markets that flow from fetch_golf_props.
 _GOLF_PROMO_MARKETS = frozenset({"golf_top5", "golf_top10", "golf_top20",

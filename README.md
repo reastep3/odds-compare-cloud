@@ -10,7 +10,7 @@ Runs on [Fly.io](https://fly.io) as a single always-on machine. The Telegram bot
 
 ## What it does
 
-- **Scans 13 sports** for game lines (NBA, MLB, NHL, NFL, NCAAB, NCAAF, UFC, soccer — MLS, Liga MX, 8 European leagues + the **2026 FIFA World Cup**, WNBA, AFL, Boxing, Cricket, Tennis) and player props for NBA / MLB / NHL.
+- **Scans 13 sports** for game lines (NBA, MLB, NHL, NFL, NCAAB, NCAAF, UFC, soccer — MLS, Liga MX, 8 European leagues + the **2026 FIFA World Cup**, WNBA, AFL, Boxing, Cricket, Tennis) and player props for NBA / MLB / NHL — plus **World Cup anytime-goalscorer props** during the tournament (promo picks + CLV tracking; graded manually like anytime HR).
 - **Anchors fair probability on Pinnacle** when available (~2% vig); falls back to a consensus of ~13 books.
 - **Captures closing lines** automatically — every +EV pick is re-queried 0–15 min before commence so each bet gets a CLV (closing-line value) measurement.
 - **Outputs**:

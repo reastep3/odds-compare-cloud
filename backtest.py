@@ -2667,7 +2667,14 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
         sport   = pick["sport"]
         game_dt = pick.get("game_date")
 
-        if pick["market"] == "HR":
+        if pick["market"] in ("HR", "GOAL"):
+            # Binary anytime markets (MLB HR, WC anytime goalscorer).
+            # Auto-grading needs DNP detection — books void the bet when
+            # the player never enters the game, and ESPN scoreboard data
+            # can't distinguish "played, didn't score" from "never came
+            # on", so a naive LOSS default would poison the calibration
+            # data. Stays MANUAL; CLV capture still runs automatically
+            # via closing_lines.
             pick["result"] = "MANUAL"
             skipped += 1
             continue
@@ -3310,6 +3317,7 @@ def _add_props_tab(wb, prop_picks: list[dict]):
         "hr":          "Home Runs",
         "sog":         "Shots on Goal",
         "nhl_pts":     "NHL Points",
+        "goal":        "Goalscorer",
     }
 
     # ── Detail table ────────────────────────────────────────────────────────

@@ -1352,3 +1352,119 @@ def test_backtest_grades_world_cup_via_espn():
     assert _normalise_sport("FIFA World Cup") == "world_cup"
     assert _normalise_sport("world cup") == "world_cup"
     assert ESPN_SPORT_MAP["world_cup"] == "soccer/fifa.world"
+
+
+# ── World Cup anytime-goalscorer props ─────────────────────────────────
+# Yes-only market (books post a "Yes" price per player, never a "No"),
+# riding the same one-sided consensus path as anytime HR. Promo-only:
+# _qualifies_prop keeps it out of Play These; the broad pool + CLV
+# capture collect the calibration data.
+
+def _goal_edge(**overrides):
+    """Goalscorer prop edge as find_player_prop_edges constructs it:
+    sport is the prop-sport slug uppercased by _merge_raw_props."""
+    edge = {
+        "book":         "DraftKings",
+        "sport":        "WORLD_CUP",
+        "sport_key":    "soccer_fifa_world_cup",
+        "market":       "goal",
+        "odds_decimal": 2.5,
+        "outcome":      "Raul Jimenez",
+        "game":         "South Africa @ Mexico",
+    }
+    edge.update(overrides)
+    return edge
+
+
+def test_parse_promo_goalscorer_market_forms():
+    promo = parse_promo("dk 30% world cup goals")
+    assert promo["sport"]  == "world_cup"
+    assert promo["market"] == "goal"
+    assert parse_promo("fd 25% anytime goalscorer")["market"] == "goal"
+    p3 = parse_promo("fd 25% wc goal scorer")
+    assert p3["sport"] == "world_cup" and p3["market"] == "goal"
+    assert "Anytime Goalscorer" in promo["label"]
+
+
+def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
+    # Tournament-wide WC boost (market="all") — the user's actual promo —
+    # must be able to take a goalscorer long-shot.
+    assert _promo_matches(_wc_promo(), _goal_edge())
+    # Explicit market targeting works regardless of sport pin.
+    assert _promo_matches(_wc_promo(market="goal"), _goal_edge())
+    assert _promo_matches(_wc_promo(sport="all", market="goal"), _goal_edge())
+
+
+def test_goalscorer_blocked_from_generic_boosts():
+    # "fd 25%" (all sports) and "dk 25% soccer" must not silently grab a
+    # goalscorer prop — same reasoning as the HR guard.
+    assert not _promo_matches(_wc_promo(sport="all"), _goal_edge())
+    assert not _promo_matches(_wc_promo(sport="soccer"), _goal_edge())
+    # The HR guard itself is unchanged: a WC all-market promo still
+    # never takes an HR prop.
+    hr_edge = _goal_edge(sport="MLB", sport_key="baseball_mlb", market="hr")
+    assert not _promo_matches(_wc_promo(), hr_edge)
+
+
+def test_scope_world_cup_goals_is_prop_only_fetch():
+    scope = _derive_promo_scope([
+        {"book": "DraftKings", "sport": "world_cup", "market": "goal"},
+    ])
+    assert scope is not None
+    assert scope["sports"] == set()
+    assert scope["prop_sport_markets"] == {"world_cup": {"goal"}}
+
+
+def test_world_cup_prop_fetch_wiring():
+    from odds_compare import (ODDS_API_PROP_MARKETS, _PROP_MARKETS_BY_SPORT,
+                              _YES_ONLY_PROP_MARKETS)
+    assert ODDS_API_SPORTS["world_cup"] == "soccer_fifa_world_cup"
+    assert [(a, i) for a, i, _ in ODDS_API_PROP_MARKETS["world_cup"]] == [
+        ("player_goal_scorer_anytime", "goal")]
+    assert _PROP_MARKETS_BY_SPORT["world_cup"] == {"goal"}
+    assert "goal" in _YES_ONLY_PROP_MARKETS
+    # Closing-line capture derives its market map from the prop config —
+    # the goal entry must resolve for CLV re-queries to work.
+    from closing_lines import INTERNAL_TO_API_MARKET
+    assert INTERNAL_TO_API_MARKET["goal"] == "player_goal_scorer_anytime"
+
+
+def test_goalscorer_edge_construction_one_sided():
+    from odds_compare import find_player_prop_edges
+    merged = [{
+        "player": "Raul Jimenez", "game": "South Africa @ Mexico",
+        "commence": "2026-06-11T19:00:00Z", "sport": "WORLD_CUP",
+        "market": "goal", "market_disp": "Anytime Goalscorer",
+        "line": None, "side": "over",
+        "book_odds": {"draftkings": 150, "fanduel": 135,
+                      "pinnacle": 122, "betrivers": 140},
+        "event_id": "ev1", "sport_key": "soccer_fifa_world_cup",
+    }]
+    pool: list = []
+    edges = find_player_prop_edges(merged, promo_pool=pool)
+    dk = [e for e in pool if e["book"] == "DraftKings"]
+    assert dk, "DK goalscorer edge should be constructed"
+    e = dk[0]
+    # Binary Yes-only shape: bare player name, no line, no Pinn anchor
+    # (Pinnacle has no No side to devig against — it's a consensus ref).
+    assert e["outcome"] == "Raul Jimenez"
+    assert e["point"] is None
+    assert e["pinnacle_anchored"] is False
+    assert e["sport_key"] == "soccer_fifa_world_cup"
+    # DK at +150 vs refs (FD 135 / Pinn 122 / BR 140) is +EV → unlike HR,
+    # goal edges stay in the returned list (prop sheet + CLV); Play These
+    # exclusion happens via _qualifies_prop instead.
+    assert any(x["market"] == "goal" for x in edges)
+    assert not _qualifies_prop({"market": "goal", "ev_pct": 10.0})
+
+
+def test_backtest_promo_goalscorer_grades_manual():
+    # Binary anytime markets can't auto-grade without DNP detection —
+    # GOAL joins HR in the MANUAL bucket (CLV still captures via
+    # closing_lines).
+    from backtest import run_backtest_promo
+    pick = {"market": "GOAL", "sport": "unknown", "game_date": None,
+            "decimal": 3.0, "book": "DraftKings", "game": "x @ y",
+            "pick": "Raul Jimenez", "bet_amount": 5.0}
+    run_backtest_promo([pick])
+    assert pick["result"] == "MANUAL"

@@ -233,6 +233,13 @@ PROMO_MARKET_KEYWORDS = {
     # when the promo's sport is explicitly NHL.
     "pts": "pts", "points": "pts",
     "player_points": "pts", "player-points": "pts", "playerpoints": "pts",
+    # World Cup anytime goalscorer ("dk 30% world cup goals"). Multi-word
+    # forms ("goal scorer", "anytime goalscorer") live in
+    # PROMO_MARKET_PHRASES below.
+    "goal": "goal", "goals": "goal",
+    "goalscorer": "goal", "goalscorers": "goal",
+    "scorer": "goal", "scorers": "goal",
+    "ags": "goal",
     # First-inning total runs (MLB) — used for FanDuel "First Inning Friday"
     # and similar promos. Single-token forms; multi-token "first inning" is
     # caught by PROMO_MARKET_PHRASES below.
@@ -251,6 +258,11 @@ PROMO_MARKET_PHRASES = {
     "home run":     "hr",
     "home runs":    "hr",
     "player points": "pts",
+    "goal scorer":   "goal",
+    "goal scorers":  "goal",
+    "anytime goalscorer": "goal",
+    "anytime scorer":     "goal",
+    "to score":           "goal",
 }
 
 # Display labels for non-trivial market keys. Markets not listed here fall
@@ -259,6 +271,7 @@ PROMO_MARKET_DISPLAY = {
     "totals_1st": "1st Inning",
     "pts":        "Player Points",
     "nhl_pts":    "Player Points",
+    "goal":       "Anytime Goalscorer",
 }
 
 # Natural-language filler tokens that carry no semantic weight for the
@@ -1015,7 +1028,8 @@ async def _send_promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "<i>Sports:</i> nba/basketball · mlb/baseball · nhl/hockey · "
             "nfl/football · soccer · world cup/wc · ufc · pga/golf · "
             "ncaab · ncaaf\n"
-            "<i>Markets:</i> ml · spreads/ats · totals/ou · hr · strikeouts"
+            "<i>Markets:</i> ml · spreads/ats · totals/ou · hr · "
+            "strikeouts · goals"
         )
 
     await update.message.reply_text(
