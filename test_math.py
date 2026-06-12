@@ -1387,12 +1387,35 @@ def test_parse_promo_goalscorer_market_forms():
 
 
 def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
-    # Tournament-wide WC boost (market="all") — the user's actual promo —
-    # must be able to take a goalscorer long-shot.
-    assert _promo_matches(_wc_promo(), _goal_edge())
+    # Tournament-wide WC boost (market="all") must be able to take a
+    # goalscorer — but only inside the lineup window (hit-rate ruleset:
+    # a DNP voids the bet and burns the token, so props are gated until
+    # lineups are out). _goal_edge has no commence by default → blocked.
+    from datetime import datetime, timedelta, timezone
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    assert _promo_matches(_wc_promo(), _goal_edge(commence=soon))
     # Explicit market targeting works regardless of sport pin.
-    assert _promo_matches(_wc_promo(market="goal"), _goal_edge())
-    assert _promo_matches(_wc_promo(sport="all", market="goal"), _goal_edge())
+    assert _promo_matches(_wc_promo(market="goal"), _goal_edge(commence=soon))
+    assert _promo_matches(_wc_promo(sport="all", market="goal"),
+                          _goal_edge(commence=soon))
+
+
+def test_goalscorer_held_until_lineup_window():
+    # Regression for the 2026-06-11 incident: two WC bonus bets landed on
+    # goalscorer moonshots hours before kickoff; neither player entered,
+    # both bets voided, both tokens died. Outside PROMO_PROP_WINDOW_MIN
+    # (or with no commence at all) goal props must NOT match any promo.
+    from datetime import datetime, timedelta, timezone
+    far = (datetime.now(timezone.utc) + timedelta(hours=6)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    assert not _promo_matches(_wc_promo(), _goal_edge())
+    assert not _promo_matches(_wc_promo(), _goal_edge(commence=far))
+    assert not _promo_matches(_wc_promo(market="goal"),
+                              _goal_edge(commence=far))
+    # Diagnostics can still see the held candidates to explain the hold.
+    assert _promo_matches(_wc_promo(), _goal_edge(commence=far),
+                          ignore_prop_window=True)
 
 
 def test_goalscorer_blocked_from_generic_boosts():
@@ -1506,3 +1529,170 @@ def test_wc_window_message_silent_when_explanation_is_elsewhere():
     past = [{"commence_time": "2026-06-09T19:00:00Z",
              "away_team": "A", "home_team": "B"}]
     assert _format_wc_window_msg(past, "DraftKings", now=now) is None
+
+
+# ── Promo hit-rate ruleset ─────────────────────────────────────────────
+# Promos are use-it-or-lose-it; selection targets the cashable odds band
+# instead of EV-maxing into moonshots (the two voided WC goalscorer
+# tokens, 2026-06-11). These tests pin the band logic and the voidable-
+# prop lineup-window gate.
+
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+from odds_compare import (
+    select_promo_edge,
+    _promo_window_stage,
+    _starts_within_minutes,
+    PROMO_ODDS_WINDOWS,
+    PROMO_PROP_WINDOW_MIN,
+)
+
+
+def _iso_in(minutes: float) -> str:
+    return (_dt.now(_tz.utc) + _td(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _promo_edge(american, fair_prob, market="h2h", commence=None,
+                book="DraftKings", sport="MLB"):
+    e = {
+        "odds_decimal": american_to_decimal(american),
+        "odds_american": american,
+        "fair_prob":    fair_prob,   # percent, matching the pipeline
+        "market":       market,
+        "book":         book,
+        "sport":        sport,
+        "game":         "Away @ Home",
+        "outcome":      "Home",
+        "point":        None,
+    }
+    if commence is not None:
+        e["commence"] = commence
+    return e
+
+
+def test_bonus_bet_prefers_band_over_higher_ev_moonshot():
+    # The exact failure mode this ruleset exists for: the +2000 moonshot
+    # has higher expected profit per token dollar (0.06 × 20 = 1.20)
+    # than the +350 (0.25 × 3.5 = 0.875), but it sits outside every
+    # window — the in-band +350 must win at stage 0.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 50}
+    moonshot = _promo_edge(2000, 6.0)
+    band     = _promo_edge(350, 25.0)
+    best, stage = select_promo_edge(promo, [moonshot, band])
+    assert best is band
+    assert stage == 0
+
+
+def test_bonus_bet_relaxes_to_short_odds_when_band_empty():
+    # Only a -150 favorite available: stages (200,450) and (150,500)
+    # are empty, the last-resort (-200,500) window admits it. A cashed
+    # -150 beats an expired token.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25}
+    fav = _promo_edge(-150, 62.0)
+    best, stage = select_promo_edge(promo, [fav])
+    assert best is fav
+    assert stage == 2
+
+
+def test_promo_outside_all_windows_takes_shortest_odds():
+    # Promo terms force odds above every ceiling (e.g. a +600 min-odds
+    # term filtered the pool upstream): terminal stage == len(windows),
+    # and the SHORTEST available odds win — most cashable thing left.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25}
+    longer  = _promo_edge(1200, 6.0)
+    shorter = _promo_edge(900, 9.0)
+    best, stage = select_promo_edge(promo, [longer, shorter])
+    assert best is shorter
+    assert stage == len(PROMO_ODDS_WINDOWS["bonus_bet"])
+
+
+def test_boost_keeps_in_band_favorite_over_off_band_moonshot():
+    # Profit boosts ride cash stakes, so a -180 favorite is first-class
+    # (stage-0 floor is -200). The +1200 moonshot has far higher boosted
+    # EV but exceeds even the relaxed +700 ceiling — never auto-picked.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "straight", "boost_pct": 50}
+    fav      = _promo_edge(-180, 60.0)   # boosted EV ≈ +10%
+    moonshot = _promo_edge(1200, 8.0)    # boosted EV ≈ +52%, off-band
+    best, stage = select_promo_edge(promo, [fav, moonshot])
+    assert best is fav
+    assert stage == 0
+
+
+def test_boost_prefers_plus_ev_in_relaxed_window_over_neg_ev_in_band():
+    # Band candidate is -EV even after the boost; the relaxed window
+    # holds a clearly +EV pick — the +EV pick wins at stage 1.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "straight", "boost_pct": 20}
+    neg_in_band = _promo_edge(-150, 55.0)   # boosted EV ≈ -1%
+    pos_relaxed = _promo_edge(600, 16.0)    # boosted EV ≈ +31%
+    best, stage = select_promo_edge(promo, [neg_in_band, pos_relaxed])
+    assert best is pos_relaxed
+    assert stage == 1
+
+
+def test_boost_falls_back_to_earliest_band_when_nothing_clears_ev():
+    # Nothing +EV anywhere: return the earliest non-empty window's best
+    # (the caller marks it is_fallback) rather than leaving the band.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "straight", "boost_pct": 10}
+    only = _promo_edge(-150, 50.0)   # boosted EV ≈ -13%
+    best, stage = select_promo_edge(promo, [only])
+    assert best is only
+    assert stage == 0
+
+
+def test_select_promo_edge_empty_pool():
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25}
+    assert select_promo_edge(promo, []) == (None, None)
+
+
+def test_promo_window_stage_boundaries():
+    windows = PROMO_ODDS_WINDOWS["bonus_bet"]
+    assert _promo_window_stage(_promo_edge(200, 30.0), windows) == 0
+    assert _promo_window_stage(_promo_edge(450, 17.0), windows) == 0
+    assert _promo_window_stage(_promo_edge(175, 33.0), windows) == 1
+    assert _promo_window_stage(_promo_edge(-150, 62.0), windows) == 2
+    assert _promo_window_stage(_promo_edge(2000, 5.0), windows) is None
+
+
+def test_starts_within_minutes():
+    soon = {"commence": _iso_in(30)}
+    far  = {"commence": _iso_in(6 * 60)}
+    assert _starts_within_minutes(soon, PROMO_PROP_WINDOW_MIN) is True
+    assert _starts_within_minutes(far, PROMO_PROP_WINDOW_MIN) is False
+    # Opposite default from _starts_within_days: unknown start time must
+    # mean NOT eligible, since this helper gates voidable props.
+    assert _starts_within_minutes({}, PROMO_PROP_WINDOW_MIN) is False
+    assert _starts_within_minutes({"commence": "garbage"},
+                                  PROMO_PROP_WINDOW_MIN) is False
+
+
+def test_promo_matches_gates_props_outside_lineup_window():
+    promo = {"book": "DraftKings", "sport": "all", "market": "dd",
+             "promo_type": "straight", "boost_pct": 25,
+             "min_odds": None}
+    dd_far  = _promo_edge(300, 28.0, market="dd", sport="NBA",
+                          commence=_iso_in(6 * 60))
+    dd_soon = _promo_edge(300, 28.0, market="dd", sport="NBA",
+                          commence=_iso_in(30))
+    assert _promo_matches(promo, dd_far) is False
+    assert _promo_matches(promo, dd_soon) is True
+    # Diagnostics peek past the gate to explain "too early" properly.
+    assert _promo_matches(promo, dd_far, ignore_prop_window=True) is True
+
+
+def test_promo_matches_game_lines_unaffected_by_lineup_window():
+    # The void gate is about participation risk — game lines settle no
+    # matter what and stay eligible all day.
+    promo = {"book": "DraftKings", "sport": "all", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25,
+             "min_odds": None}
+    h2h_far = _promo_edge(300, 28.0, market="h2h",
+                          commence=_iso_in(6 * 60))
+    assert _promo_matches(promo, h2h_far) is True

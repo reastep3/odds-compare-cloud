@@ -116,9 +116,11 @@ CLV converges on whether a model has a real edge much faster than win/loss does 
 - Player props: per-market thresholds — `pts` ≥ 3.0%, `strikeouts` ≥ 4.0%, `total_bases` ≥ 1.5%. Other prop markets (rebounds, assists, hits, RBIs, etc.) excluded for negative ROI.
 - Game must commence within 1 day.
 
-**Profit boost**: `boosted_profit = profit × (1 + boost%/100)`. The promo picker ranks candidates by **boosted** EV, so long-shot bets that are -EV pre-boost but +EV post-boost can still win the pick — which a pre-boost-only search would miss.
+**Profit boost**: `boosted_profit = profit × (1 + boost%/100)`. Within an odds window the picker ranks candidates by **boosted** EV, so bets that are -EV pre-boost but +EV post-boost can still win the pick — which a pre-boost-only search would miss.
 
-**Parlay promos**: for each promo, the best parlay is found across every candidate game (for SGP) and every leg count (`N`, `N+1`, ..., `N+3`); only the single best by boosted EV is emitted.
+**Promo hit-rate ruleset**: promos are use-it-or-lose-it, so the picker optimizes *cashing* them, not raw EV (bonus-bet conversion is concave in odds — +200 ≈ 67% of face value at fair prices, +450 ≈ 82%, +1000 ≈ 91% — so past ~+450 you gain almost no conversion while the hit rate collapses and the favorite-longshot bias eats the rest). Straight picks come from staged odds windows in `PROMO_ODDS_WINDOWS`: bonus bets target **+200..+450** (relaxing to +150..+500, then -200..+500), profit boosts **-200..+450** (relaxing to -300..+700). The first window holding a candidate wins, EV ranks within the window, and off-band picks are flagged in the bot message and the Excel Promo column. Voidable player props (goalscorer, HR, double-double, …) are only promo-eligible within **75 minutes of start** (`PROMO_PROP_WINDOW_MIN`) — by then lineups/injury reports are public and books have repriced; a DNP voids the bet and a voided bonus bet is a dead token. Run `/run_promos` in the pre-kickoff window for prop promos, and still eyeball the confirmed lineup before placing.
+
+**Parlay promos**: for each promo, the best parlay is found across every candidate game (for SGP) and every leg count (`N`, `N+1`, ..., `N+3`); only the single best by boosted EV is emitted. The hit-rate ruleset caps legs at **+150 each** and **+700 combined** (`PROMO_PARLAY_LEG_MAX_ODDS` / `PROMO_PARLAY_TOTAL_MAX_ODDS`, with headroom above any promo min-odds term), and parlay legs obey the same prop lineup-window gate as straight picks.
 
 ## Project layout
 

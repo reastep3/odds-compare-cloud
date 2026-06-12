@@ -2256,6 +2256,47 @@ def _confidence(e):
 MAX_PLAY_DAYS = 1      # Play These: ignore games > 1 day out
 MAX_PROMO_DAYS = 1     # Promos (singles + parlays): within 1 day
 
+# ── Promo hit-rate ruleset ────────────────────────────────────────────
+# Promos are use-it-or-lose-it and the goal is to CASH them, not to
+# maximize theoretical EV (2026-06-11: two World Cup bonus bets went on
+# goalscorer moonshots whose players never entered — bets voided, tokens
+# dead). Pure EV-ranking monotonically rewards longshots, but bonus-bet
+# conversion is concave in odds (+200 ≈ 67% of face value at fair
+# prices, +450 ≈ 82%, +1000 ≈ 91%), so past ~+450 the marginal
+# conversion is tiny while hit rate collapses — and the favorite-
+# longshot bias (vig is worst on the tail) eats most of what's left.
+#
+# Each promo type gets a list of (floor, ceiling) American-odds windows,
+# tried in order; the pick comes from the FIRST window holding a
+# candidate, so the target band wins whenever it's populated. Off-band
+# picks carry a band_stage tag so the bot / Excel can flag them.
+# Bonus bets keep a high floor — the stake never returns, so a -200
+# bonus bet cashes only a third of face value — but the last-resort
+# window still allows short odds: a cashed -150 beats an expired token.
+# Profit boosts ride cash stakes (favorites hit often and the boost
+# does the lifting), so short odds are first-class there.
+PROMO_ODDS_WINDOWS: dict[str, list[tuple[int, int]]] = {
+    "bonus_bet": [(200, 450), (150, 500), (-200, 500)],
+    "boost":     [(-200, 450), (-300, 700)],
+}
+
+# Voidable player props (goalscorer, HR, double-double, ...) are only
+# promo-eligible this close to commence. A DNP voids the bet and kills
+# the token, and quoted prop odds are priced for cash bettors (void =
+# refund), i.e. conditional on appearance — a use-it-or-lose-it token
+# collects at unconditional odds. Inside this window lineups / injury
+# reports are public and books have repriced, which is the best
+# "will actually play" proxy available from odds data alone. Still
+# eyeball the confirmed lineup before placing.
+PROMO_PROP_WINDOW_MIN = 75
+
+# Parlay promos: cap each leg and the combined price so the parlay
+# stays cashable. Legs at or under +150 keep every leg ≥ ~40% fair;
+# +700 combined ≈ 12% to cash at fair prices — long enough to satisfy
+# any normal min-odds term, short enough to actually hit sometimes.
+PROMO_PARLAY_LEG_MAX_ODDS   = 150   # American, per leg
+PROMO_PARLAY_TOTAL_MAX_ODDS = 700   # American, combined
+
 
 def _starts_within_days(e, max_days: int) -> bool:
     """Return True if the edge's game starts within max_days from now."""
@@ -2267,6 +2308,23 @@ def _starts_within_days(e, max_days: int) -> bool:
         return ct < datetime.now(ct.tzinfo) + timedelta(days=max_days)
     except Exception:
         return True
+
+
+def _starts_within_minutes(e, max_minutes: int) -> bool:
+    """Return True if the edge's game starts within max_minutes from now.
+
+    Deliberately the OPPOSITE missing-timestamp default from
+    _starts_within_days: this helper gates voidable props into promo
+    picks, so "can't tell when it starts" must mean "not eligible",
+    not "assume it's fine"."""
+    commence = e.get("commence")
+    if not commence:
+        return False
+    try:
+        ct = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+        return ct < datetime.now(ct.tzinfo) + timedelta(minutes=max_minutes)
+    except Exception:
+        return False
 
 
 # Soccer leagues with consistently negative ROI across backtests.
@@ -2892,9 +2950,12 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                                       value="PROMO PICKS — Best Unique Play Per Promo")
             title_cell.font = Font(bold=True, size=13, color="7B2D8E")
             ws_play.cell(row=promo_section_start + 1, column=1,
-                         value=("Promos ranked by boost % / bonus value. "
-                                "Each edge assigned to at most one promo. "
-                                "Bonus Bet: you keep profit only (stake is free).")).font = Font(
+                         value=("Hit-rate ruleset: bonus bets target +200..+450, "
+                                "boosts -200..+450 — first populated band wins, EV "
+                                "ranks within it. Player props only within 75 min "
+                                "of start (post-lineup). Each edge assigned to at "
+                                "most one promo. Bonus Bet: you keep profit only "
+                                "(stake is free).")).font = Font(
                                     size=9, italic=True, color="666666")
 
             # Sub-header
@@ -2926,15 +2987,10 @@ def write_excel(edges: list[dict], dk_bankroll: float,
             for promo in sorted_promos:
                 is_bonus_bet = promo.get("promo_type") == "bonus_bet"
 
-                # For bonus bets, pick the edge that maximises expected profit
-                # (fair_prob × profit_if_win), not just highest EV%.
-                def _bonus_sort_key(e):
-                    fp   = e["fair_prob"] / 100
-                    dec  = e["odds_decimal"]
-                    amt  = promo.get("bet_amount", 0)
-                    return fp * amt * (dec - 1)
-
-                best_edge = None
+                # Selection runs through select_promo_edge — the hit-rate
+                # ruleset: staged odds windows (target band first), EV-
+                # ranked within a window; voidable props lineup-window-
+                # gated in _promo_matches.
                 # Use the broader promo_pool (all DK/FD outcomes) so boosts
                 # can turn mildly -EV edges into +EV picks. HR edges are
                 # included; _promo_matches gates them to HR-targeted promos only.
@@ -2957,34 +3013,10 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                                            or player_prop_edges or [])
                                     + list(golf_promo_pool
                                            or golf_edges or []))
-                if is_bonus_bet:
-                    _play_promo_pool = sorted(_play_promo_pool,
-                                              key=_bonus_sort_key, reverse=True)
-                elif promo.get("boost_pct"):
-                    # Rank by BOOSTED EV so long-shots that only clear the
-                    # bar thanks to the boost can still win the pick.
-                    _bp = promo["boost_pct"]
-
-                    def _boosted_ev_sort(e, _bp=_bp):
-                        bd = apply_profit_boost(e["odds_decimal"], _bp)
-                        return calc_ev(e["fair_prob"] / 100, bd)
-
-                    _play_promo_pool = sorted(_play_promo_pool,
-                                              key=_boosted_ev_sort,
-                                              reverse=True)
-                for edge in _play_promo_pool:
-                    if id(edge) in used_edge_ids:
-                        continue
-                    if not _promo_matches(promo, edge):
-                        continue
-                    # Skip edges that still don't clear the bar after boost
-                    if not is_bonus_bet and promo.get("boost_pct"):
-                        bd = apply_profit_boost(edge["odds_decimal"],
-                                                promo["boost_pct"])
-                        if calc_ev(edge["fair_prob"] / 100, bd) < 0.5:
-                            continue
-                    best_edge = edge
-                    break
+                candidates = [e for e in _play_promo_pool
+                              if id(e) not in used_edge_ids
+                              and _promo_matches(promo, e)]
+                best_edge, band_stage = select_promo_edge(promo, candidates)
 
                 if best_edge is None:
                     # No match — show a placeholder row
@@ -2999,6 +3031,18 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                     continue
 
                 used_edge_ids.add(id(best_edge))
+
+                # Flag off-band picks in the Promo column so a glance at
+                # the sheet shows whether the target band was honored.
+                n_windows = len(PROMO_ODDS_WINDOWS[
+                    "bonus_bet" if is_bonus_bet else "boost"])
+                if band_stage and band_stage >= n_windows:
+                    band_note = " [outside odds bands]"
+                elif band_stage:
+                    band_note = " [relaxed band]"
+                else:
+                    band_note = ""
+                promo_label_disp = promo["label"] + band_note
 
                 orig_dec    = best_edge["odds_decimal"]
                 fair_prob_v = best_edge["fair_prob"] / 100
@@ -3017,7 +3061,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                     boosted_ev = (exp_profit / bet_v) * 100      # as % of bet
                     ev_gain    = round(boosted_ev - best_edge["ev_pct"], 2)
                     values = [
-                        promo["label"],
+                        promo_label_disp,
                         best_edge["game"],
                         best_edge["book"],
                         best_edge["market"].upper(),
@@ -3044,7 +3088,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                         bet_v = promo["max_bet"]
                     profit_v    = bet_v * (boost_dec_v - 1)
                     values = [
-                        promo["label"],
+                        promo_label_disp,
                         best_edge["game"],
                         best_edge["book"],
                         best_edge["market"].upper(),
@@ -6189,6 +6233,19 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                 continue
             if edge.get("market") == "hr":
                 continue  # HR props handled separately
+            # Hit-rate ruleset: voidable props only inside the lineup
+            # window (same gate as straight promos) — one DNP leg voids
+            # or regrades the whole parlay.
+            if (edge.get("market") in _VOIDABLE_PROP_MARKETS
+                    and not _starts_within_minutes(edge,
+                                                   PROMO_PROP_WINDOW_MIN)):
+                continue
+            # Per-leg odds cap: every leg ≥ ~40% fair keeps the parlay
+            # cashable; a longshot leg re-creates the moonshot problem
+            # one leg at a time.
+            if edge["odds_decimal"] > american_to_decimal(
+                    PROMO_PARLAY_LEG_MAX_ODDS):
+                continue
             # Game-specific parlay: restrict all legs to the user-picked game
             if game_filter and edge.get("game") != game_filter:
                 continue
@@ -6225,6 +6282,12 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         # Pre-compute the parlay-level min-odds decimal once (None = no floor)
         parlay_min_dec = (american_to_decimal(promo["min_odds"])
                           if promo.get("min_odds") is not None else None)
+        # Combined-odds ceiling (hit-rate ruleset), with 1.5× headroom
+        # above the promo's own min-odds term so a "+700 min odds"
+        # promo stays satisfiable instead of producing zero parlays.
+        total_cap_dec = max(
+            american_to_decimal(PROMO_PARLAY_TOTAL_MAX_ODDS),
+            (parlay_min_dec or 1.0) * 1.5)
         bankroll = (dk_bankroll if promo["book"] == "DraftKings"
                     else fd_bankroll)
 
@@ -6287,6 +6350,8 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                             if (parlay_min_dec is not None
                                     and parlay_dec < parlay_min_dec):
                                 continue
+                            if parlay_dec > total_cap_dec:
+                                continue
                             boost_dec = apply_profit_boost(
                                 parlay_dec, promo["boost_pct"])
                             ev = calc_ev(parlay_fair, boost_dec)
@@ -6301,8 +6366,9 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                         for leg in greedy:
                             parlay_dec  *= leg["odds_decimal"]
                             parlay_fair *= leg["fair_prob"] / 100
-                        if (parlay_min_dec is None
-                                or parlay_dec >= parlay_min_dec):
+                        if ((parlay_min_dec is None
+                                or parlay_dec >= parlay_min_dec)
+                                and parlay_dec <= total_cap_dec):
                             boost_dec = apply_profit_boost(
                                 parlay_dec, promo["boost_pct"])
                             combo_ev = calc_ev(parlay_fair, boost_dec)
@@ -6945,11 +7011,16 @@ def _meets_min_odds(promo: dict, edge: dict) -> bool:
     return edge["odds_decimal"] >= min_dec
 
 
-def _promo_matches(promo: dict, edge: dict) -> bool:
+def _promo_matches(promo: dict, edge: dict,
+                   ignore_prop_window: bool = False) -> bool:
     """Check if an edge qualifies for a straight promo.
 
     Parlay promos are handled by the dedicated Parlay Promos tab.
     HR props are handled by the dedicated HR Props tab.
+
+    ignore_prop_window=True skips the voidable-prop lineup-window gate —
+    used by _promo_no_pick_reason to tell "no candidates exist" apart
+    from "candidates exist but it's too early to trust they'll play".
     """
     if promo["book"] != edge["book"]:
         return False
@@ -6978,6 +7049,13 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     if edge.get("market") == "goal" and promo["market"] != "goal":
         if not (promo["sport"] == "world_cup" and promo["market"] == "all"):
             return False
+    # Hit-rate ruleset: voidable props only inside the lineup window.
+    # Outside it the pick is a coin-flip on participation that a
+    # use-it-or-lose-it token can't afford (see PROMO_PROP_WINDOW_MIN).
+    if not ignore_prop_window:
+        if (edge.get("market") in _VOIDABLE_PROP_MARKETS
+                and not _starts_within_minutes(edge, PROMO_PROP_WINDOW_MIN)):
+            return False
     if promo["sport"] != "all":
         canonical = _canonical_promo_sport(edge["sport"])
         # Soccer-subset promos (european_soccer, world_cup) narrow
@@ -6998,6 +7076,83 @@ def _promo_matches(promo: dict, edge: dict) -> bool:
     if not _meets_min_odds(promo, edge):
         return False
     return True
+
+
+def _promo_window_stage(edge: dict,
+                        windows: list[tuple[int, int]]) -> int | None:
+    """Index of the first (tightest) odds window containing the edge.
+
+    Windows are nested loosest-last, so the first hit is the stage the
+    pick gets tagged with: 0 = target band, higher = relaxed."""
+    dec = edge["odds_decimal"]
+    for i, (lo, hi) in enumerate(windows):
+        if american_to_decimal(lo) <= dec <= american_to_decimal(hi):
+            return i
+    return None
+
+
+def select_promo_edge(promo: dict,
+                      pool: list[dict]) -> tuple[dict | None, int | None]:
+    """Pick the edge for a straight promo under the hit-rate ruleset.
+
+    pool must already be filtered by _promo_matches (and deduped by the
+    caller). Returns (edge, band_stage):
+
+      0                  — target band (PROMO_ODDS_WINDOWS[...][0])
+      1..len(windows)-1  — relaxed window; the target band was empty
+      len(windows)       — outside every window (e.g. a promo whose
+                           min-odds term sits above all ceilings);
+                           takes the SHORTEST qualifying odds — the
+                           most cashable thing available
+      (None, None)       — empty pool
+
+    Ranking inside a window keeps the +EV ethos: bonus bets by expected
+    profit, boosts by boosted EV. The window caps variance; EV picks
+    within it. For boosts a window only wins outright when its best
+    pick clears MIN_EV_PERCENT post-boost — otherwise later windows get
+    a shot, and if nothing clears anywhere the earliest non-empty
+    window's best is returned (an in-band slightly-negative pick beats
+    an off-band moonshot for cashing; the caller flags it is_fallback)."""
+    if not pool:
+        return None, None
+    is_bonus = promo.get("promo_type") == "bonus_bet"
+    windows = PROMO_ODDS_WINDOWS["bonus_bet" if is_bonus else "boost"]
+
+    if is_bonus:
+        amt = promo.get("bet_amount", 0) or 0
+
+        def rank(e):
+            # Expected $ profit of the free bet (stake never returns).
+            return (e["fair_prob"] / 100) * amt * (e["odds_decimal"] - 1)
+    else:
+        bp = promo.get("boost_pct", 0) or 0
+
+        def rank(e):
+            # Post-boost EV% — comparable to MIN_EV_PERCENT directly.
+            return calc_ev(e["fair_prob"] / 100,
+                           apply_profit_boost(e["odds_decimal"], bp))
+
+    staged: dict[int, list[dict]] = {}
+    for e in pool:
+        s = _promo_window_stage(e, windows)
+        if s is not None:
+            staged.setdefault(s, []).append(e)
+
+    first_nonempty: tuple[dict, int] | None = None
+    for stage in range(len(windows)):
+        cands = staged.get(stage)
+        if not cands:
+            continue
+        best = max(cands, key=rank)
+        if first_nonempty is None:
+            first_nonempty = (best, stage)
+        if is_bonus or rank(best) >= MIN_EV_PERCENT:
+            return best, stage
+    if first_nonempty is not None:
+        return first_nonempty
+    # Nothing inside any window — the promo's own terms force odds the
+    # windows can't honor. Shortest odds = highest hit rate available.
+    return min(pool, key=lambda e: e["odds_decimal"]), len(windows)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -7029,6 +7184,15 @@ _PROP_MARKETS_BY_SPORT: dict[str, frozenset[str]] = {
 _GOLF_PROMO_MARKETS = frozenset({"golf_top5", "golf_top10", "golf_top20",
                                   "golf_win"})
 
+# Markets where the player not participating voids the bet — and a
+# use-it-or-lose-it promo token dies with the void. Union of every prop
+# pipeline's internal market keys (goal, hr, dd, sog, ...), plus the
+# legacy AN pattern set in case it ever diverges. Golf top-N/win stays
+# out: tournament-scale events with their own withdrawal rules, and the
+# lineup-window concept doesn't map to a four-day event.
+_VOIDABLE_PROP_MARKETS: frozenset[str] = frozenset().union(
+    *_PROP_MARKETS_BY_SPORT.values()) | _PLAYER_PROP_MARKETS
+
 
 def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
     """Translate a list of promos into a fetch-scope hint.
@@ -7037,7 +7201,7 @@ def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
       * No promos given
       * Any promo with sport="all" or market="all"
       * Any bonus_bet or parlay promo (these need broad pools to
-        pick the longest-odds line / build leg combos)
+        find candidates inside the target odds band / build leg combos)
       * Any market we don't recognise (be safe — fall back)
 
     Otherwise returns a dict:
@@ -7603,10 +7767,12 @@ def compute_promo_picks(all_edges: list[dict],
     deduped so two promos don't pick the same edge.
 
     Pool is the broader promo_pool (all DK/FD outcomes, not just pre-boost
-    +EV ones), combined with player_prop_edges. For profit boosts, rank by
-    BOOSTED EV so a long-shot that's mildly -EV pre-boost but clearly +EV
-    post-boost beats a modestly +EV pre-boost favorite. For bonus bets,
-    rank by expected profit (fair_prob × profit_if_win)."""
+    +EV ones), combined with player_prop_edges. Selection runs through
+    select_promo_edge — the hit-rate ruleset: staged odds windows
+    (PROMO_ODDS_WINDOWS) with EV ranking inside a window, voidable props
+    gated to the lineup window upstream in _promo_matches. Each pick
+    carries band_stage (0 = target band) so formatters can flag off-band
+    picks."""
     picks: list[dict] = []
     if not promos:
         return picks
@@ -7627,37 +7793,23 @@ def compute_promo_picks(all_edges: list[dict],
         for copy_idx in range(count):
             pool = [e for e in matched_all
                     if _make_pick_key(e) not in used_keys]
-            best = None
             reason: str | None = None
             is_fallback = False
-            if pool:
-                if promo.get("promo_type") == "bonus_bet":
-                    amt = promo.get("bet_amount", 0)
-                    best = max(pool,
-                               key=lambda e: (e["fair_prob"] / 100)
-                                             * amt * (e["odds_decimal"] - 1))
-                else:
-                    boost_pct = promo.get("boost_pct", 0) or 0
-
-                    def _boosted_ev(e, _bp=boost_pct):
-                        boost_dec = apply_profit_boost(
-                            e["odds_decimal"], _bp)
-                        return calc_ev(e["fair_prob"] / 100, boost_dec)
-
-                    ranked = sorted(pool, key=_boosted_ev, reverse=True)
-                    top_candidate = ranked[0]
-                    top_ev = _boosted_ev(top_candidate)
-                    # Preferred: post-boost EV clears MIN_EV_PERCENT.
-                    # Fallback: no +EV option, so take least-bad — burning
-                    # a promo on a marginal line beats letting it expire.
-                    # Marked is_fallback so display can flag it clearly.
-                    best = top_candidate
-                    is_fallback = top_ev < MIN_EV_PERCENT
-                if best is not None:
-                    used_keys.add(_make_pick_key(best))
-
-            # Diagnostic message when nothing was selected (empty pool).
-            if best is None:
+            best, band_stage = select_promo_edge(promo, pool)
+            if best is not None:
+                if promo.get("promo_type") != "bonus_bet":
+                    # is_fallback keeps its historical meaning: the pick
+                    # doesn't clear MIN_EV_PERCENT post-boost (burning a
+                    # promo on a marginal line beats letting it expire).
+                    # Off-band-ness is reported separately via band_stage.
+                    boost_dec = apply_profit_boost(
+                        best["odds_decimal"],
+                        promo.get("boost_pct", 0) or 0)
+                    is_fallback = (calc_ev(best["fair_prob"] / 100,
+                                           boost_dec) < MIN_EV_PERCENT)
+                used_keys.add(_make_pick_key(best))
+            else:
+                # Diagnostic message when nothing was selected (empty pool).
                 reason = _promo_no_pick_reason(
                     promo, combined, matched_all, pool)
 
@@ -7668,6 +7820,7 @@ def compute_promo_picks(all_edges: list[dict],
                 "copy_of":     count,
                 "reason":      reason,
                 "is_fallback": is_fallback,
+                "band_stage":  band_stage,
             })
     return picks
 
@@ -7689,6 +7842,30 @@ def _promo_no_pick_reason(promo: dict,
     if matched_all and not pool:
         return (f"All {len(matched_all)} matching candidate(s) already "
                 f"assigned to other promos.")
+
+    # Voidable props held back by the lineup window get their own
+    # message — the generic chain below would report "no candidates"
+    # when the real story is "too early; re-run closer to start".
+    window_held = [e for e in combined
+                   if _promo_matches(promo, e, ignore_prop_window=True)
+                   and not _promo_matches(promo, e)]
+    if window_held:
+        hours_out = []
+        for e in window_held:
+            try:
+                ct = datetime.fromisoformat(
+                    e["commence"].replace("Z", "+00:00"))
+                hours_out.append(
+                    (ct - datetime.now(ct.tzinfo)).total_seconds() / 3600)
+            except Exception:
+                continue
+        timing = (f" Next eligible game starts in ~{min(hours_out):.1f}h —"
+                  if hours_out else "")
+        return (f"{len(window_held)} player-prop candidate(s) on hold: "
+                f"props are only auto-picked within "
+                f"{PROMO_PROP_WINDOW_MIN} min of start, once lineups / "
+                f"injury reports are out (a DNP voids the bet and burns "
+                f"the promo).{timing} re-run closer to kickoff.")
 
     # Soccer-subset promos (european_soccer, world_cup) need a dedicated
     # diagnostic so the user can tell "no soccer today" from "soccer

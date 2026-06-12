@@ -767,6 +767,12 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
         if is_fallback:
             lines.append(
                 "  <i>No +EV pick — fallback to least-bad option:</i>")
+        # band_stage 0/None = inside the target odds band; anything
+        # higher means the band was empty and a relaxed window (or, at
+        # the extreme, the promo's own min-odds term) forced the pick.
+        if pp.get("band_stage"):
+            lines.append(
+                "  <i>⚠ Off-band pick — target odds band was empty.</i>")
 
         pick_str = _esc(edge["outcome"])
         pt = _format_point(edge.get("point"), edge.get("market", ""))
