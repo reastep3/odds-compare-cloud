@@ -1388,9 +1388,8 @@ def test_parse_promo_goalscorer_market_forms():
 
 def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
     # Tournament-wide WC boost (market="all") must be able to take a
-    # goalscorer — but only inside the lineup window (hit-rate ruleset:
-    # a DNP voids the bet and burns the token, so props are gated until
-    # lineups are out). _goal_edge has no commence by default → blocked.
+    # goalscorer once inside the lineup window. _goal_edge has no commence
+    # by default → deferred (no game time to trust participation).
     from datetime import datetime, timedelta, timezone
     soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
@@ -1401,19 +1400,27 @@ def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
                           _goal_edge(commence=soon))
 
 
-def test_goalscorer_held_until_lineup_window():
-    # Regression for the 2026-06-11 incident: two WC bonus bets landed on
-    # goalscorer moonshots hours before kickoff; neither player entered,
-    # both bets voided, both tokens died. Outside PROMO_PROP_WINDOW_MIN
-    # (or with no commence at all) goal props must NOT match any promo.
+def test_goalscorer_deferred_for_all_market_but_targetable_early():
+    # 2026-06-11 incident, post-redesign. Moonshot protection is now the
+    # odds bands; the lineup window only DEFERS voidable props for promos
+    # that have a game-line fallback. A tournament-wide WC boost
+    # (market="all") still defers a goalscorer far from kickoff, so it
+    # picks a settle-always line instead. But a goal-TARGETED promo
+    # ("dk 30% wc goals") has NO fallback — holding it just wastes the
+    # token — so it admits the prop early, flagged for participation.
     from datetime import datetime, timedelta, timezone
+    from odds_compare import _pick_needs_participation_warn
     far = (datetime.now(timezone.utc) + timedelta(hours=6)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
+    # All-market WC boost: goal prop deferred (no commence, and far out).
     assert not _promo_matches(_wc_promo(), _goal_edge())
     assert not _promo_matches(_wc_promo(), _goal_edge(commence=far))
-    assert not _promo_matches(_wc_promo(market="goal"),
-                              _goal_edge(commence=far))
-    # Diagnostics can still see the held candidates to explain the hold.
+    # Goal-targeted promo: admitted early, and flagged to confirm the XI.
+    e_far = _goal_edge(commence=far)
+    assert _promo_matches(_wc_promo(market="goal"), e_far)
+    assert _pick_needs_participation_warn(e_far) is True
+    # Diagnostics can still see the deferred candidate for the all-market
+    # case to explain the hold.
     assert _promo_matches(_wc_promo(), _goal_edge(commence=far),
                           ignore_prop_window=True)
 
@@ -1673,18 +1680,29 @@ def test_starts_within_minutes():
                                   PROMO_PROP_WINDOW_MIN) is False
 
 
-def test_promo_matches_gates_props_outside_lineup_window():
-    promo = {"book": "DraftKings", "sport": "all", "market": "dd",
-             "promo_type": "straight", "boost_pct": 25,
-             "min_odds": None}
+def test_prop_window_gates_all_market_promo_not_prop_targeted():
+    # The lineup window defers voidable props ONLY for promos with a
+    # game-line fallback. An all-market promo defers a double-double prop
+    # until lineups are out (prefers a settle-always line early)...
+    from odds_compare import _pick_needs_participation_warn
+    allm = {"book": "DraftKings", "sport": "all", "market": "all",
+            "promo_type": "bonus_bet", "bet_amount": 25, "min_odds": None}
     dd_far  = _promo_edge(300, 28.0, market="dd", sport="NBA",
                           commence=_iso_in(6 * 60))
     dd_soon = _promo_edge(300, 28.0, market="dd", sport="NBA",
                           commence=_iso_in(30))
-    assert _promo_matches(promo, dd_far) is False
-    assert _promo_matches(promo, dd_soon) is True
-    # Diagnostics peek past the gate to explain "too early" properly.
-    assert _promo_matches(promo, dd_far, ignore_prop_window=True) is True
+    assert _promo_matches(allm, dd_far) is False
+    assert _promo_matches(allm, dd_soon) is True
+    # Diagnostics peek past the gate to explain "too early" for all-market.
+    assert _promo_matches(allm, dd_far, ignore_prop_window=True) is True
+    # ...but a dd-TARGETED promo has no fallback, so it admits the prop
+    # early and the picker flags participation instead of holding.
+    dd_promo = {"book": "DraftKings", "sport": "all", "market": "dd",
+                "promo_type": "straight", "boost_pct": 25, "min_odds": None}
+    assert _promo_matches(dd_promo, dd_far) is True
+    assert _promo_matches(dd_promo, dd_soon) is True
+    assert _pick_needs_participation_warn(dd_far) is True
+    assert _pick_needs_participation_warn(dd_soon) is False
 
 
 def test_promo_matches_game_lines_unaffected_by_lineup_window():
@@ -1761,3 +1779,85 @@ def test_scope_ufc_h2h_routes_to_ufc_fetch():
     assert scope is not None
     assert scope["sports"] == {"ufc"}
     assert scope["prop_sport_markets"] == {}
+
+
+# ── Combat-sport promo horizon ─────────────────────────────────────────
+# 2026-06-13: a FanDuel UFC promo ~40h before the Sunday White House card
+# returned nothing — find_edges/_promo_matches capped the promo reach at
+# 1 day, so the weekly card (lines posted days ahead) never entered the
+# pool. Combat sports now reach 4 days; daily sports stay at 1.
+
+def test_promo_horizon_days_per_sport():
+    from odds_compare import _promo_horizon_days, MAX_PROMO_DAYS
+    # Combat sports — both Odds API title and internal code resolve.
+    assert _promo_horizon_days("MMA") == 4.0
+    assert _promo_horizon_days("ufc") == 4.0
+    assert _promo_horizon_days("Boxing") == 4.0
+    # Daily sports keep the 1-day default.
+    assert _promo_horizon_days("MLB") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("NBA") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("") == MAX_PROMO_DAYS
+
+
+def test_ufc_promo_surfaces_card_beyond_one_day():
+    # The White House-card miss: a UFC bout ~40h out must now match a UFC
+    # promo, while a daily-sport edge the same distance out still does not.
+    ufc_promo = {"book": "FanDuel", "sport": "ufc", "market": "all",
+                 "promo_type": "straight", "boost_pct": 50, "min_odds": -200}
+    ufc_far = _promo_edge(-150, 62.0, market="h2h", sport="MMA",
+                          book="FanDuel", commence=_iso_in(40 * 60))
+    assert _promo_matches(ufc_promo, ufc_far) is True
+    mlb_promo = {"book": "FanDuel", "sport": "mlb", "market": "all",
+                 "promo_type": "straight", "boost_pct": 50, "min_odds": -200}
+    mlb_far = _promo_edge(-150, 62.0, market="h2h", sport="MLB",
+                          book="FanDuel", commence=_iso_in(40 * 60))
+    assert _promo_matches(mlb_promo, mlb_far) is False
+
+
+def test_starts_within_promo_horizon_uses_sport():
+    from odds_compare import _starts_within_promo_horizon
+    # 40h out: inside the UFC reach, outside MLB's.
+    assert _starts_within_promo_horizon(
+        {"sport": "MMA", "commence": _iso_in(40 * 60)}) is True
+    assert _starts_within_promo_horizon(
+        {"sport": "MLB", "commence": _iso_in(40 * 60)}) is False
+    # 5 days out: beyond even the combat reach.
+    assert _starts_within_promo_horizon(
+        {"sport": "MMA", "commence": _iso_in(5 * 24 * 60)}) is False
+
+
+# ── HR-targeted promo no longer held (end to end) ──────────────────────
+
+from odds_compare import compute_promo_picks
+
+
+def test_hr_targeted_promo_picks_early_with_participation_warn():
+    # The 2026-06-13 complaint: a FanDuel "30% MLB HR" boost was HELD 12h
+    # before first pitch and produced no pick — wasting a token that can
+    # ONLY be spent on an HR prop. It must now produce a pick, flagged to
+    # confirm the batter is in the lineup.
+    hr_promo = {"book": "FanDuel", "sport": "mlb", "market": "hr",
+                "promo_type": "straight", "boost_pct": 30,
+                "min_odds": None, "label": "FD 30% MLB HR"}
+    hr_edge = _promo_edge(350, 26.0, market="hr", sport="MLB",
+                          book="FanDuel", commence=_iso_in(12 * 60))
+    picks = compute_promo_picks([hr_edge], [hr_promo])
+    assert len(picks) == 1
+    p = picks[0]
+    assert p["edge"] is hr_edge            # picked, not held
+    assert p["reason"] is None
+    assert p["participation_warn"] is True
+
+
+def test_hr_targeted_promo_no_warn_inside_window():
+    # Same promo, but first pitch is 30 min out (lineups posted) — pick
+    # stands with no participation warning.
+    hr_promo = {"book": "FanDuel", "sport": "mlb", "market": "hr",
+                "promo_type": "straight", "boost_pct": 30,
+                "min_odds": None, "label": "FD 30% MLB HR"}
+    hr_edge = _promo_edge(350, 26.0, market="hr", sport="MLB",
+                          book="FanDuel", commence=_iso_in(30))
+    picks = compute_promo_picks([hr_edge], [hr_promo])
+    assert len(picks) == 1
+    assert picks[0]["edge"] is hr_edge
+    assert picks[0]["participation_warn"] is False

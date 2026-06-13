@@ -1896,16 +1896,26 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
 
     for event in events:
         commence = event.get("commence_time", "")
+        sport      = event.get("sport_title", "")
+        # Per-sport upper bound: weekly combat cards (UFC/boxing) get a
+        # multi-day reach so a planned promo surfaces ahead of the card;
+        # daily sports stay at the standard ~26h window. max() never
+        # shrinks the default, and live mode keeps its [past 6h, now]
+        # window untouched.
+        event_latest = latest
+        if not live_only:
+            _hd = _promo_horizon_days(sport)
+            if _hd > MAX_PROMO_DAYS:
+                event_latest = max(latest, now + timedelta(days=_hd))
         try:
             commence_dt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
-            if not (earliest <= commence_dt <= latest):
+            if not (earliest <= commence_dt <= event_latest):
                 continue
         except (ValueError, AttributeError):
             continue
 
         home       = event["home_team"]
         away       = event["away_team"]
-        sport      = event.get("sport_title", "")
         bookmakers = event.get("bookmakers", [])
         if not bookmakers:
             continue
@@ -2254,7 +2264,23 @@ def _confidence(e):
 
 
 MAX_PLAY_DAYS = 1      # Play These: ignore games > 1 day out
-MAX_PROMO_DAYS = 1     # Promos (singles + parlays): within 1 day
+MAX_PROMO_DAYS = 1     # Promos (singles + parlays): default within 1 day
+
+# Per-sport promo horizon override (days). Most sports run daily and the
+# user bets same-day, so a 1-day reach is right. Combat sports are weekly
+# one-off cards whose books post lines a week+ ahead and which users plan
+# promos around — a 1-day cap silently hid the user's FanDuel UFC promo
+# ~40h before the 2026-06-14 White House card (find_edges discarded the
+# bouts as >26h out, so the promo pool never saw them). Give combat
+# sports a multi-day reach. Cost-free: the per-sport /odds fetch already
+# returns the whole card in one call; the old window just dropped it
+# client-side. Play These re-caps to MAX_PLAY_DAYS independently inside
+# _qualifies, so the wider reach feeds ONLY the promo pool, never the
+# curated cash list. Keyed by canonical sport (see _canonical_promo_sport).
+_PROMO_HORIZON_DAYS_BY_SPORT: dict[str, float] = {
+    "ufc":    4.0,
+    "boxing": 4.0,
+}
 
 # ── Promo hit-rate ruleset ────────────────────────────────────────────
 # Promos are use-it-or-lose-it and the goal is to CASH them, not to
@@ -2280,14 +2306,26 @@ PROMO_ODDS_WINDOWS: dict[str, list[tuple[int, int]]] = {
     "boost":     [(-200, 450), (-300, 700)],
 }
 
-# Voidable player props (goalscorer, HR, double-double, ...) are only
-# promo-eligible this close to commence. A DNP voids the bet and kills
-# the token, and quoted prop odds are priced for cash bettors (void =
-# refund), i.e. conditional on appearance — a use-it-or-lose-it token
-# collects at unconditional odds. Inside this window lineups / injury
-# reports are public and books have repriced, which is the best
-# "will actually play" proxy available from odds data alone. Still
-# eyeball the confirmed lineup before placing.
+# Voidable player props (goalscorer, HR, double-double, ...) carry
+# participation risk: a DNP voids the bet and kills the token, and quoted
+# prop odds are priced for cash bettors (void = refund), i.e. conditional
+# on appearance, while a use-it-or-lose-it token collects unconditionally.
+# This window is when lineups / injury reports are public and books have
+# repriced — the best "will actually play" proxy available from odds data.
+#
+# It is NOT a hard gate (2026-06-13: it was, and it held an HR-only boost
+# 12h before first pitch — a market="hr" promo has no game-line fallback,
+# so holding it just wastes the token, the exact failure we set out to
+# avoid). Two behaviors now:
+#   * A promo that TARGETS a voidable prop market (market="hr"/"dd"/"goal"
+#     /...) always gets a pick — the prop IS the promo — but if it's
+#     outside this window the pick is flagged participation_warn so the
+#     bot tells the user to confirm the player is active before placing.
+#     The odds bands already keep that pick to a likely starter, not a
+#     deep-bench moonshot.
+#   * An all-market / game-line promo still defers voidable props until
+#     inside the window, so it prefers a settle-always line early and only
+#     reaches for a prop once participation is essentially known.
 PROMO_PROP_WINDOW_MIN = 75
 
 # Parlay promos: cap each leg and the combined price so the parlay
@@ -2325,6 +2363,24 @@ def _starts_within_minutes(e, max_minutes: int) -> bool:
         return ct < datetime.now(ct.tzinfo) + timedelta(minutes=max_minutes)
     except Exception:
         return False
+
+
+def _promo_horizon_days(sport_label: str) -> float:
+    """Promo reach in days for an edge/event's sport label.
+
+    MAX_PROMO_DAYS for daily sports; a longer reach for weekly combat
+    cards (see _PROMO_HORIZON_DAYS_BY_SPORT). Accepts any raw sport label
+    (Odds API title, AN league, internal code) — collapses via
+    _canonical_promo_sport first."""
+    canonical = _canonical_promo_sport(sport_label or "")
+    return _PROMO_HORIZON_DAYS_BY_SPORT.get(canonical, MAX_PROMO_DAYS)
+
+
+def _starts_within_promo_horizon(e) -> bool:
+    """Like _starts_within_days but using the edge's per-sport promo
+    horizon, so a weekly UFC/boxing card surfaces days ahead while daily
+    sports stay at the 1-day default."""
+    return _starts_within_days(e, _promo_horizon_days(e.get("sport", "")))
 
 
 # Soccer leagues with consistently negative ROI across backtests.
@@ -3042,6 +3098,10 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                     band_note = " [relaxed band]"
                 else:
                     band_note = ""
+                # Prop picked before lineups are out — flag participation
+                # risk (the pick voids and burns the promo on a DNP).
+                if _pick_needs_participation_warn(best_edge):
+                    band_note += " [confirm player active]"
                 promo_label_disp = promo["label"] + band_note
 
                 orig_dec    = best_edge["odds_decimal"]
@@ -6229,7 +6289,7 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         for edge in all_edges:
             if edge["book"] != promo["book"]:
                 continue
-            if not _starts_within_days(edge, MAX_PROMO_DAYS):
+            if not _starts_within_promo_horizon(edge):
                 continue
             if edge.get("market") == "hr":
                 continue  # HR props handled separately
@@ -7031,7 +7091,9 @@ def _promo_matches(promo: dict, edge: dict,
     """
     if promo["book"] != edge["book"]:
         return False
-    if not _starts_within_days(edge, MAX_PROMO_DAYS):
+    # Per-sport horizon: 1 day for daily sports, longer for weekly combat
+    # cards so a planned UFC/boxing promo surfaces ahead of the event.
+    if not _starts_within_promo_horizon(edge):
         return False
     # Game-specific promos: restrict to the one game the user selected
     game_filter = promo.get("game_filter")
@@ -7056,11 +7118,17 @@ def _promo_matches(promo: dict, edge: dict,
     if edge.get("market") == "goal" and promo["market"] != "goal":
         if not (promo["sport"] == "world_cup" and promo["market"] == "all"):
             return False
-    # Hit-rate ruleset: voidable props only inside the lineup window.
-    # Outside it the pick is a coin-flip on participation that a
-    # use-it-or-lose-it token can't afford (see PROMO_PROP_WINDOW_MIN).
+    # Voidable-prop lineup window (see PROMO_PROP_WINDOW_MIN). Applies
+    # ONLY when the promo has a non-prop fallback: an all-market /
+    # game-line promo defers a voidable prop until lineups are out so it
+    # prefers a settle-always line early. A promo that TARGETS a voidable
+    # prop market (market="hr"/"dd"/"goal"/...) has no fallback — gating
+    # it just wastes the token — so it stays eligible and the picker
+    # flags participation_warn instead (handled by the caller).
     if not ignore_prop_window:
+        promo_targets_prop = promo.get("market") in _VOIDABLE_PROP_MARKETS
         if (edge.get("market") in _VOIDABLE_PROP_MARKETS
+                and not promo_targets_prop
                 and not _starts_within_minutes(edge, PROMO_PROP_WINDOW_MIN)):
             return False
     if promo["sport"] != "all":
@@ -7199,6 +7267,18 @@ _GOLF_PROMO_MARKETS = frozenset({"golf_top5", "golf_top10", "golf_top20",
 # lineup-window concept doesn't map to a four-day event.
 _VOIDABLE_PROP_MARKETS: frozenset[str] = frozenset().union(
     *_PROP_MARKETS_BY_SPORT.values()) | _PLAYER_PROP_MARKETS
+
+
+def _pick_needs_participation_warn(edge: dict | None) -> bool:
+    """True if a chosen promo edge is a voidable prop placed outside the
+    lineup window — the formatters use this to tell the user to confirm
+    the player is active before placing (a DNP voids the bet and burns
+    the promo). Only fires for prop-targeted promos, which are the ones
+    allowed to pick a prop early (see the gate in _promo_matches)."""
+    if not edge:
+        return False
+    return (edge.get("market") in _VOIDABLE_PROP_MARKETS
+            and not _starts_within_minutes(edge, PROMO_PROP_WINDOW_MIN))
 
 
 def _derive_promo_scope(promos: list[dict] | None) -> dict | None:
@@ -7828,6 +7908,7 @@ def compute_promo_picks(all_edges: list[dict],
                 "reason":      reason,
                 "is_fallback": is_fallback,
                 "band_stage":  band_stage,
+                "participation_warn": _pick_needs_participation_warn(best),
             })
     return picks
 
@@ -8038,7 +8119,7 @@ def eligible_games_for_promo(promo: dict, all_edges: list[dict],
             games = sorted({
                 e["game"] for e in combined
                 if e["book"] == promo["book"]
-                and _starts_within_days(e, MAX_PROMO_DAYS)
+                and _starts_within_promo_horizon(e)
                 and e.get("market") != "hr"
                 and (promo["sport"] == "all"
                      or _canonical_promo_sport(e["sport"]) == promo["sport"])

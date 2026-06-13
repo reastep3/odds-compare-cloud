@@ -789,6 +789,15 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
 
         lines.append(f"  {game} | {market} | {pick_str}")
 
+        # Prop pick made before lineups are out (only happens for promos
+        # that target a prop market — they have no game-line fallback, so
+        # we pick rather than waste the token). Remind the user to confirm
+        # participation: a DNP voids the bet and burns the promo.
+        if pp.get("participation_warn"):
+            lines.append(
+                f"  <i>⚠ Confirm {pick_str} is in the lineup before placing"
+                f" — voids (and burns the promo) on a DNP.</i>")
+
         if promo.get("promo_type") == "bonus_bet":
             amt = promo.get("bet_amount", 0)
             exp_profit = (edge["fair_prob"] / 100) * amt * (edge["odds_decimal"] - 1)
