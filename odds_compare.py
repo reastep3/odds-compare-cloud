@@ -6948,6 +6948,13 @@ def _wc_next_game_diagnostic(book: str) -> str | None:
 _LEAGUE_TO_SPORT = {
     "nba": "nba", "mlb": "mlb", "nhl": "nhl", "nfl": "nfl",
     "ncaab": "ncaab", "ncaaf": "ncaaf", "ufc": "ufc",
+    # The Odds API titles the mma_mixed_martial_arts key "MMA", so every
+    # UFC edge from the primary feed canonicalises from "MMA" — without
+    # this alias it stayed "mma" and never matched a ufc-scoped promo
+    # (sport="ufc"), silently zeroing out UFC promo picks. Same migration
+    # gap that broke tennis (see _canonical_promo_sport). The direct
+    # DK/FD scrapers tag sport.upper()="UFC" and already resolved fine.
+    "mma": "ufc",
     "mls": "soccer", "ligue1": "soccer", "epl": "soccer",
     "laliga": "soccer", "bundesliga": "soccer", "seriea": "soccer",
     "soccer": "soccer",

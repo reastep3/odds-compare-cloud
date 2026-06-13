@@ -1696,3 +1696,68 @@ def test_promo_matches_game_lines_unaffected_by_lineup_window():
     h2h_far = _promo_edge(300, 28.0, market="h2h",
                           commence=_iso_in(6 * 60))
     assert _promo_matches(promo, h2h_far) is True
+
+
+# ── UFC promo coverage ─────────────────────────────────────────────────
+# Regression for the migration gap: The Odds API (primary feed) titles
+# the mma_mixed_martial_arts key "MMA", but the internal sport code and
+# parsed promos use "ufc". Without the "mma" -> "ufc" canonical alias,
+# every ufc-scoped promo silently matched nothing. Same failure class as
+# the tennis ATP/WTA-title break.
+
+from odds_compare import _canonical_promo_sport, _derive_promo_scope
+
+
+def test_mma_title_canonicalises_to_ufc():
+    # The Odds API sport_title for mma_mixed_martial_arts is "MMA".
+    assert _canonical_promo_sport("MMA") == "ufc"
+    assert _canonical_promo_sport("mma") == "ufc"
+    # Direct DK/FD scrapers tag sport.upper() = "UFC" — must also resolve.
+    assert _canonical_promo_sport("UFC") == "ufc"
+    assert _canonical_promo_sport("ufc") == "ufc"
+
+
+def test_ufc_promo_parses_both_aliases():
+    for text in ("dk 50% ufc", "dk 50% mma"):
+        promo = parse_promo(text)
+        assert promo is not None, text
+        assert promo["sport"] == "ufc", text
+        assert promo["boost_pct"] == 50
+    # Moneyline keyword resolves to h2h for a UFC bout.
+    ml = parse_promo("fd 30% ufc ml")
+    assert ml["sport"] == "ufc"
+    assert ml["market"] == "h2h"
+
+
+def test_ufc_promo_matches_mma_labelled_edge():
+    # The exact live break: an Odds-API UFC edge (sport_title "MMA")
+    # against a ufc-scoped promo. Pre-fix this returned False.
+    promo = {"book": "DraftKings", "sport": "ufc", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25, "min_odds": None}
+    edge = _promo_edge(280, 30.0, market="h2h", sport="MMA",
+                       commence=_iso_in(8 * 60))
+    assert _promo_matches(promo, edge) is True
+    # Explicit moneyline targeting matches too.
+    ml_promo = {"book": "DraftKings", "sport": "ufc", "market": "h2h",
+                "promo_type": "straight", "boost_pct": 50, "min_odds": None}
+    assert _promo_matches(ml_promo, edge) is True
+
+
+def test_ufc_h2h_not_gated_by_lineup_window():
+    # UFC moneylines are settle-always game lines, not voidable props —
+    # a bout 8h out must stay eligible (no 75-min prop gate). Pins the
+    # decision that the recent void-window change does not touch UFC.
+    promo = {"book": "DraftKings", "sport": "ufc", "market": "all",
+             "promo_type": "bonus_bet", "bet_amount": 25, "min_odds": None}
+    far = _promo_edge(280, 30.0, market="h2h", sport="MMA",
+                      commence=_iso_in(8 * 60))
+    assert _promo_matches(promo, far) is True
+
+
+def test_scope_ufc_h2h_routes_to_ufc_fetch():
+    scope = _derive_promo_scope([
+        {"book": "DraftKings", "sport": "ufc", "market": "h2h"},
+    ])
+    assert scope is not None
+    assert scope["sports"] == {"ufc"}
+    assert scope["prop_sport_markets"] == {}
