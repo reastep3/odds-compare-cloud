@@ -60,6 +60,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
 )
+# httpx/httpcore log every request URL at INFO, and Telegram URLs embed the
+# bot token in the path (…/bot<TOKEN>/getUpdates). Long-polling would write the
+# live credential to the logs ~8.6k times/day. Raise them to WARNING.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ── Conversation states ──────────────────────────────────────────────
