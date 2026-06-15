@@ -2316,16 +2316,17 @@ PROMO_ODDS_WINDOWS: dict[str, list[tuple[int, int]]] = {
 # It is NOT a hard gate (2026-06-13: it was, and it held an HR-only boost
 # 12h before first pitch — a market="hr" promo has no game-line fallback,
 # so holding it just wastes the token, the exact failure we set out to
-# avoid). Two behaviors now:
-#   * A promo that TARGETS a voidable prop market (market="hr"/"dd"/"goal"
-#     /...) always gets a pick — the prop IS the promo — but if it's
-#     outside this window the pick is flagged participation_warn so the
-#     bot tells the user to confirm the player is active before placing.
-#     The odds bands already keep that pick to a likely starter, not a
-#     deep-bench moonshot.
-#   * An all-market / game-line promo still defers voidable props until
-#     inside the window, so it prefers a settle-always line early and only
-#     reaches for a prop once participation is essentially known.
+# avoid). Behavior now (see _promo_picks_prop_early):
+#   * A promo with no settle-always fallback always gets a pick — a promo
+#     that TARGETS a voidable prop market (market="hr"/"dd"/"goal"/...), or
+#     a World Cup all-market boost whose canonical play IS the goalscorer
+#     long-shot. Outside this window the pick is flagged participation_warn
+#     so the bot tells the user to confirm the player is active before
+#     placing. The odds bands already keep that pick to a likely starter,
+#     not a deep-bench moonshot.
+#   * Any other all-market / game-line promo still defers voidable props
+#     until inside the window, so it prefers a settle-always line early and
+#     only reaches for a prop once participation is essentially known.
 PROMO_PROP_WINDOW_MIN = 75
 
 # Parlay promos: cap each leg and the combined price so the parlay
@@ -7119,16 +7120,16 @@ def _promo_matches(promo: dict, edge: dict,
         if not (promo["sport"] == "world_cup" and promo["market"] == "all"):
             return False
     # Voidable-prop lineup window (see PROMO_PROP_WINDOW_MIN). Applies
-    # ONLY when the promo has a non-prop fallback: an all-market /
-    # game-line promo defers a voidable prop until lineups are out so it
-    # prefers a settle-always line early. A promo that TARGETS a voidable
-    # prop market (market="hr"/"dd"/"goal"/...) has no fallback — gating
-    # it just wastes the token — so it stays eligible and the picker
-    # flags participation_warn instead (handled by the caller).
+    # ONLY when the promo has a settle-always fallback worth waiting for:
+    # an all-market / game-line promo defers a voidable prop until lineups
+    # are out so it prefers a settle-always line early. A promo with no
+    # such fallback (see _promo_picks_prop_early: a prop-TARGETED promo, or
+    # a World Cup all-market boost whose canonical play is the goalscorer)
+    # stays eligible and the picker flags participation_warn instead —
+    # gating it would just risk wasting the token.
     if not ignore_prop_window:
-        promo_targets_prop = promo.get("market") in _VOIDABLE_PROP_MARKETS
         if (edge.get("market") in _VOIDABLE_PROP_MARKETS
-                and not promo_targets_prop
+                and not _promo_picks_prop_early(promo, edge)
                 and not _starts_within_minutes(edge, PROMO_PROP_WINDOW_MIN)):
             return False
     if promo["sport"] != "all":
@@ -7269,12 +7270,37 @@ _VOIDABLE_PROP_MARKETS: frozenset[str] = frozenset().union(
     *_PROP_MARKETS_BY_SPORT.values()) | _PLAYER_PROP_MARKETS
 
 
+def _promo_picks_prop_early(promo: dict, edge: dict) -> bool:
+    """True if `promo` may take this voidable-prop `edge` before the
+    lineup window — accepting a participation_warn — rather than holding
+    the token until lineups confirm the player.
+
+    Holds for promos with no settle-always fallback they would rather
+    take, where the window would just risk wasting the token:
+      * the promo TARGETS this prop market (market="hr"/"goal"/"dd"/...), or
+      * a World Cup all-market boost reaching a goalscorer — its canonical
+        play IS the goal long-shot (see the goal-admission rule in
+        _promo_matches), and the staged odds bands already keep that pick
+        to a likely starter, not a deep-bench moonshot.
+
+    Everything else (e.g. an all-market boost reaching a double-double)
+    keeps deferring: it has a settle-always game line to take early."""
+    if promo.get("market") in _VOIDABLE_PROP_MARKETS:
+        return True
+    if (edge.get("market") == "goal"
+            and promo.get("sport") == "world_cup"
+            and promo.get("market") == "all"):
+        return True
+    return False
+
+
 def _pick_needs_participation_warn(edge: dict | None) -> bool:
     """True if a chosen promo edge is a voidable prop placed outside the
     lineup window — the formatters use this to tell the user to confirm
     the player is active before placing (a DNP voids the bet and burns
-    the promo). Only fires for prop-targeted promos, which are the ones
-    allowed to pick a prop early (see the gate in _promo_matches)."""
+    the promo). Fires for any pick a promo was allowed to make early —
+    prop-targeted promos and World Cup all-market boosts (see
+    _promo_picks_prop_early and the gate in _promo_matches)."""
     if not edge:
         return False
     return (edge.get("market") in _VOIDABLE_PROP_MARKETS

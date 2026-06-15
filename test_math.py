@@ -1387,9 +1387,11 @@ def test_parse_promo_goalscorer_market_forms():
 
 
 def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
-    # Tournament-wide WC boost (market="all") must be able to take a
-    # goalscorer once inside the lineup window. _goal_edge has no commence
-    # by default → deferred (no game time to trust participation).
+    # Market/sport routing: a goalscorer prop flows to a tournament-wide
+    # WC boost (market="all") and to explicit goal-targeted promos. Whether
+    # it's picked early or only inside the lineup window is covered by
+    # test_world_cup_boost_picks_goalscorer_early_with_warn; here we pin a
+    # concrete kickoff time and just check the routing.
     from datetime import datetime, timedelta, timezone
     soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
@@ -1400,29 +1402,31 @@ def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
                           _goal_edge(commence=soon))
 
 
-def test_goalscorer_deferred_for_all_market_but_targetable_early():
-    # 2026-06-11 incident, post-redesign. Moonshot protection is now the
-    # odds bands; the lineup window only DEFERS voidable props for promos
-    # that have a game-line fallback. A tournament-wide WC boost
-    # (market="all") still defers a goalscorer far from kickoff, so it
-    # picks a settle-always line instead. But a goal-TARGETED promo
-    # ("dk 30% wc goals") has NO fallback — holding it just wastes the
-    # token — so it admits the prop early, flagged for participation.
+def test_world_cup_boost_picks_goalscorer_early_with_warn():
+    # 2026-06-15: a tournament-wide WC boost (market="all") used to DEFER
+    # goalscorer props until 75 min before kickoff — so ~10h out it picked
+    # nothing and told the user to re-run later. But a WC boost's canonical
+    # play IS the goal long-shot; it has no game line it would rather take,
+    # and the staged odds bands already keep the pick to a likely starter.
+    # So it now picks early like a goal-TARGETED promo, flagged for the user
+    # to confirm the XI (a DNP still voids the token). Non-goal props and
+    # non-WC promos are unaffected — see the dd guard test below.
     from datetime import datetime, timedelta, timezone
     from odds_compare import _pick_needs_participation_warn
     far = (datetime.now(timezone.utc) + timedelta(hours=6)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    # All-market WC boost: goal prop deferred (no commence, and far out).
-    assert not _promo_matches(_wc_promo(), _goal_edge())
-    assert not _promo_matches(_wc_promo(), _goal_edge(commence=far))
-    # Goal-targeted promo: admitted early, and flagged to confirm the XI.
     e_far = _goal_edge(commence=far)
-    assert _promo_matches(_wc_promo(market="goal"), e_far)
+    # All-market WC boost now admits the goalscorer early, flagged to confirm.
+    assert _promo_matches(_wc_promo(), e_far)
     assert _pick_needs_participation_warn(e_far) is True
-    # Diagnostics can still see the deferred candidate for the all-market
-    # case to explain the hold.
-    assert _promo_matches(_wc_promo(), _goal_edge(commence=far),
-                          ignore_prop_window=True)
+    # A goal-TARGETED promo behaves the same (unchanged contract).
+    assert _promo_matches(_wc_promo(market="goal"), e_far)
+    # Inside the lineup window the pick stands and the warn clears.
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    e_soon = _goal_edge(commence=soon)
+    assert _promo_matches(_wc_promo(), e_soon)
+    assert _pick_needs_participation_warn(e_soon) is False
 
 
 def test_goalscorer_blocked_from_generic_boosts():
