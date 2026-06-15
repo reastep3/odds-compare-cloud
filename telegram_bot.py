@@ -48,6 +48,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 # Add project dir to path so we can import odds_compare
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1791,6 +1792,52 @@ async def _start_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await _prompt_next_game_pick(update, context)
 
 
+# ── Telegram send resilience ─────────────────────────────────────────
+# python-telegram-bot does NOT retry failed API calls (only long-polling
+# getUpdates retries internally). So a single transient TimedOut /
+# NetworkError on a send_message — or Telegram flood control kicking in
+# mid-burst — would bubble up and abort an entire results delivery, even
+# though the expensive fetch already succeeded. _safe_send retries
+# transient failures with backoff; burst loops sleep _BURST_SEND_DELAY
+# between messages to stay under Telegram's ~1 msg/sec-per-chat limit.
+_SEND_MAX_ATTEMPTS = 4      # total tries per message before giving up
+_SEND_BACKOFF_BASE = 1.5    # seconds, multiplied by the attempt number
+_BURST_SEND_DELAY  = 0.4    # seconds between consecutive sends in a loop
+
+
+async def _safe_send(bot, chat_id, text, **kwargs):
+    """send_message with retry on transient Telegram errors.
+
+    Retries TimedOut / NetworkError with linear backoff and honors
+    RetryAfter (flood-control) waits. BadRequest is a NetworkError
+    subclass but deterministic (malformed HTML, message too long, …), so
+    it's re-raised immediately rather than retried — real bugs still
+    surface. After exhausting attempts, the last transient error is
+    re-raised so callers can still report failure.
+    """
+    last_err = None
+    for attempt in range(1, _SEND_MAX_ATTEMPTS + 1):
+        try:
+            return await bot.send_message(chat_id, text, **kwargs)
+        except BadRequest:
+            raise
+        except RetryAfter as e:
+            last_err = e
+            wait = min(float(getattr(e, "retry_after", _SEND_BACKOFF_BASE)), 30.0)
+            log.warning("send_message flood-limited (try %d/%d); waiting %.1fs",
+                        attempt, _SEND_MAX_ATTEMPTS, wait)
+            await asyncio.sleep(wait + 0.5)
+        except (TimedOut, NetworkError) as e:
+            last_err = e
+            if attempt == _SEND_MAX_ATTEMPTS:
+                break
+            wait = _SEND_BACKOFF_BASE * attempt
+            log.warning("send_message %s (try %d/%d); retrying in %.1fs",
+                        type(e).__name__, attempt, _SEND_MAX_ATTEMPTS, wait)
+            await asyncio.sleep(wait)
+    raise last_err
+
+
 async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
                               fetched: dict, user_books: list[str],
                               dk: float, fd: float,
@@ -1820,8 +1867,9 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
             "an_only":        counters.get("an_only", False),
         },
     }
-    await context.bot.send_message(
-        chat_id, format_summary(summary_shape, user_books, skip_mode=skip_mode),
+    await _safe_send(
+        context.bot, chat_id,
+        format_summary(summary_shape, user_books, skip_mode=skip_mode),
         parse_mode="HTML")
 
     # Play These — game lines + qualifying player props (independent of promos)
@@ -1842,9 +1890,10 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
     for msg in format_play_edges(play_edges, bankrolls, skip_mode=skip_mode,
                                  kelly_scale=kelly_scale):
         for chunk in _split_message(msg):
-            await context.bot.send_message(
-                chat_id, chunk, parse_mode="HTML",
+            await _safe_send(
+                context.bot, chat_id, chunk, parse_mode="HTML",
                 disable_web_page_preview=True)
+            await asyncio.sleep(_BURST_SEND_DELAY)
 
 
 def _match_game_hint(hint: str | None,
@@ -1896,8 +1945,8 @@ async def _prompt_next_game_pick(update: Update,
         if not eligible:
             # No matching games — log + skip
             queue.pop(0)
-            await context.bot.send_message(
-                chat_id,
+            await _safe_send(
+                context.bot, chat_id,
                 f"<i>No matching games for promo: {_esc(promo['label'])} — skipping.</i>",
                 parse_mode="HTML")
             continue
@@ -1911,8 +1960,8 @@ async def _prompt_next_game_pick(update: Update,
             if f"[{short}]" not in promo["label"]:
                 promo["label"] = promo["label"].rstrip(")") + f" [{short}]"
             queue.pop(0)
-            await context.bot.send_message(
-                chat_id,
+            await _safe_send(
+                context.bot, chat_id,
                 f"<i>Auto-matched {_esc(promo['game_hint'])} → "
                 f"{_esc(auto)}</i>",
                 parse_mode="HTML")
@@ -1933,8 +1982,8 @@ async def _prompt_next_game_pick(update: Update,
 
     n_left = len(queue)
     qtag = f" ({n_left} left)" if n_left > 1 else ""
-    await context.bot.send_message(
-        chat_id,
+    await _safe_send(
+        context.bot, chat_id,
         f"<b>Game-specific promo</b>{qtag}\n"
         f"Which game does this apply to?\n"
         f"<i>{_esc(promo['label'])}</i>",
@@ -2026,10 +2075,11 @@ async def _finalize_and_send(update: Update,
                 kelly_fraction=user_kf)
             if promo_msg:
                 for chunk in _split_message(promo_msg):
-                    await context.bot.send_message(
-                        chat_id, chunk, parse_mode="HTML",
+                    await _safe_send(
+                        context.bot, chat_id, chunk, parse_mode="HTML",
                         disable_web_page_preview=True,
                         reply_markup=ReplyKeyboardRemove())
+                    await asyncio.sleep(_BURST_SEND_DELAY)
 
             parlay_rows = result.get("parlay_rows", [])
             if parlay_rows:
@@ -2038,15 +2088,16 @@ async def _finalize_and_send(update: Update,
             parlay_msg = format_parlay_picks(parlay_rows)
             if parlay_msg:
                 for chunk in _split_message(parlay_msg):
-                    await context.bot.send_message(
-                        chat_id, chunk, parse_mode="HTML",
+                    await _safe_send(
+                        context.bot, chat_id, chunk, parse_mode="HTML",
                         disable_web_page_preview=True)
+                    await asyncio.sleep(_BURST_SEND_DELAY)
 
         # /run_promos skips the Excel write entirely — don't advertise
         # a file that doesn't exist.
         if result.get("output_path"):
-            await context.bot.send_message(
-                chat_id,
+            await _safe_send(
+                context.bot, chat_id,
                 f"Excel saved: {os.path.basename(result['output_path'])}",
                 reply_markup=ReplyKeyboardRemove(),
             )
@@ -2636,7 +2687,8 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     msg = format_backtest_results(picks, start, end, user_books)
     for chunk in _split_message(msg):
-        await context.bot.send_message(chat_id, chunk, parse_mode="HTML")
+        await _safe_send(context.bot, chat_id, chunk, parse_mode="HTML")
+        await asyncio.sleep(_BURST_SEND_DELAY)
 
     if excel_path and os.path.exists(excel_path):
         with open(excel_path, "rb") as f:
@@ -2759,8 +2811,16 @@ def main():
         await app.bot.set_my_commands(commands)
         log.info("Registered command menu with Telegram")
 
+    # PTB's default per-request timeouts (read/write/connect=5s, pool=1s)
+    # are too tight for our results delivery: one slow Telegram response on
+    # a single send_message would raise TimedOut and abort the whole batch
+    # *after* the (Odds-API-credit-expensive) fetch already succeeded.
     app = (Application.builder()
            .token(TELEGRAM_BOT_TOKEN)
+           .read_timeout(30)
+           .write_timeout(30)
+           .connect_timeout(15)
+           .pool_timeout(10)
            .post_init(_register_commands)
            .build())
 
