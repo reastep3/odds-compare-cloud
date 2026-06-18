@@ -1386,46 +1386,48 @@ def test_parse_promo_goalscorer_market_forms():
     assert "Anytime Goalscorer" in promo["label"]
 
 
-def test_goalscorer_flows_to_world_cup_and_explicit_goal_promos():
-    # Market/sport routing: a goalscorer prop flows to a tournament-wide
-    # WC boost (market="all") and to explicit goal-targeted promos. Whether
-    # it's picked early or only inside the lineup window is covered by
-    # test_world_cup_boost_picks_goalscorer_early_with_warn; here we pin a
-    # concrete kickoff time and just check the routing.
+def test_goalscorer_flows_only_to_explicit_goal_promos():
+    # Market/sport routing: a goalscorer prop flows ONLY to promos that
+    # explicitly target the goal market (a book token usable on nothing
+    # else). A tournament-wide WC boost (market="all") no longer grabs it —
+    # the user finds goalscorer props mispriced regardless of cross-book EV
+    # and doesn't want the picker electing them. Whether an explicit goal
+    # promo picks early or only inside the lineup window is covered by
+    # test_explicit_goal_promo_picks_goalscorer_early_with_warn; here we pin
+    # a concrete kickoff time and just check the routing.
     from datetime import datetime, timedelta, timezone
     soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    assert _promo_matches(_wc_promo(), _goal_edge(commence=soon))
+    # A WC all-market boost is kept off goalscorer props.
+    assert not _promo_matches(_wc_promo(), _goal_edge(commence=soon))
     # Explicit market targeting works regardless of sport pin.
     assert _promo_matches(_wc_promo(market="goal"), _goal_edge(commence=soon))
     assert _promo_matches(_wc_promo(sport="all", market="goal"),
                           _goal_edge(commence=soon))
 
 
-def test_world_cup_boost_picks_goalscorer_early_with_warn():
-    # 2026-06-15: a tournament-wide WC boost (market="all") used to DEFER
-    # goalscorer props until 75 min before kickoff — so ~10h out it picked
-    # nothing and told the user to re-run later. But a WC boost's canonical
-    # play IS the goal long-shot; it has no game line it would rather take,
-    # and the staged odds bands already keep the pick to a likely starter.
-    # So it now picks early like a goal-TARGETED promo, flagged for the user
-    # to confirm the XI (a DNP still voids the token). Non-goal props and
-    # non-WC promos are unaffected — see the dd guard test below.
+def test_explicit_goal_promo_picks_goalscorer_early_with_warn():
+    # A goalscorer-TARGETED promo (market="goal" — e.g. "fd 25% anytime
+    # goalscorer", a book token usable on nothing else) picks the prop early
+    # rather than holding the token until 75 min before kickoff: it has no
+    # settle-always line it would rather take, and the staged odds bands
+    # already keep the pick to a likely starter. The early pick is flagged
+    # for the user to confirm the XI (a DNP still voids the token). A WC
+    # all-market boost, by contrast, no longer reaches a goalscorer at all
+    # (see test_goalscorer_blocked_from_generic_boosts).
     from datetime import datetime, timedelta, timezone
     from odds_compare import _pick_needs_participation_warn
     far = (datetime.now(timezone.utc) + timedelta(hours=6)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     e_far = _goal_edge(commence=far)
-    # All-market WC boost now admits the goalscorer early, flagged to confirm.
-    assert _promo_matches(_wc_promo(), e_far)
-    assert _pick_needs_participation_warn(e_far) is True
-    # A goal-TARGETED promo behaves the same (unchanged contract).
+    # A goal-TARGETED promo admits the goalscorer early, flagged to confirm.
     assert _promo_matches(_wc_promo(market="goal"), e_far)
+    assert _pick_needs_participation_warn(e_far) is True
     # Inside the lineup window the pick stands and the warn clears.
     soon = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     e_soon = _goal_edge(commence=soon)
-    assert _promo_matches(_wc_promo(), e_soon)
+    assert _promo_matches(_wc_promo(market="goal"), e_soon)
     assert _pick_needs_participation_warn(e_soon) is False
 
 
@@ -1434,6 +1436,10 @@ def test_goalscorer_blocked_from_generic_boosts():
     # goalscorer prop — same reasoning as the HR guard.
     assert not _promo_matches(_wc_promo(sport="all"), _goal_edge())
     assert not _promo_matches(_wc_promo(sport="soccer"), _goal_edge())
+    # A tournament-wide WC boost (market="all") is no longer an exception:
+    # the user wants goalscorer props off every promo except an explicit
+    # goal-targeted token, so even the WC all-market boost is blocked.
+    assert not _promo_matches(_wc_promo(), _goal_edge())
     # The HR guard itself is unchanged: a WC all-market promo still
     # never takes an HR prop.
     hr_edge = _goal_edge(sport="MLB", sport_key="baseball_mlb", market="hr")
