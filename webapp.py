@@ -765,30 +765,36 @@ def _shape_promo_pick(p: dict[str, Any]) -> dict[str, Any]:
     is_fallback}. When `edge` is None (no qualifying pick found), only
     the promo label + reason are surfaced so the UI can show the miss.
     """
-    from odds_compare import apply_profit_boost, calc_ev
+    from odds_compare import apply_profit_boost, calc_ev, _draw_refund_ev_pct
     promo = p.get("promo") or {}
     edge  = p.get("edge")
     out: dict[str, Any] = {
-        "promo_label":  promo.get("label"),
-        "boost_pct":    promo.get("boost_pct"),
-        "promo_type":   promo.get("promo_type"),
-        "copy_idx":     p.get("copy_idx"),
-        "copy_of":      p.get("copy_of"),
-        "is_fallback":  bool(p.get("is_fallback")),
-        "reason":       p.get("reason"),
+        "promo_label":    promo.get("label"),
+        "boost_pct":      promo.get("boost_pct"),
+        "promo_type":     promo.get("promo_type"),
+        "refund_on_draw": bool(promo.get("refund_on_draw")),
+        "copy_idx":       p.get("copy_idx"),
+        "copy_of":        p.get("copy_of"),
+        "is_fallback":    bool(p.get("is_fallback")),
+        "reason":         p.get("reason"),
     }
     if edge is None:
         return out
     out.update(_shape_edge(edge))
-    # Add boosted fields when there's a profit-boost promo. apply_profit_boost
-    # is a no-op for bonus_bet promos (boost_pct=None), which keeps the
-    # bonus-bet path showing original odds.
-    boost_pct = promo.get("boost_pct")
-    if boost_pct and edge.get("odds_decimal"):
-        boost_dec = apply_profit_boost(edge["odds_decimal"], boost_pct)
+    # Add boosted fields when there's a profit-boost OR money-back-on-draw
+    # promo. apply_profit_boost is a no-op for bonus_bet promos
+    # (boost_pct=None), keeping the bonus-bet path on original odds; a pure
+    # draw-insurance promo (no boost) still surfaces its EV via the refund.
+    boost_pct   = promo.get("boost_pct")
+    draw_refund = _draw_refund_ev_pct(promo, edge)
+    if (boost_pct or draw_refund) and edge.get("odds_decimal"):
+        boost_dec = apply_profit_boost(edge["odds_decimal"], boost_pct or 0)
         fair_prob = (edge.get("fair_prob") or 0) / 100
         out["boost_decimal"] = boost_dec
-        out["boost_ev_pct"]  = round(calc_ev(fair_prob, boost_dec), 2)
+        out["boost_ev_pct"]  = round(calc_ev(fair_prob, boost_dec)
+                                     + draw_refund, 2)
+        if draw_refund:
+            out["draw_refund_pct"] = round(draw_refund, 2)
     return out
 
 

@@ -1871,3 +1871,107 @@ def test_hr_targeted_promo_no_warn_inside_window():
     assert len(picks) == 1
     assert picks[0]["edge"] is hr_edge
     assert picks[0]["participation_warn"] is False
+
+
+# ── Money-back-on-draw (Draw No Bet) promo tests ──────────────────────
+from odds_compare import (
+    _draw_refund_ev_pct, _promo_kelly, _is_draw_insurable, KELLY_FRACTION,
+)
+
+
+def _ml_team_edge(**overrides):
+    """A 3-way soccer moneyline TEAM edge as find_edges builds it for a
+    World Cup game, carrying the draw probability draw insurance values."""
+    edge = {
+        "book":           "DraftKings",
+        "sport":          "Soccer",
+        "sport_key":      "soccer_fifa_world_cup",
+        "market":         "h2h",
+        "odds_decimal":   2.0,        # +100
+        "outcome":        "Brazil",
+        "game":           "Brazil @ Serbia",
+        "fair_prob":      45.0,       # P(win) = 45%
+        "draw_fair_prob": 26.0,       # P(draw) = 26%
+    }
+    edge.update(overrides)
+    return edge
+
+
+def test_parse_promo_money_back_on_draw_pins_moneyline():
+    p = parse_promo("dk world cup money back on draw")
+    assert p["refund_on_draw"] is True
+    assert p["sport"]  == "world_cup"
+    assert p["market"] == "h2h"          # pinned: insurance is moneyline-only
+    assert p["boost_pct"] is None        # valid with no boost %
+    assert "money back on draw" in p["label"]
+
+
+def test_parse_promo_draw_no_bet_and_dnb_shorthand():
+    assert parse_promo("fd draw no bet world cup")["refund_on_draw"] is True
+    assert parse_promo("dk wc dnb")["refund_on_draw"] is True
+    # A plain boost is unaffected.
+    assert parse_promo("dk 50% world cup")["refund_on_draw"] is False
+
+
+def test_parse_promo_boost_plus_draw_insurance():
+    p = parse_promo("fd 50% world cup ml money back on draw")
+    assert p["refund_on_draw"] is True
+    assert p["boost_pct"] == 50
+    assert p["market"] == "h2h"
+    assert "50" in p["label"] and "money back on draw" in p["label"]
+
+
+def test_draw_refund_ev_equals_draw_probability():
+    promo = _wc_promo(market="h2h", refund_on_draw=True)
+    # Refunding the stake on a draw is worth exactly P(draw) in EV%.
+    assert _draw_refund_ev_pct(promo, _ml_team_edge(draw_fair_prob=26.0)) == 26.0
+    # A non-insured promo gets nothing.
+    assert _draw_refund_ev_pct(_wc_promo(market="h2h"), _ml_team_edge()) == 0.0
+
+
+def test_draw_refund_only_applies_to_insurable_moneylines():
+    promo = _wc_promo(market="h2h", refund_on_draw=True)
+    # The Draw outcome itself can't be insured against a draw.
+    assert _draw_refund_ev_pct(promo, _ml_team_edge(outcome="Draw")) == 0.0
+    # A 2-way moneyline (no draw_fair_prob) gets no refund value.
+    no_draw = _ml_team_edge(); no_draw.pop("draw_fair_prob")
+    assert _draw_refund_ev_pct(promo, no_draw) == 0.0
+    assert _is_draw_insurable(_ml_team_edge()) is True
+
+
+def test_promo_matches_draw_insurance_team_ml_only():
+    promo = _wc_promo(market="h2h", refund_on_draw=True)
+    assert _promo_matches(promo, _ml_team_edge()) is True
+    # Rejects the Draw outcome, 2-way moneylines, and non-h2h markets.
+    assert _promo_matches(promo, _ml_team_edge(outcome="Draw")) is False
+    no_draw = _ml_team_edge(); no_draw.pop("draw_fair_prob")
+    assert _promo_matches(promo, no_draw) is False
+    assert _promo_matches(promo, _ml_team_edge(market="totals")) is False
+
+
+def test_dnb_kelly_lifts_stake_and_reduces_to_plain_when_no_draw():
+    promo = _wc_promo(market="h2h", refund_on_draw=True)
+    edge  = _ml_team_edge(odds_decimal=2.0, fair_prob=45.0, draw_fair_prob=26.0)
+    p_win = 0.45
+    dnb   = _promo_kelly(promo, edge, edge["odds_decimal"], p_win)
+    # A draw can't lose, so DNB Kelly stakes strictly more than plain.
+    assert dnb > kelly_bet(p_win, edge["odds_decimal"])
+    # Exact push-aware formula: f = (p_win*b - p_opp)/(b*(p_win+p_opp)) * frac
+    b, p_draw = 1.0, 0.26
+    p_opp = 1 - p_win - p_draw
+    expected = (p_win * b - p_opp) / (b * (p_win + p_opp)) * KELLY_FRACTION
+    assert abs(dnb - expected) < 1e-9
+    # With no draw it collapses to the standard two-way Kelly (use a +EV
+    # price so both are positive, not clamped at 0).
+    e0 = _ml_team_edge(draw_fair_prob=0.0, odds_decimal=3.0)
+    assert abs(_promo_kelly(promo, e0, e0["odds_decimal"], p_win)
+               - kelly_bet(p_win, e0["odds_decimal"])) < 1e-9
+
+
+def test_draw_insurance_boosted_ev_is_winEV_plus_drawprob():
+    # End-to-end valuation: boosted EV = base win EV + P(draw).
+    promo = _wc_promo(market="h2h", refund_on_draw=True)
+    edge  = _ml_team_edge(odds_decimal=2.0, fair_prob=45.0, draw_fair_prob=26.0)
+    base  = calc_ev(0.45, 2.0)                 # (0.45*2 - 1)*100 = -10.0%
+    boosted = base + _draw_refund_ev_pct(promo, edge)
+    assert abs(boosted - 16.0) < 1e-6          # -10 + 26 = +16%

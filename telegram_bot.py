@@ -319,6 +319,24 @@ def parse_promo(text: str) -> dict | None:
     # Remove punctuation that would split natural-language tokens
     text = text.replace(",", " ").replace(";", " ")
 
+    # Money-back-on-draw ("draw no bet") insurance: the stake is refunded
+    # if a 3-way moneyline ends level. Detect the natural phrasings (and
+    # the "dnb" shorthand) up front and strip them so the remaining tokens
+    # parse normally; it implies the moneyline market (pinned below).
+    refund_on_draw = False
+    for _phrase in ("money back on draw", "money back if it draws",
+                    "money back if draw", "money back if drawn",
+                    "money back draw", "stake back on draw", "refund on draw",
+                    "refund if draw", "draw no bet", "draw insurance",
+                    "insure the draw", "insure draw", "draw refund",
+                    "drawnobet", "no bet on draw"):
+        if _phrase in text:
+            refund_on_draw = True
+            text = text.replace(_phrase, " ")
+    if "dnb" in text.split():
+        refund_on_draw = True
+        text = " ".join(t for t in text.split() if t != "dnb")
+
     tokens = text.split()
     if not tokens:
         return None
@@ -346,6 +364,7 @@ def parse_promo(text: str) -> dict | None:
         "game_filter":   None,
         "game_hint":     None,
         "sgp":           False,
+        "refund_on_draw": False,
         "count":         1,
         "label":         "",
     }
@@ -499,6 +518,12 @@ def parse_promo(text: str) -> dict | None:
 
         i += 1
 
+    # Money-back-on-draw is moneyline insurance — pin the market to h2h so
+    # it can only land on a 3-way moneyline team pick.
+    promo["refund_on_draw"] = refund_on_draw
+    if refund_on_draw:
+        promo["market"] = "h2h"
+
     # NHL's "player_points" Odds API market is stored under the internal
     # key "nhl_pts" to avoid clashing with NBA's "pts". Remap when the
     # user pinned the sport to NHL so the edge filter matches the right
@@ -516,7 +541,13 @@ def parse_promo(text: str) -> dict | None:
         parts.append(f"{promo['boost_pct']}% {promo['num_legs']}-leg {sgp_str}parlay boost"
                      if promo["num_legs"] else f"{promo['boost_pct']}% {sgp_str}parlay boost")
     else:
-        parts.append(f"{promo['boost_pct']}% boost" if promo["boost_pct"] else "boost")
+        boost_str = f"{promo['boost_pct']}% boost" if promo["boost_pct"] else None
+        if promo.get("refund_on_draw"):
+            # Money-back-on-draw, optionally combined with a profit boost.
+            parts.append(f"{boost_str} + money back on draw" if boost_str
+                         else "money back on draw")
+        else:
+            parts.append(boost_str or "boost")
 
     if promo["sport"] != "all":
         # Multi-word sport keys (european_soccer) render as Title Case so
@@ -527,7 +558,10 @@ def parse_promo(text: str) -> dict | None:
         else:
             sport_label = sport_key.upper()
         parts.append(f"/ {sport_label}")
-    if promo["market"] != "all":
+    if promo["market"] != "all" and not (
+            promo.get("refund_on_draw") and promo["market"] == "h2h"):
+        # "money back on draw" already implies the moneyline, so skip the
+        # redundant "/ H2h" tag for draw-insured promos.
         mkt_label = PROMO_MARKET_DISPLAY.get(
             promo["market"], promo["market"].capitalize())
         parts.append(f"/ {mkt_label}")
@@ -751,7 +785,8 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
         return None
 
     from odds_compare import (apply_profit_boost, calc_ev, format_american,
-                              kelly_bet, clamp_bet)
+                              kelly_bet, clamp_bet,
+                              _draw_refund_ev_pct, _promo_kelly)
 
     lines = ["<b>PROMO PICKS</b>"]
 
@@ -814,9 +849,14 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
             boost_dec = apply_profit_boost(
                 edge["odds_decimal"], promo.get("boost_pct") or 0)
             fair_prob = edge["fair_prob"] / 100
-            boosted_ev = calc_ev(fair_prob, boost_dec)
+            # Money-back-on-draw adds P(draw) to EV (stake refunded, not
+            # lost, on a draw); 0 for a normal boost. DNB-aware Kelly sizes
+            # off the opponent-win loss probability, not 1 - p_win.
+            draw_refund = _draw_refund_ev_pct(promo, edge)
+            boosted_ev = calc_ev(fair_prob, boost_dec) + draw_refund
             boosted_odds = format_american(boost_dec)
-            boosted_k = kelly_bet(fair_prob, boost_dec, fraction=kelly_fraction)
+            boosted_k = _promo_kelly(promo, edge, boost_dec, fair_prob,
+                                     fraction=kelly_fraction)
             br = bankrolls.get(edge["book"], 0)
             # For +EV picks: Kelly stake (capped by promo max).
             # For fallback -EV picks: Kelly=0, so default to the promo's
@@ -829,10 +869,24 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
                 if promo.get("max_bet") and bet > promo["max_bet"]:
                     bet = promo["max_bet"]
             profit = bet * (boost_dec - 1)
-            lines.append(
-                f"  {odds_str} -&gt; {boosted_odds} | "
-                f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}%"
-            )
+            if draw_refund and promo.get("boost_pct"):
+                # Profit boost + draw insurance.
+                lines.append(
+                    f"  {odds_str} -&gt; {boosted_odds} (+ money back on draw) | "
+                    f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}%"
+                )
+            elif draw_refund:
+                # Pure draw insurance — odds unchanged; value is the refund.
+                lines.append(
+                    f"  {odds_str} | money back on draw | "
+                    f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}% "
+                    f"(draw refund worth +{draw_refund:.1f}%)"
+                )
+            else:
+                lines.append(
+                    f"  {odds_str} -&gt; {boosted_odds} | "
+                    f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}%"
+                )
             bet_label = "Bet" if not is_fallback else "Bet (promo max)"
             lines.append(
                 f"  {bet_label} ${bet:.2f} -&gt; +${profit:.2f}"
@@ -1333,8 +1387,11 @@ async def _accept_parsed_promo(update: Update,
     # Boosts/parlays require a single boost %. Reject ambiguous cases
     # (e.g. photo extraction produced "20-50%" from a stepped-up boost)
     # so the user can fix it now instead of finalize crashing later.
+    # Exception: a money-back-on-draw promo carries its value in the draw
+    # refund, so it's valid with no boost % at all.
     if (promo.get("promo_type") in ("straight", "parlay")
-            and promo.get("boost_pct") is None):
+            and promo.get("boost_pct") is None
+            and not promo.get("refund_on_draw")):
         await update.message.reply_text(
             "Couldn't read a single boost % from that promo — stepped "
             "or tiered boosts need to be resolved to one number. Try a "
@@ -1402,7 +1459,7 @@ async def _accept_parsed_promo(update: Update,
 _EQUIV_FIELDS = (
     "book", "sport", "market", "promo_type", "boost_pct",
     "bet_amount", "min_odds", "max_bet", "num_legs",
-    "game_specific", "sgp", "game_hint",
+    "game_specific", "sgp", "game_hint", "refund_on_draw",
 )
 
 

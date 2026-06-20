@@ -1937,6 +1937,10 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
                     market_data[mkt].setdefault(key, [])
                     market_data[mkt][key].append((bk, dec, price, point, src))
 
+        # Collect this event's moneyline edges so the 3-way draw
+        # probability can be stamped onto them after the market loop
+        # (see the money-back-on-draw stamping below).
+        _h2h_edges_this_event: list[dict] = []
         for mkt, outcomes in market_data.items():
             for outcome_key, book_lines in outcomes.items():
                 target_lines   = [(b, d, am, pt, src) for b, d, am, pt, src in book_lines
@@ -2057,6 +2061,9 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
                     # ── Promo pool: every DK/FD outcome (for boost evaluation)
                     if promo_pool is not None:
                         promo_pool.append(edge_dict)
+                    # Remember moneyline edges for draw-prob stamping.
+                    if mkt == "h2h":
+                        _h2h_edges_this_event.append(edge_dict)
                     # ── Parlay-pool collection (all fairly-priced favorites) ─
                     if parlay_pool is not None and fair_prob >= 0.30:
                         parlay_pool.append({
@@ -2076,6 +2083,21 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
                             "num_other_books":   len(other_lines),
                             "pinnacle_anchored": has_pinnacle,
                         })
+
+        # ── Money-back-on-draw support ───────────────────────────────
+        # Stamp the 3-way draw probability onto each moneyline team edge
+        # so a draw-insured promo (stake refunded on a draw) can value
+        # the refund (= P(draw)). Uses the Draw outcome's own fair_prob —
+        # the same Pinnacle-blend/consensus method as every other outcome,
+        # so no separate math. Left unset for 2-way h2h (no Draw outcome),
+        # so the insurance never applies to a sport that can't draw.
+        _draw_e = next((e for e in _h2h_edges_this_event
+                        if str(e.get("outcome", "")).strip().lower() == "draw"),
+                       None)
+        if _draw_e is not None:
+            for _e in _h2h_edges_this_event:
+                if _e is not _draw_e:
+                    _e["draw_fair_prob"] = _draw_e["fair_prob"]
 
     edges.sort(key=lambda x: x["ev_pct"], reverse=True)
     return edges
@@ -3137,10 +3159,16 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                         mo_display,
                     ]
                 else:
-                    # ── Profit Boost math ─────────────────────────────
-                    boost_dec_v = apply_profit_boost(orig_dec, promo["boost_pct"])
-                    boosted_ev  = calc_ev(fair_prob_v, boost_dec_v)
-                    boosted_k   = kelly_bet(fair_prob_v, boost_dec_v)
+                    # ── Profit Boost / draw-insurance math ────────────
+                    boost_dec_v = apply_profit_boost(orig_dec,
+                                                     promo.get("boost_pct") or 0)
+                    # Money-back-on-draw adds P(draw) to EV (stake refunded,
+                    # not lost, on a draw) and lifts Kelly accordingly; both
+                    # add 0 for a normal boost.
+                    boosted_ev  = (calc_ev(fair_prob_v, boost_dec_v)
+                                   + _draw_refund_ev_pct(promo, best_edge))
+                    boosted_k   = _promo_kelly(promo, best_edge,
+                                               boost_dec_v, fair_prob_v)
                     bankroll_v  = (dk_bankroll if best_edge["book"] == "DraftKings"
                                    else fd_bankroll)
                     bet_v       = clamp_bet(bankroll_v * boosted_k, best_edge["book"])
@@ -3589,11 +3617,13 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                     continue
 
                 orig_dec  = edge["odds_decimal"]
-                boost_dec = apply_profit_boost(orig_dec, promo["boost_pct"])
+                boost_dec = apply_profit_boost(orig_dec,
+                                               promo.get("boost_pct") or 0)
                 fair_prob = edge["fair_prob"] / 100
 
-                boosted_ev   = calc_ev(fair_prob, boost_dec)
-                boosted_kelly = kelly_bet(fair_prob, boost_dec)
+                boosted_ev    = (calc_ev(fair_prob, boost_dec)
+                                 + _draw_refund_ev_pct(promo, edge))
+                boosted_kelly = _promo_kelly(promo, edge, boost_dec, fair_prob)
 
                 # Only show if boosted EV is positive
                 if boosted_ev < 0.5:
@@ -7078,6 +7108,54 @@ def _meets_min_odds(promo: dict, edge: dict) -> bool:
     return edge["odds_decimal"] >= min_dec
 
 
+def _is_draw_insurable(edge: dict) -> bool:
+    """True if `edge` is a 3-way moneyline pick on a TEAM (not the Draw)
+    that carries a draw probability — i.e. a pick a money-back-on-draw
+    promo can insure. 2-way moneylines (no draw_fair_prob) and the Draw
+    outcome itself are excluded."""
+    return (edge.get("market") == "h2h"
+            and edge.get("draw_fair_prob") is not None
+            and str(edge.get("outcome", "")).strip().lower() != "draw")
+
+
+def _draw_refund_ev_pct(promo: dict, edge: dict) -> float:
+    """Extra EV% a money-back-on-draw promo adds to a moneyline pick.
+
+    Refunding the stake on a draw (instead of losing it) is worth exactly
+    P(draw) in stake units, so the boost to EV% is the draw's fair
+    probability. Returns 0 when the promo isn't draw-insured or the edge
+    isn't an insurable 3-way team moneyline."""
+    if not promo.get("refund_on_draw"):
+        return 0.0
+    if not _is_draw_insurable(edge):
+        return 0.0
+    return edge["draw_fair_prob"]   # stored as a percent, like fair_prob
+
+
+def _promo_kelly(promo: dict, edge: dict, dec: float, p_win: float,
+                 fraction: float = KELLY_FRACTION) -> float:
+    """Kelly stake fraction for a promo pick at decimal odds `dec`.
+
+    DNB-aware: a money-back-on-draw pick has three outcomes — win (prob
+    p_win, return b=dec-1), push/draw (prob p_draw, stake refunded), and
+    loss (prob p_opp = 1 - p_win - p_draw). Maximising E[log] over those
+    gives f* = (p_win*b - p_opp) / (b*(p_win + p_opp)); the push drops out
+    of the growth term, which both lifts the stake (a draw can't lose) and
+    shrinks the at-risk base (p_win + p_opp < 1). Reduces to the plain
+    two-way Kelly when p_draw = 0. Falls back to kelly_bet otherwise."""
+    if promo.get("refund_on_draw") and _is_draw_insurable(edge):
+        b = dec - 1
+        if b <= 0:
+            return 0.0
+        p_draw = edge["draw_fair_prob"] / 100
+        p_opp  = max(0.0, 1 - p_win - p_draw)
+        denom  = b * (p_win + p_opp)
+        if denom <= 0:
+            return 0.0
+        return max(0.0, (p_win * b - p_opp) / denom) * fraction
+    return kelly_bet(p_win, dec, fraction)
+
+
 def _promo_matches(promo: dict, edge: dict,
                    ignore_prop_window: bool = False) -> bool:
     """Check if an edge qualifies for a straight promo.
@@ -7118,6 +7196,13 @@ def _promo_matches(promo: dict, edge: dict,
     # when it had a settle-always line to take. (A WC boost used to admit
     # them as its "canonical" play; that exception is gone.)
     if edge.get("market") == "goal" and promo["market"] != "goal":
+        return False
+    # Money-back-on-draw promos refund the stake only on a 3-way moneyline
+    # draw, so they can ONLY land on a moneyline team pick that carries a
+    # draw probability. Reject everything else: non-h2h markets, 2-way
+    # moneylines (no draw to insure), and the Draw outcome itself (a draw
+    # bet can't be "money back if it draws").
+    if promo.get("refund_on_draw") and not _is_draw_insurable(edge):
         return False
     # Voidable-prop lineup window (see PROMO_PROP_WINDOW_MIN). Applies
     # ONLY when the promo has a settle-always fallback worth waiting for:
@@ -7204,8 +7289,12 @@ def select_promo_edge(promo: dict,
 
         def rank(e):
             # Post-boost EV% — comparable to MIN_EV_PERCENT directly.
-            return calc_ev(e["fair_prob"] / 100,
-                           apply_profit_boost(e["odds_decimal"], bp))
+            # _draw_refund_ev_pct adds P(draw) for a money-back-on-draw
+            # promo (0 otherwise), so the picker ranks insured moneylines
+            # by their true value, not the bare win EV.
+            return (calc_ev(e["fair_prob"] / 100,
+                            apply_profit_boost(e["odds_decimal"], bp))
+                    + _draw_refund_ev_pct(promo, e))
 
     staged: dict[int, list[dict]] = {}
     for e in pool:
@@ -7906,8 +7995,9 @@ def compute_promo_picks(all_edges: list[dict],
                     boost_dec = apply_profit_boost(
                         best["odds_decimal"],
                         promo.get("boost_pct", 0) or 0)
-                    is_fallback = (calc_ev(best["fair_prob"] / 100,
-                                           boost_dec) < MIN_EV_PERCENT)
+                    is_fallback = (calc_ev(best["fair_prob"] / 100, boost_dec)
+                                   + _draw_refund_ev_pct(promo, best)
+                                   < MIN_EV_PERCENT)
                 used_keys.add(_make_pick_key(best))
             else:
                 # Diagnostic message when nothing was selected (empty pool).
@@ -8402,8 +8492,9 @@ def main():
             if matching:
                 best = matching[0]
                 boost_dec = apply_profit_boost(best["odds_decimal"],
-                                               promo["boost_pct"])
-                boosted_ev = calc_ev(best["fair_prob"] / 100, boost_dec)
+                                               promo.get("boost_pct") or 0)
+                boosted_ev = (calc_ev(best["fair_prob"] / 100, boost_dec)
+                              + _draw_refund_ev_pct(promo, best))
                 print(f"    Best boosted pick: {best['game']} — {best['outcome']}"
                       f" {_fmt_pt(best.get('point'), best.get('market', ''))}")
                 print(f"    {_fmt_am(best['odds_american'])} → {format_american(boost_dec)}"
