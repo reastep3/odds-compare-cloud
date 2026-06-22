@@ -704,6 +704,83 @@ def test_build_bonus_promo_no_amount_returns_none():
     assert _build_bonus_promo("FanDuel", "") is None
 
 
+# ── /drawbreaker: draw-refund-as-bonus valuation + selection ──────────
+# A "drawbreaker" (World Cup promo) refunds the stake as a BONUS bet on a
+# draw, so the refund is worth only DRAW_REFUND_BONUS_RETENTION of face
+# value — unlike cash money-back-on-draw, which keeps the full P(draw).
+
+from telegram_bot import _build_drawbreaker_promo, _select_drawbreaker_picks
+from odds_compare import _draw_refund_ev_pct, DRAW_REFUND_BONUS_RETENTION
+
+
+def test_draw_refund_bonus_is_discounted_vs_cash():
+    edge = {"market": "h2h", "outcome": "Senegal", "draw_fair_prob": 27.0,
+            "odds_decimal": 3.2, "fair_prob": 30.1}
+    cash  = {"refund_on_draw": True}
+    bonus = {"refund_on_draw": True, "refund_as_bonus": True}
+    assert _draw_refund_ev_pct(cash, edge) == 27.0
+    assert abs(_draw_refund_ev_pct(bonus, edge)
+               - 27.0 * DRAW_REFUND_BONUS_RETENTION) < 1e-9
+
+
+def test_draw_refund_zero_on_non_insurable():
+    bonus = {"refund_on_draw": True, "refund_as_bonus": True}
+    # The Draw outcome itself can't be draw-insured.
+    assert _draw_refund_ev_pct(
+        bonus, {"market": "h2h", "outcome": "Draw",
+                "draw_fair_prob": 27.0, "odds_decimal": 3.2}) == 0.0
+    # 2-way moneyline (no draw_fair_prob) → no refund.
+    assert _draw_refund_ev_pct(
+        bonus, {"market": "h2h", "outcome": "Lakers",
+                "odds_decimal": 2.0}) == 0.0
+
+
+def test_build_drawbreaker_promo():
+    p = _build_drawbreaker_promo("DraftKings", "$25")
+    assert p is not None
+    assert p["book"]            == "DraftKings"
+    assert p["sport"]           == "world_cup"
+    assert p["market"]          == "h2h"
+    assert p["promo_type"]      == "straight"
+    assert p["refund_on_draw"]  is True
+    assert p["refund_as_bonus"] is True
+    assert p["bet_amount"]      == 25
+
+
+def test_build_drawbreaker_promo_min_odds_and_no_amount():
+    p = _build_drawbreaker_promo("FanDuel", "$50 min:+150")
+    assert p is not None
+    assert p["bet_amount"] == 50
+    assert p["min_odds"]   == 150
+    # No dollar amount → unparseable.
+    assert _build_drawbreaker_promo("DraftKings", "world cup") is None
+
+
+def test_select_drawbreaker_ranks_by_total_ev_and_filters():
+    promo = _build_drawbreaker_promo("DraftKings", "$25")
+    wc = "soccer_fifa_world_cup"
+
+    def edge(outcome, dec, am, p_win, p_draw, book="DraftKings",
+             sport_key=wc):
+        return {"book": book, "sport_key": sport_key, "market": "h2h",
+                "outcome": outcome, "odds_decimal": dec, "odds_american": am,
+                "fair_prob": p_win, "draw_fair_prob": p_draw,
+                "game": f"{outcome} match"}
+
+    pool = [
+        edge("HighDraw", 3.2, 220, 30.1, 30.0),   # big draw prob → best
+        edge("LowDraw",  1.5, -200, 66.0, 12.0),  # low draw prob
+        edge("WrongBook", 3.0, 200, 33.0, 28.0, book="FanDuel"),    # filtered
+        edge("NotWC", 3.0, 200, 33.0, 28.0, sport_key="soccer_epl"),  # filtered
+        edge("Draw", 3.3, 230, 28.0, 28.0),       # the Draw outcome → filtered
+    ]
+    names = [e["outcome"] for e in _select_drawbreaker_picks(pool, promo)]
+    assert "WrongBook" not in names
+    assert "NotWC" not in names
+    assert "Draw" not in names
+    assert names[0] == "HighDraw"   # larger draw refund ranks it first
+
+
 # ── Stale-target-line outlier guard ────────────────────────────────────
 # Regression: a stale +10500 DK line on Maverick McNealy with the
 # consensus around +1500 produced a 373% pseudo-EV pick. Caused real

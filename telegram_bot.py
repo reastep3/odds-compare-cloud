@@ -76,6 +76,7 @@ ASK_PROMO_GAMESPEC = 22
 ASK_PHOTO_BOOK = 23
 ASK_QB_PICK, ASK_QB_TRUE, ASK_QB_BOOST, ASK_QB_BANKROLL = range(30, 34)
 ASK_BONUS_BOOK, ASK_BONUS_DETAILS = range(40, 42)
+ASK_DB_BOOK, ASK_DB_DETAILS = range(42, 44)
 
 _GAMESPEC_YES = "🎯 Specific game"
 _GAMESPEC_NO  = "Any game"
@@ -1402,6 +1403,228 @@ async def _run_bonus_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return ConversationHandler.END
 
 
+# ── /drawbreaker command — World Cup draw-refund promo ───────────────
+#
+# "Drawbreaker": bet a team moneyline on a World Cup match; if the match ends
+# in a DRAW (instead of your team winning), the stake is refunded as a BONUS
+# bet. So the play's value = the cash ML's EV + the draw-refund value, where
+# the refund is worth ~DRAW_REFUND_BONUS_RETENTION of the stake (a bonus bet,
+# not cash). The draw insurance is most valuable on high-draw-probability
+# matches, so the ranking naturally favors evenly-matched ties.
+#
+# Scoped to soccer only (World Cup is a soccer subset), so the fetch is cheap
+# — not a full slate. Reuses the existing draw-insurance machinery
+# (_is_draw_insurable / _draw_refund_ev_pct, now refund_as_bonus-aware).
+
+_DRAWBREAKER_HORIZON_DAYS = 3   # surface WC matches a few days out for planning
+
+_DB_DETAILS_PROMPT = (
+    "Enter the bet amount and any minimum odds.\n"
+    "Examples:  <code>$25</code>  ·  <code>$50 min:+150</code>\n"
+    "Min odds are optional — send just the amount to consider every match."
+)
+
+
+def _build_drawbreaker_promo(book: str, details: str) -> dict | None:
+    """Build a World Cup drawbreaker promo (bet a team ML; a draw refunds the
+    stake as a BONUS bet). Reads the stake + optional min-odds from `details`
+    (e.g. "$25", "$50 min:+150"). Returns None if no valid amount."""
+    short = "dk" if book == "DraftKings" else "fd"
+    toks = [t for t in (details or "").lower().split()
+            if t not in ("dk", "fd", "draftkings", "fanduel", "bonus",
+                         "drawbreaker", "world", "cup")]
+    # Parse as a bonus to extract the dollar amount (+ any min-odds), then
+    # convert into a World Cup cash-ML draw-refund promo.
+    promo = parse_promo(f"{short} bonus " + " ".join(toks))
+    if promo is None or not promo.get("bet_amount"):
+        return None
+    stake = promo["bet_amount"]
+    promo["promo_type"]      = "straight"    # a cash ML bet, not a free bet
+    promo["sport"]           = "world_cup"
+    promo["market"]          = "h2h"
+    promo["refund_on_draw"]  = True
+    promo["refund_as_bonus"] = True          # refund is a bonus bet, ~70% value
+    promo["label"]           = f"{book} ${stake:.0f} World Cup Drawbreaker"
+    return promo
+
+
+def _select_drawbreaker_picks(pool: list[dict], promo: dict,
+                              limit: int = 5) -> list[dict]:
+    """Insurable World Cup team moneylines on the promo's book, ranked by total
+    EV (cash-ML EV + the discounted draw-refund value), best first."""
+    from odds_compare import (_is_draw_insurable, _meets_min_odds,
+                              _starts_within_days, WORLD_CUP_SPORT_KEYS,
+                              calc_ev, _draw_refund_ev_pct)
+    cands = [
+        e for e in pool
+        if e.get("book") == promo["book"]
+        and e.get("sport_key") in WORLD_CUP_SPORT_KEYS
+        and _is_draw_insurable(e)
+        and _meets_min_odds(promo, e)
+        and _starts_within_days(e, _DRAWBREAKER_HORIZON_DAYS)
+    ]
+
+    def total_ev(e):
+        return (calc_ev(e["fair_prob"] / 100, e["odds_decimal"])
+                + _draw_refund_ev_pct(promo, e))
+
+    cands.sort(key=total_ev, reverse=True)
+    return cands[:limit]
+
+
+def format_drawbreaker_picks(picks: list[dict], promo: dict) -> str:
+    """Format the ranked drawbreaker candidates into a Telegram message."""
+    from odds_compare import (calc_ev, _draw_refund_ev_pct,
+                              DRAW_REFUND_BONUS_RETENTION)
+    stake = promo.get("bet_amount") or 0
+    ret   = DRAW_REFUND_BONUS_RETENTION
+    lines = [f"<b>WORLD CUP DRAWBREAKER — {_esc(promo['book'])} ${stake:.0f}</b>"]
+    lines.append(
+        f"<i>Bet a team moneyline; a draw refunds your ${stake:.0f} as a bonus "
+        f"bet (~{ret * 100:.0f}% value). Ranked by total EV incl. the refund.</i>")
+    for i, e in enumerate(picks, 1):
+        p_win   = e["fair_prob"]
+        p_draw  = e.get("draw_fair_prob") or 0
+        base_ev = calc_ev(p_win / 100, e["odds_decimal"])
+        draw_ev = _draw_refund_ev_pct(promo, e)
+        total   = base_ev + draw_ev
+        refund_val   = ret * (p_draw / 100) * stake
+        total_dollar = total / 100 * stake
+        odds = _format_american(e["odds_american"])
+        lines.append(f"\n<b>{i}. {_esc(e['game'])} — {_esc(e['outcome'])}</b> {odds}")
+        lines.append(
+            f"  Win {p_win:.1f}% | Draw {p_draw:.1f}% | base EV {base_ev:+.1f}%")
+        lines.append(
+            f"  Draw refund ≈ +{draw_ev:.1f}% EV (${refund_val:.2f} bonus value)")
+        lines.append(
+            f"  <b>Total EV {total:+.1f}%</b> → ~${total_dollar:+.2f} on ${stake:.0f}")
+        link = _deep_link(e)
+        if link:
+            short = "DK" if "draftkings" in link else "FD"
+            lines.append(f'  <a href="{link}">Open in {short}</a>')
+    return "\n".join(lines)
+
+
+async def cmd_drawbreaker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Find the best World Cup moneyline to use a 'drawbreaker' promo on (stake
+    refunded as a bonus bet on a draw). Inline form: /drawbreaker dk $25"""
+    if not is_authorized(update):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+    if _run_lock.locked() or context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    books = get_user_books(update)
+    if not books:
+        await update.message.reply_text("Set up your books first with /books")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    args_text = " ".join(context.args).strip() if context.args else ""
+
+    explicit_book = (_parse_run_single_book(args_text.split()[0])
+                     if args_text else None)
+    book = explicit_book or (books[0] if len(books) == 1 else None)
+
+    if book is None:
+        context.user_data["_db_details"] = args_text
+        await update.message.reply_text(
+            "Which book is the drawbreaker promo on?",
+            reply_markup=_run_single_keyboard())
+        return ASK_DB_BOOK
+
+    if args_text:
+        promo = _build_drawbreaker_promo(book, args_text)
+        if promo is not None:
+            return await _run_drawbreaker_search(update, context, promo)
+
+    context.user_data["_db_book"] = book
+    await update.message.reply_text(
+        f"<b>{book}</b> World Cup drawbreaker.\n{_DB_DETAILS_PROMPT}",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    return ASK_DB_DETAILS
+
+
+async def recv_db_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    book = _parse_run_single_book(update.message.text)
+    if book is None:
+        await update.message.reply_text(
+            "Tap DraftKings or FanDuel.", reply_markup=_run_single_keyboard())
+        return ASK_DB_BOOK
+    context.user_data["_db_book"] = book
+    details = context.user_data.get("_db_details", "")
+    if details:
+        promo = _build_drawbreaker_promo(book, details)
+        if promo is not None:
+            return await _run_drawbreaker_search(update, context, promo)
+    await update.message.reply_text(
+        f"<b>{book}</b> World Cup drawbreaker.\n{_DB_DETAILS_PROMPT}",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    return ASK_DB_DETAILS
+
+
+async def recv_db_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    book = context.user_data.get("_db_book")
+    if not book:
+        await update.message.reply_text("Session expired — start again with /drawbreaker.")
+        return ConversationHandler.END
+    promo = _build_drawbreaker_promo(book, update.message.text)
+    if promo is None:
+        await update.message.reply_text(
+            "I couldn't find a dollar amount in that. Try <code>$25</code> "
+            "or <code>$50 min:+150</code>.", parse_mode="HTML")
+        return ASK_DB_DETAILS
+    return await _run_drawbreaker_search(update, context, promo)
+
+
+async def _run_drawbreaker_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                  promo: dict) -> int:
+    """Soccer-scoped fetch + drawbreaker selection; sends the ranked picks."""
+    chat_id = update.effective_chat.id
+    if _run_lock.locked() or context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    from odds_compare import _derive_promo_scope
+    scope = _derive_promo_scope([promo])   # soccer-only — cheap, not full slate
+
+    await update.message.reply_text(
+        f"Searching World Cup moneylines for: <b>{_esc(promo['label'])}</b>\n"
+        f"Scoped soccer fetch — should be quick.",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+    context.bot_data["running"] = True
+    async with _run_lock:
+        try:
+            fetched = await asyncio.to_thread(
+                _run_odds_compare_fetch, 100.0, 100.0, scope, [promo])
+        except Exception as e:
+            context.bot_data["running"] = False
+            await context.bot.send_message(chat_id, f"Drawbreaker search failed: {e}")
+            return ConversationHandler.END
+        finally:
+            context.bot_data["running"] = False
+
+    pool = fetched.get("promo_pool") or fetched.get("all_edges") or []
+    picks = _select_drawbreaker_picks(pool, promo)
+    if not picks:
+        await context.bot.send_message(
+            chat_id,
+            "No World Cup moneylines with draw insurance found in the next "
+            f"{_DRAWBREAKER_HORIZON_DAYS} days. (Drawbreaker needs 3-way "
+            "moneylines from soccer_fifa_world_cup — check the WC schedule.)")
+        return ConversationHandler.END
+    msg = format_drawbreaker_picks(picks, promo)
+    for chunk in _split_message(msg):
+        await _safe_send(context.bot, chat_id, chunk, parse_mode="HTML",
+                         disable_web_page_preview=True)
+        await asyncio.sleep(_BURST_SEND_DELAY)
+    return ConversationHandler.END
+
+
 async def cmd_run_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List +EV picks on currently in-progress games. For grabbing a quick line
     to attach a live promo to. No archive, no Excel, no prev-pick tracking."""
@@ -2573,6 +2796,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/run_live    — Quick +EV picks on currently live games (for promos)\n"
         "/quickbet    — Kelly calculator for promos (no API call, no archive)\n"
         "/bonus       — Best use of a free/bonus bet ($ amount + any limits)\n"
+        "/drawbreaker — Best World Cup ML for a draw-refund (bonus-bet) promo\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
         "/digest      — Send the last-7-days P&L digest now\n"
@@ -3269,6 +3493,7 @@ def main():
             BotCommand("run_live",     "Live in-progress games for promo picks"),
             BotCommand("quickbet",     "Kelly calculator for promos (no API, no archive)"),
             BotCommand("bonus",        "Best use of a free/bonus bet ($ amount + limits)"),
+            BotCommand("drawbreaker",  "World Cup draw-refund promo: best ML to use it on"),
             BotCommand("kelly",        "Show or set your Kelly fraction"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("digest",       "Send the last-7-days P&L digest now"),
@@ -3392,11 +3617,25 @@ def main():
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
+    drawbreaker_handler = ConversationHandler(
+        entry_points=[CommandHandler("drawbreaker", cmd_drawbreaker)],
+        states={
+            ASK_DB_BOOK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_db_book),
+            ],
+            ASK_DB_DETAILS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_db_details),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(books_handler)
     app.add_handler(conv_handler)
     app.add_handler(bt_handler)
     app.add_handler(quickbet_handler)
     app.add_handler(bonus_handler)
+    app.add_handler(drawbreaker_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))

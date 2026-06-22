@@ -2328,6 +2328,15 @@ PROMO_ODDS_WINDOWS: dict[str, list[tuple[int, int]]] = {
     "boost":     [(-200, 450), (-300, 700)],
 }
 
+# "Drawbreaker"-style promos: bet a team moneyline; if the match draws, the
+# stake is refunded as a BONUS bet rather than cash. A bonus bet is worth only
+# its winnings-only cash-equivalent, so the draw refund is valued at this
+# retention fraction of face value (a free bet placed in the +200..+450 band
+# retains ~0.67–0.82; 0.70 is a deliberately conservative central estimate, so
+# the promo's value is never overstated). Plain cash money-back-on-draw keeps
+# the full P(draw) — see _draw_refund_ev_pct.
+DRAW_REFUND_BONUS_RETENTION = 0.70
+
 # Voidable player props (goalscorer, HR, double-double, ...) carry
 # participation risk: a DNP voids the bet and kills the token, and quoted
 # prop odds are priced for cash bettors (void = refund), i.e. conditional
@@ -7173,7 +7182,13 @@ def _draw_refund_ev_pct(promo: dict, edge: dict) -> float:
         return 0.0
     if not _is_draw_insurable(edge):
         return 0.0
-    return edge["draw_fair_prob"]   # stored as a percent, like fair_prob
+    refund = edge["draw_fair_prob"]   # stored as a percent, like fair_prob
+    # A "drawbreaker" refunds the stake as a BONUS bet (worth only its
+    # winnings-only cash-equivalent), so discount the refund to its retention
+    # value. Plain cash money-back-on-draw keeps the full P(draw).
+    if promo.get("refund_as_bonus"):
+        refund *= DRAW_REFUND_BONUS_RETENTION
+    return refund
 
 
 def _promo_kelly(promo: dict, edge: dict, dec: float, p_win: float,
