@@ -28,5 +28,9 @@ backtest_*.zip
 prev_play_keys.json
 users.json
 
+# ML training data + auto-tuner output (generated locally from backtest reports)
+training_table.csv
+gate_proposals.txt
+
 # Logs
 *.log

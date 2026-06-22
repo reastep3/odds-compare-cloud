@@ -4,3 +4,9 @@
 -r requirements.txt
 
 pytest==9.0.3
+
+# ML auto-calibration workstream (LOCAL ONLY — never imported by the live bot,
+# so it stays out of requirements.txt and the Fly image). Used by
+# build_training_table.py / train_model.py.
+scikit-learn==1.9.0
+numpy==2.5.0
