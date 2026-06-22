@@ -585,6 +585,41 @@ def test_parse_promo_single_token_homer_slang():
     assert promo["market"] == "hr"
 
 
+# ── parse_promo total-bases keyword/phrase coverage ───────────────────
+# Regression: "dk 50% total bases mlb" parsed as market="totals" (game
+# over/under) because the bare "total" keyword fired before any phrase
+# matched, and "bases" was dropped. A total-bases boost would then land
+# on a game total instead of the batter prop. "total bases" must be a
+# two-word phrase so the lookahead beats the single-token mapping.
+
+def test_parse_promo_two_word_total_bases():
+    promo = parse_promo("dk 50% total bases mlb")
+    assert promo is not None
+    assert promo["book"]      == "DraftKings"
+    assert promo["sport"]     == "mlb"
+    assert promo["market"]    == "total_bases"
+    assert promo["boost_pct"] == 50
+
+
+def test_parse_promo_total_base_singular():
+    promo = parse_promo("dk 25% total base")
+    assert promo is not None
+    assert promo["market"] == "total_bases"
+
+
+def test_parse_promo_batter_tb_phrase():
+    promo = parse_promo("fd 50% batter tb")
+    assert promo is not None
+    assert promo["market"] == "total_bases"
+
+
+def test_parse_promo_bare_total_still_game_totals():
+    # The fix must NOT regress the existing bare "total" → game O/U mapping.
+    promo = parse_promo("dk 20% mlb total")
+    assert promo is not None
+    assert promo["market"] == "totals"
+
+
 # ── parse_promo player-points keyword/phrase coverage ─────────────────
 # FanDuel sends "30% profit boost on a player points prop" — a recurring
 # NBA-themed promo. The parser must recognize the two-word "player

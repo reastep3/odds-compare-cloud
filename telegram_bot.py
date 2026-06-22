@@ -263,6 +263,13 @@ PROMO_MARKET_PHRASES = {
     "1st inning":   "totals_1st",
     "home run":     "hr",
     "home runs":    "hr",
+    # MLB total bases (batter prop). MUST live here as a two-word phrase so
+    # the lookahead catches it before the bare "total" keyword below maps to
+    # game totals (over/under). "batter tb" mirrors the odds_compare alias and
+    # avoids a lone "tb" colliding with the Tampa Bay team code.
+    "total bases":  "total_bases",
+    "total base":   "total_bases",
+    "batter tb":    "total_bases",
     "player points": "pts",
     "goal scorer":   "goal",
     "goal scorers":  "goal",
@@ -275,6 +282,7 @@ PROMO_MARKET_PHRASES = {
 # back to mkt.capitalize() in the promo label builder.
 PROMO_MARKET_DISPLAY = {
     "totals_1st": "1st Inning",
+    "total_bases": "Total Bases",
     "pts":        "Player Points",
     "nhl_pts":    "Player Points",
     "goal":       "Anytime Goalscorer",
