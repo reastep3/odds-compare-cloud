@@ -291,18 +291,8 @@ def sort_proposals(props):
                                         -abs(p["flat_roi"]) * math.sqrt(p["n"])))
 
 
-def generate_proposals(csv_path=None):
-    """Structured proposals for programmatic use (the Telegram gate job).
-    Returns a sorted list of proposal dicts; prints nothing, writes nothing."""
-    rows = load(csv_path)
-    noop = lambda *a: None        # noqa: E731
-    props = analyze(rows, True, noop) + analyze(rows, False, noop)
-    return sort_proposals(props)
-
-
-def main():
-    out = Tee(OUT_TXT)
-    rows = load()
+def _run(rows, out):
+    """Run the full analysis, emitting each line via out(); return proposals."""
     dts = [r["date"] for r in rows]
     out(f"Gate auto-tuner — {len(rows)} settled picks, {min(dts)} .. {max(dts)}")
     out(f"Verdict rule: flat-ROI 95% CI clears 0 AND n>={MIN_BAND_N}.  "
@@ -322,6 +312,29 @@ def main():
         out(f"  {p['kind']:<8} {p['label']:<20} EV {p['band']:<8} "
             f"n={p['n']:<4} flatROI {p['flat_roi']:+.1f}% "
             f"[{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}]  $ROI {p['droi']:+.0f}%{scope}")
+    return allp
+
+
+def analysis_report(csv_path=None):
+    """Return (full_report_text, sorted_proposals).
+
+    The text is the complete per-cell analysis — the context the Telegram
+    Claude-analyst reasons over, so it can weigh cells the mechanical filter
+    rejected as thin and reference proposals by number."""
+    rows = load(csv_path)
+    buf = []
+    props = _run(rows, lambda *a: buf.append(" ".join(str(x) for x in a)))
+    return "\n".join(buf), props
+
+
+def generate_proposals(csv_path=None):
+    """Structured proposals only (back-compat wrapper around analysis_report)."""
+    return analysis_report(csv_path)[1]
+
+
+def main():
+    out = Tee(OUT_TXT)
+    _run(load(), out)
     out(f"\nWritten to {os.path.relpath(OUT_TXT, ROOT)}")
     out.close()
 

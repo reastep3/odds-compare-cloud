@@ -2575,15 +2575,88 @@ async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
 # gate_overrides.json, which odds_compare._qualifies consults. Uses only
 # openpyxl + stdlib (no numpy/sklearn), so it runs on the cloud as-is.
 
-def _refresh_and_propose() -> list[dict]:
-    """Blocking — rebuild the training table and return gate proposals.
+def _refresh_and_analyze() -> tuple[str, list[dict]]:
+    """Blocking — rebuild the training table; return (report_text, proposals).
     Call via asyncio.to_thread."""
     import build_training_table as btt
     import gate_autotune as gat
     from odds_compare import DATA_DIR
     csv_path = os.path.join(DATA_DIR, "training_table.csv")
     btt.build(out_csv=csv_path, dirs=btt.report_dirs())
-    return gat.generate_proposals(csv_path)
+    return gat.analysis_report(csv_path)
+
+
+# System prompt for the weekly Claude analyst — the judgment layer atop the
+# mechanical filter. Encodes what the calibration work established so its take
+# is grounded, not generic.
+_GATE_ANALYST_SYSTEM = (
+    "You are a sharp, skeptical sports-betting model-calibration analyst giving a "
+    "weekly second opinion to a quant bettor. He runs a +EV scanner whose live gate "
+    "(hand-tuned EV thresholds per sport/market) decides which picks to play. A "
+    "mechanical filter proposes PROMOTE/EXCLUDE changes wherever realized flat ROI's "
+    "95% CI clears zero versus the gate. Your job is a concise, opinionated take that "
+    "ADDS judgment the rigid filter cannot.\n\n"
+    "Ground rules, learned from this system's own data — apply them:\n"
+    "- The market is efficient and the hand-tuned gate is already near the frontier. "
+    "Bias toward NOT churning it; a good week often recommends 0-1 changes.\n"
+    "- Be skeptical of thin or isolated evidence: n<40, a single hot EV-band surrounded "
+    "by flat/negative neighbours, or a CI that barely excludes zero are usually "
+    "variance — say so even when the filter flagged them.\n"
+    "- Prefer EXCLUDE (cutting a significant bleeder) over speculative PROMOTE.\n"
+    "- CLV is a lower-variance edge signal, but it DIVERGES from realized ROI at high "
+    "EV: cells that beat the closing line can still lose money (stale-line traps). "
+    "Weigh CLV and ROI together and distrust promotes at EV >= 3%.\n"
+    "- Props and tennis are exact (all non-Pinnacle). Other game-line cells mix "
+    "Pinn/non-Pinn here, so treat their proposals as lower-confidence 'review' items.\n"
+    "- You may surface up to TWO cells the filter MISSED (just under threshold but with "
+    "a coherent CLV+ROI story) as 'watch' items, clearly labelled not-yet-actionable.\n\n"
+    "Output (Telegram plain text, no markdown headers, under ~180 words):\n"
+    "- One line per mechanical proposal: 'N. AGREE/PASS — <=12-word reason' (reference "
+    "the number so it maps to /gate_approve N).\n"
+    "- Optional 'Watch:' line with up to two near-miss cells.\n"
+    "- Final 'Bottom line:' one sentence on what, if anything, you'd actually do."
+)
+
+
+def _claude_gate_take(report_text: str, proposals: list[dict]) -> str:
+    """Blocking Claude call -> concise analyst take, or '' if unavailable/failed.
+    Graceful degradation: no key/client or any error returns '' and the weekly
+    message falls back to the mechanical proposals alone."""
+    client = _vision_client()
+    if client is None:
+        return ""
+    if proposals:
+        numbered = "\n".join(
+            f"{i}. {p['kind']} {p['label']} EV {p['band']} (n={p['n']}, "
+            f"flatROI {p['flat_roi']:+.1f}%, CI [{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}], "
+            f"{'exact' if p['exact'] else 'Pinn-mixed/review'})"
+            for i, p in enumerate(proposals, 1))
+    else:
+        numbered = "(the mechanical filter flagged nothing this week)"
+    user = (
+        "This week's per-cell gate analysis — broad +EV pool, flat ROI with 95% CI, "
+        "a DerSimonian-Laird shrunk estimate, avg CLV, and the live gate's current "
+        "play/skip per (sport x market x EV-band):\n\n"
+        f"{report_text}\n\n"
+        f"Mechanical filter proposals (map to /gate_approve N):\n{numbered}\n\n"
+        "Give your second-opinion recommendation now."
+    )
+    # Opus 4.8 for best judgment; fall back to Sonnet 4.6 (the model the vision
+    # feature already uses, so it's known-good on this account) if Opus is
+    # unavailable. Only if both fail do we degrade to mechanical-only.
+    for model in ("claude-opus-4-8", "claude-sonnet-4-6"):
+        try:
+            resp = client.messages.create(
+                model=model, max_tokens=800,
+                system=_GATE_ANALYST_SYSTEM,
+                messages=[{"role": "user", "content": user}])
+            parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+            txt = "\n".join(parts).strip()
+            if txt:
+                return txt[:3500]
+        except Exception as ex:
+            log.warning("[gate] Claude analyst model %s failed: %s", model, ex)
+    return ""
 
 
 def _gate_message(props: list[dict]) -> str:
@@ -2605,38 +2678,49 @@ def _gate_message(props: list[dict]) -> str:
     return "\n".join(lines)
 
 
+async def _gate_full(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    """Rebuild data, store proposals, get Claude's take.
+    Returns (mechanical_message_html, claude_take_text)."""
+    text, props = await asyncio.to_thread(_refresh_and_analyze)
+    context.bot_data["gate_proposals"] = props
+    take = await asyncio.to_thread(_claude_gate_take, text, props)
+    return _gate_message(props), take
+
+
 async def send_gate_proposals_job(context: ContextTypes.DEFAULT_TYPE):
-    """Weekly: regenerate proposals and DM the admin (silent if none)."""
+    """Weekly: DM the admin the mechanical proposals AND Claude's second opinion."""
     log.info("[gate] Weekly gate-proposals job firing")
     try:
-        props = await asyncio.to_thread(_refresh_and_propose)
+        mech_msg, take = await _gate_full(context)
     except Exception:
         log.exception("[gate] proposal generation failed")
         return
-    context.bot_data["gate_proposals"] = props
-    if not props:
-        log.info("[gate] no proposals this week — staying silent")
-        return
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID, text=_gate_message(props), parse_mode="HTML")
+            chat_id=ADMIN_CHAT_ID, text=mech_msg, parse_mode="HTML")
+        if take:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="🧠 <b>Claude's take</b>\n" + take, parse_mode="HTML")
     except Exception:
         log.exception("[gate] failed to send proposals")
 
 
 async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """On-demand: run the tuner now and show proposals (admin only)."""
+    """On-demand: run the tuner + Claude's take now (admin only)."""
     if not is_admin(update):
         return
-    await update.message.reply_text("Crunching the latest reports…")
+    await update.message.reply_text("Crunching the latest reports + asking Claude…")
     try:
-        props = await asyncio.to_thread(_refresh_and_propose)
+        mech_msg, take = await _gate_full(context)
     except Exception as ex:
         log.exception("[gate] /gate failed")
         await update.message.reply_text(f"⚠️ Gate run failed: {ex}")
         return
-    context.bot_data["gate_proposals"] = props
-    await update.message.reply_text(_gate_message(props), parse_mode="HTML")
+    await update.message.reply_text(mech_msg, parse_mode="HTML")
+    if take:
+        await update.message.reply_text(
+            "🧠 <b>Claude's take</b>\n" + take, parse_mode="HTML")
 
 
 async def cmd_gate_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3148,10 +3232,11 @@ def main():
 
         # Weekly gate auto-tuner — Sundays 11:00 AM ET (after the 10 AM
         # digest). Rebuilds the training table from the latest backtest
-        # reports and DMs the admin any PROMOTE/EXCLUDE proposals where
-        # realized results significantly disagree with the live gate. Silent
-        # when there are none. Approve via /gate_approve to record an override
-        # (gate_overrides.json) that odds_compare._qualifies then honours.
+        # reports and DMs the admin two things side by side: the mechanical
+        # PROMOTE/EXCLUDE proposals (95% CI vs the live gate) and a Claude
+        # analyst's second opinion over the full per-cell data. Approve via
+        # /gate_approve to record an override (gate_overrides.json) that
+        # odds_compare._qualifies then honours.
         app.job_queue.run_daily(
             send_gate_proposals_job,
             time=dtime(hour=11, minute=0,
