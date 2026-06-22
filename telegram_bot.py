@@ -75,6 +75,7 @@ ASK_RUN_SINGLE_BOOK = 21
 ASK_PROMO_GAMESPEC = 22
 ASK_PHOTO_BOOK = 23
 ASK_QB_PICK, ASK_QB_TRUE, ASK_QB_BOOST, ASK_QB_BANKROLL = range(30, 34)
+ASK_BONUS_BOOK, ASK_BONUS_DETAILS = range(40, 42)
 
 _GAMESPEC_YES = "🎯 Specific game"
 _GAMESPEC_NO  = "Any game"
@@ -1231,6 +1232,174 @@ async def recv_run_single_book(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["_single_book_override"] = [book]
     context.args = ["skip"] if skip else []
     return await cmd_run(update, context)
+
+
+# ── /bonus command — best-usage search for a free/bonus bet ──────────
+#
+# A bonus (free) bet pays out only winnings — the stake never returns — so
+# the optimal play maximizes expected profit p·(odds−1), which favors higher
+# odds. select_promo_edge already encodes exactly this (the +200..+450 target
+# band, ranked by expected free-bet profit), so /bonus is a thin, bankroll-
+# free front end: it builds a bonus_bet promo from the amount + any
+# restrictions the user types, runs the normal promo pipeline, and returns the
+# single best play. Unlike /run_promos it never asks for a bankroll (a free
+# bet is fixed-stake) and skips the Summary / Play These output.
+
+_BONUS_DETAILS_PROMPT = (
+    "Enter the bonus amount and any restrictions.\n"
+    "Examples:  <code>$10</code>  ·  <code>$25 nba</code>  ·  "
+    "<code>$10 mlb min:+200</code>\n"
+    "Restrictions are optional — send just the amount for an "
+    "any-sport, any-market search."
+)
+
+
+def _build_bonus_promo(book: str, details: str) -> dict | None:
+    """Build a bonus_bet promo from a book and a free-text amount+restrictions
+    string (e.g. "$10", "$25 nba", "10 mlb min:+200"). Drops any stray book /
+    "bonus" tokens the user typed so parse_promo reads the next number as the
+    bonus amount. Returns None if no valid dollar amount could be parsed."""
+    short = "dk" if book == "DraftKings" else "fd"
+    toks = [t for t in (details or "").lower().split()
+            if t not in ("dk", "fd", "draftkings", "fanduel", "bonus")]
+    promo = parse_promo(f"{short} bonus " + " ".join(toks))
+    if (promo is None
+            or promo.get("promo_type") != "bonus_bet"
+            or not promo.get("bet_amount")):
+        return None
+    return promo
+
+
+async def cmd_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Find the best use of a free/bonus bet. Optional inline form:
+    /bonus $10  ·  /bonus dk $25 nba min:+200"""
+    if not is_authorized(update):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+    if _run_lock.locked() or context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    books = get_user_books(update)
+    if not books:
+        await update.message.reply_text("Set up your books first with /books")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    args_text = " ".join(context.args).strip() if context.args else ""
+
+    # Book: an explicit dk/fd token wins; else the only configured book; else ask.
+    explicit_book = (_parse_run_single_book(args_text.split()[0])
+                     if args_text else None)
+    book = explicit_book or (books[0] if len(books) == 1 else None)
+
+    if book is None:
+        context.user_data["_bonus_details"] = args_text
+        await update.message.reply_text(
+            "Which book is the bonus bet on?",
+            reply_markup=_run_single_keyboard())
+        return ASK_BONUS_BOOK
+
+    # Have a book — if the args already carry a valid amount, run immediately.
+    if args_text:
+        promo = _build_bonus_promo(book, args_text)
+        if promo is not None:
+            return await _run_bonus_search(update, context, promo)
+
+    context.user_data["_bonus_book"] = book
+    await update.message.reply_text(
+        f"<b>{book}</b> bonus bet.\n{_BONUS_DETAILS_PROMPT}",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    return ASK_BONUS_DETAILS
+
+
+async def recv_bonus_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    book = _parse_run_single_book(update.message.text)
+    if book is None:
+        await update.message.reply_text(
+            "Tap DraftKings or FanDuel.", reply_markup=_run_single_keyboard())
+        return ASK_BONUS_BOOK
+    context.user_data["_bonus_book"] = book
+    details = context.user_data.get("_bonus_details", "")
+    if details:
+        promo = _build_bonus_promo(book, details)
+        if promo is not None:
+            return await _run_bonus_search(update, context, promo)
+    await update.message.reply_text(
+        f"<b>{book}</b> bonus bet.\n{_BONUS_DETAILS_PROMPT}",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    return ASK_BONUS_DETAILS
+
+
+async def recv_bonus_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    book = context.user_data.get("_bonus_book")
+    if not book:
+        await update.message.reply_text("Session expired — start again with /bonus.")
+        return ConversationHandler.END
+    promo = _build_bonus_promo(book, update.message.text)
+    if promo is None:
+        await update.message.reply_text(
+            "I couldn't find a dollar amount in that. Try <code>$10</code> "
+            "or <code>$25 nba min:+200</code>.", parse_mode="HTML")
+        return ASK_BONUS_DETAILS
+    return await _run_bonus_search(update, context, promo)
+
+
+async def _run_bonus_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            promo: dict) -> int:
+    """Full-slate fetch + promo pipeline for one bonus_bet promo; sends the
+    single best play. No bankroll (free bet = fixed stake), no Excel."""
+    chat_id = update.effective_chat.id
+
+    # Game-specific bonus bets need the slate-aware game picker in /run_promos.
+    if promo.get("game_specific"):
+        await update.message.reply_text(
+            "Game-specific bonus bets need the game picker — use /run_promos "
+            "for those. /bonus covers any-game searches.",
+            reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    if _run_lock.locked() or context.bot_data.get("running"):
+        await update.message.reply_text(
+            "A run is already in progress. Wait for it to finish.")
+        return ConversationHandler.END
+
+    from odds_compare import AN_SPORTS
+    await update.message.reply_text(
+        f"Searching for: <b>{_esc(promo['label'])}</b>\n"
+        f"Fetching {len(AN_SPORTS)} sports — ~60-90s.",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+    context.bot_data["running"] = True
+    async with _run_lock:
+        try:
+            # Bonus bets force a full fetch (scope=None): the best free-bet
+            # play can sit in any sport/market, and _derive_promo_scope returns
+            # None for bonus_bet anyway. Bankrolls are irrelevant to a fixed-
+            # stake free bet, so pass placeholders.
+            fetched = await asyncio.to_thread(
+                _run_odds_compare_fetch, 100.0, 100.0, None, [promo])
+            result = await asyncio.to_thread(
+                _run_odds_compare_finalize, fetched, [promo], True)
+        except Exception as e:
+            context.bot_data["running"] = False
+            await context.bot.send_message(chat_id, f"Bonus search failed: {e}")
+            return ConversationHandler.END
+        finally:
+            context.bot_data["running"] = False
+
+    picks = result.get("promo_picks", [])
+    msg = format_promo_picks(picks, {}, kelly_fraction=get_user_kelly(update))
+    if not msg:
+        await context.bot.send_message(
+            chat_id, "No qualifying bonus-bet play found right now.")
+        return ConversationHandler.END
+    for chunk in _split_message(msg):
+        await _safe_send(context.bot, chat_id, chunk, parse_mode="HTML",
+                         disable_web_page_preview=True)
+        await asyncio.sleep(_BURST_SEND_DELAY)
+    return ConversationHandler.END
 
 
 async def cmd_run_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2403,6 +2572,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/run_promos  — Only show promo picks (skip Summary + Play These)\n"
         "/run_live    — Quick +EV picks on currently live games (for promos)\n"
         "/quickbet    — Kelly calculator for promos (no API call, no archive)\n"
+        "/bonus       — Best use of a free/bonus bet ($ amount + any limits)\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
         "/digest      — Send the last-7-days P&L digest now\n"
@@ -3098,6 +3268,7 @@ def main():
             BotCommand("run_promos",   "Only promo picks (bankroll prompt; skip Summary + Play These)"),
             BotCommand("run_live",     "Live in-progress games for promo picks"),
             BotCommand("quickbet",     "Kelly calculator for promos (no API, no archive)"),
+            BotCommand("bonus",        "Best use of a free/bonus bet ($ amount + limits)"),
             BotCommand("kelly",        "Show or set your Kelly fraction"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("digest",       "Send the last-7-days P&L digest now"),
@@ -3208,10 +3379,24 @@ def main():
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
+    bonus_handler = ConversationHandler(
+        entry_points=[CommandHandler("bonus", cmd_bonus)],
+        states={
+            ASK_BONUS_BOOK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_bonus_book),
+            ],
+            ASK_BONUS_DETAILS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_bonus_details),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(books_handler)
     app.add_handler(conv_handler)
     app.add_handler(bt_handler)
     app.add_handler(quickbet_handler)
+    app.add_handler(bonus_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))

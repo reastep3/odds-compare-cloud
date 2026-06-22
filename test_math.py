@@ -656,6 +656,54 @@ def test_parse_promo_player_points_with_filler():
     assert promo["boost_pct"] == 30
 
 
+# ── /bonus command helper: _build_bonus_promo ─────────────────────────
+# The /bonus command builds a bonus_bet promo from a book + free-text
+# "amount and restrictions" string. It must read the dollar amount,
+# accept optional sport/market/min-odds restrictions, tolerate stray
+# book/"bonus" tokens, and reject input with no amount.
+
+from telegram_bot import _build_bonus_promo
+
+
+def test_build_bonus_promo_amount_only():
+    p = _build_bonus_promo("DraftKings", "$10")
+    assert p is not None
+    assert p["book"]       == "DraftKings"
+    assert p["promo_type"] == "bonus_bet"
+    assert p["bet_amount"] == 10
+    assert p["sport"]  == "all"
+    assert p["market"] == "all"
+
+
+def test_build_bonus_promo_bare_number_amount():
+    p = _build_bonus_promo("FanDuel", "25")
+    assert p is not None
+    assert p["book"]       == "FanDuel"
+    assert p["bet_amount"] == 25
+
+
+def test_build_bonus_promo_with_restrictions():
+    p = _build_bonus_promo("FanDuel", "$25 nba min:+200")
+    assert p is not None
+    assert p["bet_amount"] == 25
+    assert p["sport"]    == "nba"
+    assert p["min_odds"] == 200
+
+
+def test_build_bonus_promo_strips_stray_book_and_bonus_tokens():
+    # User may paste "dk bonus $10 mlb" — the helper supplies its own book +
+    # "bonus" tokens, so duplicates must be dropped rather than break parsing.
+    p = _build_bonus_promo("DraftKings", "dk bonus $10 mlb")
+    assert p is not None
+    assert p["bet_amount"] == 10
+    assert p["sport"]      == "mlb"
+
+
+def test_build_bonus_promo_no_amount_returns_none():
+    assert _build_bonus_promo("DraftKings", "nba") is None
+    assert _build_bonus_promo("FanDuel", "") is None
+
+
 # ── Stale-target-line outlier guard ────────────────────────────────────
 # Regression: a stale +10500 DK line on Maverick McNealy with the
 # consensus around +1500 produced a 373% pseudo-EV pick. Caused real
