@@ -94,10 +94,41 @@ def to_float(v):
 
 # ───────────────────────── file discovery ───────────────────────────
 
-def all_files():
-    files = sorted(glob.glob(os.path.join(ROOT, "backtest_*.xlsx")))
-    files += sorted(glob.glob(os.path.join(ROOT, "_bt_recent", "*.xlsx")))
-    files += sorted(glob.glob(os.path.join(ROOT, "Backtest Archives", "*.xlsx")))
+def report_dirs():
+    """Directories to scan for backtest_*.xlsx, local + cloud.
+
+    Locally: repo root plus the pull-down dirs. On the cloud bot, OUTPUT_DIR
+    (the Fly volume, e.g. /data/output) is where the daily backtest writes its
+    reports, with older ones under archive/ or Backtest Archives/."""
+    cands = [ROOT,
+             os.path.join(ROOT, "_bt_recent"),
+             os.path.join(ROOT, "Backtest Archives")]
+    out_dir = os.environ.get("OUTPUT_DIR")
+    if out_dir:
+        cands += [out_dir,
+                  os.path.join(out_dir, "archive"),
+                  os.path.join(out_dir, "Backtest Archives")]
+    seen, dirs = set(), []
+    for d in cands:
+        if d and os.path.isdir(d):
+            rp = os.path.realpath(d)
+            if rp not in seen:
+                seen.add(rp)
+                dirs.append(d)
+    return dirs
+
+
+def all_files(dirs=None):
+    """Unique backtest_*.xlsx across report_dirs (deduped by real path).
+    Globs backtest_* specifically so OUTPUT_DIR's ev_edges_*.xlsx are skipped."""
+    dirs = dirs if dirs is not None else report_dirs()
+    seen, files = set(), []
+    for d in dirs:
+        for fp in sorted(glob.glob(os.path.join(d, "backtest_*.xlsx"))):
+            rp = os.path.realpath(fp)
+            if rp not in seen:
+                seen.add(rp)
+                files.append(fp)
     return files
 
 
@@ -212,10 +243,10 @@ def merge(a, b):
     return out
 
 
-def load():
+def load(dirs=None):
     """Dedup'd broad-pool picks across every graded report."""
     bets = {}
-    files = all_files()
+    files = all_files(dirs)
     skipped = 0
     for fp in files:
         try:
@@ -256,8 +287,8 @@ CSV_COLS = [
 ]
 
 
-def write_csv(bets):
-    with open(OUT_CSV, "w", newline="", encoding="utf-8") as f:
+def write_csv(bets, out_csv=None):
+    with open(out_csv or OUT_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(CSV_COLS)
         for rec in bets.values():
@@ -396,6 +427,14 @@ def report(bets, files_read):
     gl_ev = [p for p in games if p["ev"] is not None]
     for lbl, fn in tiers:
         _line(lbl, [p for p in gl_ev if fn(p["ev"])], indent=2)
+
+
+def build(out_csv=None, dirs=None):
+    """Programmatic entry: regenerate the training table, return the bets dict.
+    Used by the Telegram gate-proposals job (cloud-aware via report_dirs)."""
+    bets, _ = load(dirs)
+    write_csv(bets, out_csv)
+    return bets
 
 
 def main():

@@ -92,10 +92,10 @@ def flat_ci(units):
 
 # ───────────────────────── load ──────────────────────────────────────
 
-def load():
+def load(csv_path=None):
     """Settled WIN/LOSS picks -> list of dicts. Props mapped to gate keys."""
     rows = []
-    with open(CSV_PATH, encoding="utf-8") as f:
+    with open(csv_path or CSV_PATH, encoding="utf-8") as f:
         for r in csv.DictReader(f):
             if r["won"] not in ("0", "1"):
                 continue
@@ -194,6 +194,24 @@ class Tee:
         self.f.close()
 
 
+def _mk_proposal(kind, is_prop, sport, market, lo, hi, n, m, blo, bhi, droi):
+    """Structured proposal record (consumed by gate_overrides + the bot)."""
+    return {
+        "kind": kind, "is_prop": bool(is_prop),
+        "sport": "" if is_prop else sport, "market": market,
+        "ev_lo": float(lo), "ev_hi": float(hi), "n": int(n),
+        "flat_roi": round(m * 100, 1),
+        "ci_lo": round(blo * 100), "ci_hi": round(bhi * 100),
+        "droi": round(droi),
+        # Exact when the live gate behaviour is unambiguous: props are all
+        # non-Pinn, and tennis has no Pinnacle coverage. Other game lines mix
+        # Pinn/non-Pinn in the reports, so flag them for review.
+        "exact": bool(is_prop or sport == "TENNIS"),
+        "label": market if is_prop else f"{sport} {market}",
+        "band": band_label(lo, hi),
+    }
+
+
 def analyze(rows, is_prop, out):
     grp = [r for r in rows if r["is_prop"] == is_prop]
     title = "PLAYER PROPS  (exact — all non-Pinnacle)" if is_prop else \
@@ -252,12 +270,12 @@ def analyze(rows, is_prop, out):
             tag = ""
             if verdict == "PLAY" and not plays:
                 tag = "  <= PROMOTE"
-                proposals.append(("PROMOTE", label, band_label(lo_b, hi_b),
-                                  nb, bm, blo, bhi, droi))
+                proposals.append(_mk_proposal("PROMOTE", is_prop, sport, market,
+                                              lo_b, hi_b, nb, bm, blo, bhi, droi))
             elif verdict == "SKIP" and plays:
                 tag = "  <= EXCLUDE"
-                proposals.append(("EXCLUDE", label, band_label(lo_b, hi_b),
-                                  nb, bm, blo, bhi, droi))
+                proposals.append(_mk_proposal("EXCLUDE", is_prop, sport, market,
+                                              lo_b, hi_b, nb, bm, blo, bhi, droi))
 
             out(f"    {band_label(lo_b,hi_b):<9}{nb:>5}{f'{w}/{nb-w}':>9}"
                 f"{bm*100:>+8.1f}%{f'[{blo*100:+.0f},{bhi*100:+.0f}]':>16}"
@@ -265,6 +283,21 @@ def analyze(rows, is_prop, out):
                 f"{verdict:>8}{tag}")
 
     return proposals
+
+
+def sort_proposals(props):
+    """EXCLUDE first, then by evidence strength |flatROI| * sqrt(n)."""
+    return sorted(props, key=lambda p: (p["kind"] != "EXCLUDE",
+                                        -abs(p["flat_roi"]) * math.sqrt(p["n"])))
+
+
+def generate_proposals(csv_path=None):
+    """Structured proposals for programmatic use (the Telegram gate job).
+    Returns a sorted list of proposal dicts; prints nothing, writes nothing."""
+    rows = load(csv_path)
+    noop = lambda *a: None        # noqa: E731
+    props = analyze(rows, True, noop) + analyze(rows, False, noop)
+    return sort_proposals(props)
 
 
 def main():
@@ -281,17 +314,14 @@ def main():
     out("\n" + "=" * 90)
     out("ACTIONABLE PROPOSALS  (data significantly disagrees with the live gate)")
     out("=" * 90)
-    allp = pp + gl  # props first (exact), then game lines (review)
+    allp = sort_proposals(pp + gl)
     if not allp:
         out("None — the live gate already matches every significant slice.")
-    for kind, label, band, n, m, lo, hi, droi in sorted(
-            allp, key=lambda p: (p[0] != "EXCLUDE", -abs(p[4]) * math.sqrt(p[3]))):
-        scope = "" if label.split()[0] in ("pts", "reb", "ast", "threes",
-                                           "strikeouts", "total_bases", "hits",
-                                           "rbis", "sog", "hr", "pra", "dd") else " [review: Pinn-mixed]"
-        out(f"  {kind:<8} {label:<20} EV {band:<8} "
-            f"n={n:<4} flatROI {m*100:+.1f}% [{lo*100:+.0f},{hi*100:+.0f}]  "
-            f"$ROI {droi:+.0f}%{scope}")
+    for p in allp:
+        scope = "" if p["exact"] else " [review: Pinn-mixed]"
+        out(f"  {p['kind']:<8} {p['label']:<20} EV {p['band']:<8} "
+            f"n={p['n']:<4} flatROI {p['flat_roi']:+.1f}% "
+            f"[{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}]  $ROI {p['droi']:+.0f}%{scope}")
     out(f"\nWritten to {os.path.relpath(OUT_TXT, ROOT)}")
     out.close()
 

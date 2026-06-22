@@ -27,6 +27,7 @@ backtest_*.zip
 # State files (machine-local; persistent volume in cloud)
 prev_play_keys.json
 users.json
+gate_overrides.json
 
 # ML training data + auto-tuner output (generated locally from backtest reports)
 training_table.csv

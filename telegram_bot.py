@@ -2567,6 +2567,150 @@ async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
             log.warning(f"[digest] Failed to send to {uid}: {e}")
 
 
+# ── Gate auto-tuner: proposals + human approval ──────────────────────────
+# The apply-side of the auto-calibration loop. _refresh_and_propose rebuilds
+# the pick-level training table from the latest backtest reports and asks
+# gate_autotune which (sport×market×EV-band) cells significantly disagree with
+# the live gate. Approving a proposal records a narrow override in
+# gate_overrides.json, which odds_compare._qualifies consults. Uses only
+# openpyxl + stdlib (no numpy/sklearn), so it runs on the cloud as-is.
+
+def _refresh_and_propose() -> list[dict]:
+    """Blocking — rebuild the training table and return gate proposals.
+    Call via asyncio.to_thread."""
+    import build_training_table as btt
+    import gate_autotune as gat
+    from odds_compare import DATA_DIR
+    csv_path = os.path.join(DATA_DIR, "training_table.csv")
+    btt.build(out_csv=csv_path, dirs=btt.report_dirs())
+    return gat.generate_proposals(csv_path)
+
+
+def _gate_message(props: list[dict]) -> str:
+    if not props:
+        return ("🎯 <b>Gate auto-tuner</b>\nNo proposals — the live gate already "
+                "matches every statistically significant slice.")
+    lines = ["🎯 <b>Gate auto-tuner — proposals</b>",
+             "Where realized results significantly disagree with the live gate:\n"]
+    for i, p in enumerate(props, 1):
+        arrow = "➖ EXCLUDE" if p["kind"] == "EXCLUDE" else "➕ PROMOTE"
+        tag = "" if p["exact"] else "  <i>(review: Pinn-mixed)</i>"
+        lines.append(
+            f"<b>{i}. {arrow}</b>  {p['label']} @ EV {p['band']}\n"
+            f"    n={p['n']}, flat ROI {p['flat_roi']:+.1f}% "
+            f"(95% CI [{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}]){tag}")
+    lines.append("\n<code>/gate_approve N</code> apply · "
+                 "<code>/gate_dismiss N</code> ignore · "
+                 "<code>/gate_overrides</code> list active")
+    return "\n".join(lines)
+
+
+async def send_gate_proposals_job(context: ContextTypes.DEFAULT_TYPE):
+    """Weekly: regenerate proposals and DM the admin (silent if none)."""
+    log.info("[gate] Weekly gate-proposals job firing")
+    try:
+        props = await asyncio.to_thread(_refresh_and_propose)
+    except Exception:
+        log.exception("[gate] proposal generation failed")
+        return
+    context.bot_data["gate_proposals"] = props
+    if not props:
+        log.info("[gate] no proposals this week — staying silent")
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID, text=_gate_message(props), parse_mode="HTML")
+    except Exception:
+        log.exception("[gate] failed to send proposals")
+
+
+async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """On-demand: run the tuner now and show proposals (admin only)."""
+    if not is_admin(update):
+        return
+    await update.message.reply_text("Crunching the latest reports…")
+    try:
+        props = await asyncio.to_thread(_refresh_and_propose)
+    except Exception as ex:
+        log.exception("[gate] /gate failed")
+        await update.message.reply_text(f"⚠️ Gate run failed: {ex}")
+        return
+    context.bot_data["gate_proposals"] = props
+    await update.message.reply_text(_gate_message(props), parse_mode="HTML")
+
+
+async def cmd_gate_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Apply proposal N as a gate override (admin only)."""
+    if not is_admin(update):
+        return
+    props = context.bot_data.get("gate_proposals")
+    if not props:
+        await update.message.reply_text("Run /gate first to load proposals.")
+        return
+    try:
+        idx = int(context.args[0]) - 1
+        assert 0 <= idx < len(props)
+    except (IndexError, ValueError, AssertionError):
+        await update.message.reply_text(f"Usage: /gate_approve N  (1–{len(props)})")
+        return
+    import gate_overrides
+    p = props[idx]
+    entry = gate_overrides.add(gate_overrides.entry_from_proposal(p))
+    await update.message.reply_text(
+        f"✅ Applied <b>{p['kind']}</b> {p['label']} @ EV {p['band']}.\n"
+        f"Override <code>{entry['id']}</code> — active on the next scan. "
+        f"Undo: <code>/gate_dismiss {entry['id']}</code>",
+        parse_mode="HTML")
+
+
+async def cmd_gate_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Drop a pending proposal #, or remove an active override by id (admin)."""
+    if not is_admin(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /gate_dismiss N  (pending proposal #) or an override id.")
+        return
+    arg = context.args[0]
+    import gate_overrides
+    if gate_overrides.remove(arg):
+        await update.message.reply_text(
+            f"🗑️ Removed override <code>{arg}</code>.", parse_mode="HTML")
+        return
+    props = context.bot_data.get("gate_proposals") or []
+    try:
+        idx = int(arg) - 1
+        assert 0 <= idx < len(props)
+    except (ValueError, AssertionError):
+        await update.message.reply_text("Nothing matched that proposal # or id.")
+        return
+    dropped = props.pop(idx)
+    await update.message.reply_text(
+        f"Dismissed: {dropped['label']} @ EV {dropped['band']}.")
+
+
+async def cmd_gate_overrides(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List active gate overrides (admin only)."""
+    if not is_admin(update):
+        return
+    import gate_overrides
+    entries = gate_overrides.load()
+    if not entries:
+        await update.message.reply_text(
+            "No active gate overrides — the live gate is on its base rules.")
+        return
+    state = "ON" if gate_overrides.enabled() else "OFF (kill switch)"
+    lines = [f"<b>Active gate overrides</b> — {state}:"]
+    for e in entries:
+        ev = e.get("evidence") or {}
+        lines.append(
+            f"• <code>{e['id']}</code>\n    {e['kind']} "
+            f"{e.get('sport') or 'prop'} {e['market']} "
+            f"EV {e['ev_lo']:g}-{e['ev_hi']:g}%  (n={ev.get('n', '?')})")
+    lines.append("\nRemove one: <code>/gate_dismiss &lt;id&gt;</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Clear the run flag so /run isn't blocked if the user cancels mid-flow
     # (e.g. while the game-specific promo picker is open).
@@ -2865,6 +3009,7 @@ def main():
             BotCommand("kelly",        "Show or set your Kelly fraction"),
             BotCommand("backtest",     "Backtest past picks"),
             BotCommand("digest",       "Send the last-7-days P&L digest now"),
+            BotCommand("gate",         "Auto-tuner: propose gate threshold changes"),
             BotCommand("books",        "Set or change your sportsbooks"),
             BotCommand("status",       "Check if a run is in progress"),
             BotCommand("help",         "Show command list"),
@@ -2981,6 +3126,10 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("gate", cmd_gate))
+    app.add_handler(CommandHandler("gate_approve", cmd_gate_approve))
+    app.add_handler(CommandHandler("gate_dismiss", cmd_gate_dismiss))
+    app.add_handler(CommandHandler("gate_overrides", cmd_gate_overrides))
 
     # Weekly P&L digest — Sundays at 10:00 AM America/New_York.
     # Saturday's late NBA/NHL/NCAAB/CFB are all graded on ESPN by then,
@@ -2996,6 +3145,21 @@ def main():
             name="weekly_digest",
         )
         log.info("Weekly P&L digest scheduled — Sundays 10:00 AM ET.")
+
+        # Weekly gate auto-tuner — Sundays 11:00 AM ET (after the 10 AM
+        # digest). Rebuilds the training table from the latest backtest
+        # reports and DMs the admin any PROMOTE/EXCLUDE proposals where
+        # realized results significantly disagree with the live gate. Silent
+        # when there are none. Approve via /gate_approve to record an override
+        # (gate_overrides.json) that odds_compare._qualifies then honours.
+        app.job_queue.run_daily(
+            send_gate_proposals_job,
+            time=dtime(hour=11, minute=0,
+                       tzinfo=ZoneInfo("America/New_York")),
+            days=(6,),
+            name="gate_proposals",
+        )
+        log.info("Weekly gate auto-tuner scheduled — Sundays 11:00 AM ET.")
 
         # Daily one-day backtest — 3:00 AM ET, silent (no Telegram).
         # Just persists yesterday's graded results to /data/output for

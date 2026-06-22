@@ -2428,7 +2428,7 @@ _BLOCKED_SOCCER = frozenset({
 })
 
 
-def _qualifies(e):
+def _qualifies_base(e):
     """Return True if an edge qualifies for the 'Play These' tab.
 
     2026-06-02 — TENNIS activated. The 2026-05-22 add never fired live: the
@@ -2560,7 +2560,7 @@ def _qualifies(e):
     return False
 
 
-def _qualifies_prop(e):
+def _qualifies_prop_base(e):
     """Return True if a player prop edge qualifies for 'Play These'.
 
     2026-06-02 — pts raised 2.0 → 3.0. A ~2-month broad-pool replay
@@ -2624,6 +2624,41 @@ def _qualifies_prop(e):
         return ev >= 1.5
 
     return False
+
+
+def _gate_override(e: dict, base: bool, is_prop: bool) -> bool:
+    """Let a human-approved gate override (gate_overrides.py) flip the base
+    _qualifies decision. With no approved override — the default — `base` is
+    returned unchanged, so live behaviour is byte-identical to the hand-tuned
+    gate until the admin approves a proposal via /gate_approve. Any error
+    falls back to `base`, so overrides can never break the gate."""
+    try:
+        import logging
+        import gate_overrides
+        sport = (e.get("sport", "") or "").upper()
+        if sport.startswith("ATP") or sport.startswith("WTA"):
+            sport = "TENNIS"
+        forced = gate_overrides.decision_override(
+            is_prop, sport, e.get("market", ""), e.get("ev_pct"))
+        if forced is None or forced == base:
+            return base
+        logging.getLogger(__name__).info(
+            "[gate-override] %s %s ev=%.2f: base=%s -> %s",
+            sport or "prop", e.get("market"), e.get("ev_pct") or 0.0,
+            base, forced)
+        return forced
+    except Exception:
+        return base
+
+
+def _qualifies(e):
+    """Public game-line gate: base rules plus any human-approved override."""
+    return _gate_override(e, _qualifies_base(e), is_prop=False)
+
+
+def _qualifies_prop(e):
+    """Public prop gate: base rules plus any human-approved override."""
+    return _gate_override(e, _qualifies_prop_base(e), is_prop=True)
 
 
 def write_excel(edges: list[dict], dk_bankroll: float,
