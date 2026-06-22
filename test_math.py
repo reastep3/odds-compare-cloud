@@ -1071,10 +1071,11 @@ def test_qualifies_pinn_mlb_h2h_below_cap_still_qualifies():
     assert _qualifies(_q("MLB", "h2h", 1.0, pinn=True))
 
 
-def test_qualifies_tennis_h2h_non_pinn_floor_2pct():
-    # Was fully blocked; broad pool +8.3% on 266 picks.
-    assert not _qualifies(_q("TENNIS", "h2h", 1.9))
-    assert _qualifies(_q("TENNIS", "h2h", 2.0))
+def test_qualifies_tennis_h2h_non_pinn_floor_2pt5():
+    # 2026-06-22: non-Pinn floor 2.0 → 2.5, dropping the 2.0–2.5% band
+    # (-40.6% flat on n=28). The 2.5–5% pocket is retained.
+    assert not _qualifies(_q("TENNIS", "h2h", 2.4))
+    assert _qualifies(_q("TENNIS", "h2h", 2.5))
     assert _qualifies(_q("TENNIS", "h2h", 4.9))
     # Above the universal cap.
     assert not _qualifies(_q("TENNIS", "h2h", 5.0))
@@ -1097,13 +1098,14 @@ def test_qualifies_tennis_tournament_title_activates():
     assert not _qualifies(_q("WTA Madrid Open", "h2h", 5.0))    # universal cap
 
 
-def test_qualifies_boxing_h2h_non_pinn_floor_1pct():
-    # Broad 1–5% +11.7% on 14 picks; ≥5% drops to -2.5% — universal cap
-    # handles the upper bound.
-    assert not _qualifies(_q("BOXING", "h2h", 0.9))
-    assert _qualifies(_q("BOXING", "h2h", 1.0))
-    assert _qualifies(_q("BOXING", "h2h", 4.9))
-    assert not _qualifies(_q("BOXING", "h2h", 5.0))
+def test_qualifies_boxing_h2h_paused():
+    # 2026-06-22: boxing h2h paused. The 2026-05-22 add (n=14, +11.7%)
+    # inverted to -30.9% flat at n=54, so the whole branch was removed —
+    # boxing h2h is now skipped at every EV, Pinn or not.
+    assert not _qualifies(_q("BOXING", "h2h", 1.0))
+    assert not _qualifies(_q("BOXING", "h2h", 2.5))
+    assert not _qualifies(_q("BOXING", "h2h", 4.9))
+    assert not _qualifies(_q("BOXING", "h2h", 2.0, pinn=True))
 
 
 def test_qualifies_wnba_spreads_non_pinn_floor_1pct():

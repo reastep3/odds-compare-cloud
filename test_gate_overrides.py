@@ -88,12 +88,12 @@ def test_qualifies_consults_override(store, monkeypatch):
     """The live gate honours an approved override but is unchanged without one."""
     import odds_compare as oc
     monkeypatch.setattr(oc, "_starts_within_days", lambda *a, **k: True)
-    e = {"sport": "TENNIS", "market": "h2h", "ev_pct": 2.25,
+    e = {"sport": "TENNIS", "market": "h2h", "ev_pct": 2.75,
          "num_other_books": 10, "pinnacle_anchored": False,
          "commence": "2099-01-01T00:00:00Z"}
-    assert oc._qualifies_base(e) is True
+    assert oc._qualifies_base(e) is True            # tennis non-Pinn floor is 2.5
     assert oc._qualifies(e) is True                 # no override -> base
     go.add({"kind": "EXCLUDE", "is_prop": False, "sport": "TENNIS",
-            "market": "h2h", "ev_lo": 2.0, "ev_hi": 2.5})
+            "market": "h2h", "ev_lo": 2.5, "ev_hi": 3.0})
     assert oc._qualifies(e) is False                # override flips it
-    assert oc._qualifies({**e, "ev_pct": 2.75}) is True  # outside band untouched
+    assert oc._qualifies({**e, "ev_pct": 3.5}) is True  # outside band untouched

@@ -2431,6 +2431,18 @@ _BLOCKED_SOCCER = frozenset({
 def _qualifies_base(e):
     """Return True if an edge qualifies for the 'Play These' tab.
 
+    2026-06-22 — BOXING H2H paused and TENNIS H2H non-Pinn floor raised
+    2.0 → 2.5, from an analyst review over Mar–Jun (n=5,806 settled):
+      - Boxing: the 2026-05-22 add (#3 below) was on n=14 (+11.7%). At n=54
+        it inverted to -30.9% flat (95% CI [-49.9, -11.9]; D-L shrunk -14.9%).
+        Boxing has no Pinnacle, so its +3.0% CLV is captured against the soft
+        book we bet (circular) — the realized bleed is the trustworthy signal.
+        Removed the BOXING h2h branch entirely (incl. the Pinn path).
+      - Tennis: the 2.0–2.5% band was -40.6% flat on n=28 (95% CI [-76, -5]),
+        the worst pocket inside the old ev≥2.0 floor; tennis also has the
+        weakest CLV of any sport (+0.46%). Raised the non-Pinn floor to 2.5 to
+        drop that band; the 2.5–5% pocket is retained.
+
     2026-06-02 — TENNIS activated. The 2026-05-22 add never fired live: the
     Odds API tags tennis edges with the tournament title ("ATP Italian
     Open"), so sport never equalled "TENNIS" (now collapsed below). A ~2-month
@@ -2516,7 +2528,7 @@ def _qualifies_base(e):
             return 1.0 <= ev < 3.0
         return False
 
-    # H2H: MLB / MLS / TENNIS / BOXING.
+    # H2H: MLB / MLS / TENNIS (boxing paused 2026-06-22 — see docstring).
     # MLB non-Pinn keeps the 2.5–3.0% upper cap (lineup/weather stale-line
     # trap above 3% non-Pinn). All Pinn-anchored paths qualify ≥1%
     # (subject to the universal <5% cap above).
@@ -2532,11 +2544,8 @@ def _qualifies_base(e):
         if sport == "TENNIS":
             if pinn and ev >= 1.0:
                 return True
-            return ev >= 2.0
-        if sport == "BOXING":
-            if pinn and ev >= 1.0:
-                return True
-            return ev >= 1.0
+            return ev >= 2.5
+        # BOXING h2h paused 2026-06-22 (see docstring) — falls through to skip.
         return False
 
     if mkt == "spreads":
