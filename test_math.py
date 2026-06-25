@@ -981,7 +981,6 @@ from telegram_bot import parse_promo
 from odds_compare import (
     EUROPEAN_SOCCER_SPORT_KEYS,
     MAX_PROMO_DAYS,
-    WORLD_CUP_PROMO_HORIZON_DAYS,
     _canonical_promo_sport,
     _derive_promo_scope,
     _promo_horizon_days,
@@ -1474,36 +1473,32 @@ def test_generic_soccer_promo_covers_world_cup():
     assert _promo_matches(_wc_promo(sport="soccer"), _wc_edge())
 
 
-def test_promo_horizon_world_cup_reaches_multiple_days():
-    # World Cup is a planned multi-day tournament: its promo horizon must
-    # exceed the daily default so the midnight scan sees tomorrow's slate.
-    # The game-line title ("FIFA World Cup") and the goalscorer-prop slug
-    # ("WORLD_CUP") both resolve to it — but neighbouring FIFA competitions
-    # and the domestic leagues must stay at the daily default.
-    assert WORLD_CUP_PROMO_HORIZON_DAYS > MAX_PROMO_DAYS
-    assert _promo_horizon_days("FIFA World Cup") == WORLD_CUP_PROMO_HORIZON_DAYS
-    assert _promo_horizon_days("WORLD_CUP") == WORLD_CUP_PROMO_HORIZON_DAYS
-    assert _promo_horizon_days("world_cup") == WORLD_CUP_PROMO_HORIZON_DAYS
-    assert _promo_horizon_days("FIFA Club World Cup") == MAX_PROMO_DAYS
+def test_promo_horizon_world_cup_stays_at_daily_cap():
+    # World Cup must stay at the 24h MAX_PROMO_DAYS default like any other
+    # daily-games sport — the user gets one promo/day and a pick more than
+    # 24h out wastes that day's token. Only weekly one-off cards (combat
+    # sports) intentionally reach ahead. Regression guard against treating
+    # WC like a plan-ahead card.
+    assert _promo_horizon_days("FIFA World Cup") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("WORLD_CUP") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("world_cup") == MAX_PROMO_DAYS
     assert _promo_horizon_days("EPL") == MAX_PROMO_DAYS
-    assert _promo_horizon_days("MLS") == MAX_PROMO_DAYS
-    assert _promo_horizon_days("Soccer") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("ufc") == 4.0       # combat cards still reach
 
 
-def test_promo_matches_world_cup_next_day_slate():
-    # The reported bug, end to end: a 30% World Cup boost on the midnight
-    # scan must now MATCH tomorrow's game lines (~40h out), where the old
-    # 1-day horizon rejected them and left the boost with no pick.
+def test_promo_matches_world_cup_capped_at_24h():
+    # A 30% WC boost must pick only games inside the 24h promo window: a
+    # fixture ~18h out matches, one ~40h out does not. Keeps a daily promo
+    # off a match that's multiple days away.
     promo = _wc_promo(market="all", min_odds=-200)
-    wc_tomorrow = _wc_edge(market="h2h", outcome="Brazil",
-                           odds_decimal=1.80, commence=_iso_hours_out(40))
-    assert _starts_within_promo_horizon(wc_tomorrow)
-    assert _promo_matches(promo, wc_tomorrow)
-    # Same distance out, but a domestic league still stays beyond its 1-day
-    # reach — confirming the extension is World-Cup-specific, not all soccer.
-    epl_tomorrow = _wc_edge(sport="EPL", sport_key="soccer_epl",
-                            commence=_iso_hours_out(40))
-    assert not _starts_within_promo_horizon(epl_tomorrow)
+    soon = _wc_edge(market="h2h", outcome="Brazil",
+                    odds_decimal=1.80, commence=_iso_hours_out(18))
+    far = _wc_edge(market="h2h", outcome="Spain",
+                   odds_decimal=1.80, commence=_iso_hours_out(40))
+    assert _starts_within_promo_horizon(soon)
+    assert _promo_matches(promo, soon)
+    assert not _starts_within_promo_horizon(far)
+    assert not _promo_matches(promo, far)
 
 
 def test_scope_world_cup_collapses_to_soccer_fetch():

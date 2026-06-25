@@ -1957,11 +1957,11 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
     for event in events:
         commence = event.get("commence_time", "")
         sport      = event.get("sport_title", "")
-        # Per-sport upper bound: weekly combat cards (UFC/boxing) and the
-        # multi-week World Cup get a multi-day reach so a planned promo
-        # surfaces tomorrow's (and later) fixtures ahead of time; daily
-        # sports stay at the standard ~26h window. max() never shrinks the
-        # default, and live mode keeps its [past 6h, now] window untouched.
+        # Per-sport upper bound: weekly combat cards (UFC/boxing) get a
+        # multi-day reach so a planned promo surfaces ahead of the card;
+        # daily sports stay at the standard ~26h window. max() never
+        # shrinks the default, and live mode keeps its [past 6h, now]
+        # window untouched.
         event_latest = latest
         if not live_only:
             _hd = _promo_horizon_days(sport)
@@ -2363,19 +2363,14 @@ _PROMO_HORIZON_DAYS_BY_SPORT: dict[str, float] = {
     "ufc":    4.0,
     "boxing": 4.0,
 }
-
-# FIFA World Cup horizon (days). Same situation as the combat cards above —
-# a multi-week, fixed-schedule tournament the user plans promos around — but
-# its game-line edges canonicalise to plain "soccer", so the by-sport map
-# can't target it without also widening every domestic league. The 1-day
-# default silently hid an ENTIRE next-day World Cup slate on the midnight
-# scan (2026-06-25: a 30% FD World Cup boost returned no pick): find_edges
-# dropped the fixtures as >26h out AND promo matching rejected them as
-# >1 day. 3 days covers the next match day in every tournament phase (daily
-# group games; every-other-day knockouts with a rest day) from any run time.
-# Cost-free and promo-pool-only for the same reasons as the combat override;
-# World Cup is additionally blocked from Play These via _BLOCKED_SOCCER.
-WORLD_CUP_PROMO_HORIZON_DAYS = 3.0
+# NB: the FIFA World Cup is deliberately NOT here, even though it's a
+# tournament. It has DAILY games and the user gets ONE promo/day, so a pick
+# more than the 24h default out would waste that day's token (it can't be
+# held for a match several days away — "24h max from run time"). Only
+# genuinely weekly one-off cards (combat sports) get a multi-day reach.
+# The real cause of the 2026-06-25 "no WC pick" was a dropped fetch, not the
+# horizon — see _odds_api_get's retry (a 429 on the last soccer league
+# silently ate the World Cup feed).
 
 # ── Promo hit-rate ruleset ────────────────────────────────────────────
 # Promos are use-it-or-lose-it and the goal is to CASH them, not to
@@ -2473,16 +2468,9 @@ def _promo_horizon_days(sport_label: str) -> float:
     """Promo reach in days for an edge/event's sport label.
 
     MAX_PROMO_DAYS for daily sports; a longer reach for weekly combat
-    cards (see _PROMO_HORIZON_DAYS_BY_SPORT) and the FIFA World Cup. Accepts
-    any raw sport label (Odds API title, AN league, internal code)."""
-    # World Cup is matched on the RAW label, before _canonical_promo_sport
-    # collapses every FIFA title to "soccer". Exact-match the main
-    # tournament's game-line title ("FIFA World Cup") and goalscorer-prop
-    # slug ("WORLD_CUP") so FIFA Club World Cup, qualifiers, and the
-    # domestic leagues all stay at the daily default.
-    norm = (sport_label or "").strip().lower().replace(" ", "")
-    if norm in ("fifaworldcup", "world_cup", "worldcup"):
-        return WORLD_CUP_PROMO_HORIZON_DAYS
+    cards (see _PROMO_HORIZON_DAYS_BY_SPORT). Accepts any raw sport label
+    (Odds API title, AN league, internal code) — collapses via
+    _canonical_promo_sport first."""
     canonical = _canonical_promo_sport(sport_label or "")
     return _PROMO_HORIZON_DAYS_BY_SPORT.get(canonical, MAX_PROMO_DAYS)
 
@@ -8251,9 +8239,8 @@ def _promo_no_pick_reason(promo: dict,
         # horizon, goalscorer ban), then fall through to it for the rest
         # (min_odds / market / draw-insurable).
 
-        # Per-sport reach for the messages below. World Cup gets a
-        # multi-day horizon (WORLD_CUP_PROMO_HORIZON_DAYS); other subset
-        # promos (european_soccer) stay at the daily default.
+        # Per-sport reach for the messages below (the 24h MAX_PROMO_DAYS
+        # default for soccer; see _promo_horizon_days).
         horizon_h = int(_promo_horizon_days(
             subset_book_soccer[0].get("sport", "")) * 24)
 
