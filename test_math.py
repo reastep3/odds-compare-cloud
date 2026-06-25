@@ -980,10 +980,14 @@ def test_find_golf_edges_rejects_higa_style_outlier_at_tightened_ratio():
 from telegram_bot import parse_promo
 from odds_compare import (
     EUROPEAN_SOCCER_SPORT_KEYS,
+    MAX_PROMO_DAYS,
+    WORLD_CUP_PROMO_HORIZON_DAYS,
     _canonical_promo_sport,
     _derive_promo_scope,
+    _promo_horizon_days,
     _promo_matches,
     _promo_no_pick_reason,
+    _starts_within_promo_horizon,
 )
 
 
@@ -1470,6 +1474,38 @@ def test_generic_soccer_promo_covers_world_cup():
     assert _promo_matches(_wc_promo(sport="soccer"), _wc_edge())
 
 
+def test_promo_horizon_world_cup_reaches_multiple_days():
+    # World Cup is a planned multi-day tournament: its promo horizon must
+    # exceed the daily default so the midnight scan sees tomorrow's slate.
+    # The game-line title ("FIFA World Cup") and the goalscorer-prop slug
+    # ("WORLD_CUP") both resolve to it — but neighbouring FIFA competitions
+    # and the domestic leagues must stay at the daily default.
+    assert WORLD_CUP_PROMO_HORIZON_DAYS > MAX_PROMO_DAYS
+    assert _promo_horizon_days("FIFA World Cup") == WORLD_CUP_PROMO_HORIZON_DAYS
+    assert _promo_horizon_days("WORLD_CUP") == WORLD_CUP_PROMO_HORIZON_DAYS
+    assert _promo_horizon_days("world_cup") == WORLD_CUP_PROMO_HORIZON_DAYS
+    assert _promo_horizon_days("FIFA Club World Cup") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("EPL") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("MLS") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("Soccer") == MAX_PROMO_DAYS
+
+
+def test_promo_matches_world_cup_next_day_slate():
+    # The reported bug, end to end: a 30% World Cup boost on the midnight
+    # scan must now MATCH tomorrow's game lines (~40h out), where the old
+    # 1-day horizon rejected them and left the boost with no pick.
+    promo = _wc_promo(market="all", min_odds=-200)
+    wc_tomorrow = _wc_edge(market="h2h", outcome="Brazil",
+                           odds_decimal=1.80, commence=_iso_hours_out(40))
+    assert _starts_within_promo_horizon(wc_tomorrow)
+    assert _promo_matches(promo, wc_tomorrow)
+    # Same distance out, but a domestic league still stays beyond its 1-day
+    # reach — confirming the extension is World-Cup-specific, not all soccer.
+    epl_tomorrow = _wc_edge(sport="EPL", sport_key="soccer_epl",
+                            commence=_iso_hours_out(40))
+    assert not _starts_within_promo_horizon(epl_tomorrow)
+
+
 def test_scope_world_cup_collapses_to_soccer_fetch():
     scope = _derive_promo_scope([
         {"book": "DraftKings", "sport": "world_cup", "market": "h2h"},
@@ -1504,6 +1540,160 @@ def test_no_pick_world_cup_names_the_slate():
     reason = _promo_no_pick_reason(promo, [mls], matched_all=[], pool=[])
     assert "FIFA World Cup" in reason
     assert "Usa Mls" in reason
+
+
+def _iso_hours_out(hours_out):
+    """ISO-8601 (Z) timestamp `hours_out` hours from now, for an edge's
+    `commence` — lets a test place a fixture inside or beyond the 24h
+    promo horizon."""
+    from datetime import datetime, timezone, timedelta
+    return ((datetime.now(timezone.utc) + timedelta(hours=hours_out))
+            .isoformat().replace("+00:00", "Z"))
+
+
+def test_no_pick_world_cup_goalscorer_only_is_not_dedup():
+    # The reported bug: a 30% WC boost said "all 177 candidates already
+    # assigned to other promos" when the real story was that the only WC
+    # edges in the window are anytime-goalscorer props a generic boost is
+    # banned from (2026-06-18 goalscorer rule). matched_all is empty, so
+    # nothing was assigned to anyone — the message must NOT claim dedup.
+    # (sport='WORLD_CUP' is the goalscorer-prop slug; it canonicalises to
+    # soccer just like the 'FIFA World Cup' game-line title.)
+    promo = {"book": "FanDuel", "sport": "world_cup", "market": "all"}
+    combined = [
+        _wc_edge(book="FanDuel", sport="WORLD_CUP", market="goal",
+                 outcome="Vinicius Jr", commence=_iso_hours_out(20)),
+        _wc_edge(book="FanDuel", sport="WORLD_CUP", market="goal",
+                 outcome="Rodrygo", commence=_iso_hours_out(20)),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "assigned to other promos" not in reason.lower()
+    assert "goalscorer" in reason.lower()
+
+
+def test_no_pick_world_cup_beyond_horizon_is_not_dedup():
+    # Eligible game lines exist but every fixture is >24h out (the
+    # late-night, day-before run). Old code blamed dedup; the fix returns
+    # a timing message pointing the user back inside the pick window.
+    # Uses european_soccer to keep the assertion off the world_cup network
+    # probe (_wc_next_game_diagnostic), which this branch tries first.
+    promo = {"book": "FanDuel", "sport": "european_soccer", "market": "h2h"}
+    epl = {**_edge("FanDuel", "Soccer", "h2h", outcome="Arsenal"),
+           "sport_key": "soccer_epl",
+           "commence":  _iso_hours_out(30)}
+    reason = _promo_no_pick_reason(promo, [epl], matched_all=[], pool=[])
+    assert "assigned to other promos" not in reason.lower()
+    assert "kickoff" in reason.lower()
+    assert "30." in reason  # ~30h surfaced so the user knows when to return
+
+
+def test_no_pick_world_cup_game_line_too_short_falls_through():
+    # An in-window WC game line exists but is priced below the promo's
+    # min_odds floor. Must fall through to the generic min_odds diagnostic
+    # ("too short"), never the dedup wording.
+    promo = {"book": "FanDuel", "sport": "world_cup", "market": "all",
+             "min_odds": -200}
+    combined = [
+        _wc_edge(book="FanDuel", market="h2h", outcome="Argentina",
+                 odds_decimal=1.30, commence=_iso_hours_out(6)),
+    ]
+    reason = _promo_no_pick_reason(promo, combined, matched_all=[], pool=[])
+    assert "assigned to other promos" not in reason.lower()
+    assert "or longer" in reason
+    assert "Argentina" in reason
+
+
+# ── _odds_api_get retry/backoff ────────────────────────────────────────
+# A bare get() with no retry let a single 429 on the LAST soccer league
+# (soccer_fifa_world_cup) silently drop the World Cup feed under the full
+# scan's parallel request burst — surfacing as a promo "no WC candidates"
+# while the moneylines were posted. These pin the retry behaviour.
+
+import odds_compare as _oc
+
+
+class _FakeResp:
+    def __init__(self, status, headers=None, json_data=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self._json = [] if json_data is None else json_data
+
+    def json(self):
+        return self._json
+
+
+def _seq_get(seq):
+    """Fake requests.get returning/raising items from `seq` in order
+    (last item repeats). Records the call count."""
+    state = {"n": 0}
+
+    def fake_get(url, params=None, timeout=None):
+        item = seq[min(state["n"], len(seq) - 1)]
+        state["n"] += 1
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    fake_get.state = state
+    return fake_get
+
+
+def test_odds_api_get_retries_then_succeeds(monkeypatch):
+    fake = _seq_get([_FakeResp(429), _FakeResp(200, json_data=[{"ok": 1}])])
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda *_: None)
+    r = _oc._odds_api_get("http://x", {}, retries=3, label="/wc")
+    assert r is not None and r.status_code == 200
+    assert fake.state["n"] == 2          # one retry after the 429
+
+
+def test_odds_api_get_persistent_429_returns_last(monkeypatch):
+    fake = _seq_get([_FakeResp(429)])     # always 429
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda *_: None)
+    r = _oc._odds_api_get("http://x", {}, retries=3)
+    assert r is not None and r.status_code == 429
+    assert fake.state["n"] == 3          # exhausted every attempt
+
+
+def test_odds_api_get_no_retry_on_permanent_error(monkeypatch):
+    fake = _seq_get([_FakeResp(401), _FakeResp(200)])
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda *_: None)
+    r = _oc._odds_api_get("http://x", {}, retries=3)
+    assert r.status_code == 401
+    assert fake.state["n"] == 1          # 401 is permanent — no retry
+
+
+def test_odds_api_get_retries_on_timeout(monkeypatch):
+    import requests as rq
+    fake = _seq_get([rq.Timeout("slow"), _FakeResp(200)])
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda *_: None)
+    r = _oc._odds_api_get("http://x", {}, retries=3)
+    assert r is not None and r.status_code == 200
+    assert fake.state["n"] == 2
+
+
+def test_odds_api_get_all_exceptions_returns_none(monkeypatch):
+    import requests as rq
+    fake = _seq_get([rq.ConnectionError("down")])   # always raises
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda *_: None)
+    r = _oc._odds_api_get("http://x", {}, retries=2)
+    assert r is None
+    assert fake.state["n"] == 2
+
+
+def test_odds_api_get_respects_retry_after(monkeypatch):
+    fake = _seq_get([_FakeResp(429, headers={"Retry-After": "7"}),
+                     _FakeResp(200)])
+    slept = []
+    monkeypatch.setattr(_oc.requests, "get", fake)
+    monkeypatch.setattr(_oc.time, "sleep", lambda s: slept.append(s))
+    r = _oc._odds_api_get("http://x", {}, retries=3)
+    assert r.status_code == 200
+    assert slept and slept[0] >= 7       # honoured the Retry-After hint
 
 
 def test_backtest_grades_world_cup_via_espn():

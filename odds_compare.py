@@ -584,6 +584,57 @@ def _resolve_dynamic_active_keys(prefix: str) -> list[str]:
     return keys
 
 
+def _odds_api_get(url: str, params: dict, *, timeout: int = 30,
+                  retries: int = 3, label: str = "") -> requests.Response | None:
+    """GET against The Odds API with retry/backoff on *transient* failures
+    (429 rate-limit, 5xx, timeouts/connection errors). Returns the final
+    Response — even if non-200 — or None when every attempt raised.
+    Permanent client errors (401/403/422) return immediately; retrying
+    those only burns time.
+
+    Added 2026-06-25: the per-league soccer loop fetched soccer_fifa_world_cup
+    LAST of 11 keys with a bare get() and no retry. Under the full scan's
+    13-sport parallel burst (MAX_WORKERS threads, soccer doing 11 sequential
+    calls) a single 429 on that last call silently dropped the World Cup
+    game lines, surfacing as a promo "no World Cup candidates" when the
+    moneylines were in fact posted on DK/FD. Retrying on 429 lets the WC
+    call ride out the rate-limit window instead of vanishing."""
+    backoff = 1.0
+    last: requests.Response | None = None
+    for attempt in range(1, retries + 1):
+        err: Exception | None = None
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+        except requests.RequestException as e:
+            r, err, last = None, e, None
+        else:
+            last = r
+            # Success or a permanent client error — nothing to gain by retrying.
+            if r.status_code not in (429, 500, 502, 503, 504):
+                return r
+        if attempt == retries:
+            if r is None:
+                print(f"  [OddsAPI{label}] request error after {retries} "
+                      f"attempt(s): {err}")
+            return last
+        wait = backoff
+        if r is not None:
+            retry_after = r.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait = max(wait, float(retry_after))
+                except ValueError:
+                    pass
+            print(f"  [OddsAPI{label}] HTTP {r.status_code} — retry "
+                  f"{attempt}/{retries - 1} in {wait:.1f}s")
+        else:
+            print(f"  [OddsAPI{label}] {type(err).__name__} — retry "
+                  f"{attempt}/{retries - 1} in {wait:.1f}s")
+        time.sleep(wait)
+        backoff *= 2
+    return last
+
+
 def fetch_odds_api(sport: str, session: requests.Session | None = None,
                    ) -> tuple[list[dict], dict]:
     """
@@ -614,9 +665,9 @@ def fetch_odds_api(sport: str, session: requests.Session | None = None,
 
     for sport_key in api_keys:
         try:
-            r = requests.get(
+            r = _odds_api_get(
                 f"{ODDS_API_BASE}/sports/{sport_key}/odds",
-                params={
+                {
                     "apiKey":      ODDS_API_KEY,
                     "regions":     "us",
                     "markets":     "h2h,spreads,totals",
@@ -624,7 +675,10 @@ def fetch_odds_api(sport: str, session: requests.Session | None = None,
                     "bookmakers":  ODDS_API_BOOKMAKERS,
                 },
                 timeout=30,
+                label=f"/{sport_key}",
             )
+            if r is None:
+                continue
             remaining = r.headers.get("x-requests-remaining", "?")
             credit_tracker.record(remaining)
             if r.status_code != 200:
@@ -689,18 +743,19 @@ def fetch_odds_api_props(
     market_map = {m[0]: (m[1], m[2]) for m in prop_markets}
 
     # Step 1: Get event IDs (free — 0 credits)
+    r = _odds_api_get(
+        f"{ODDS_API_BASE}/sports/{api_sport}/events",
+        {"apiKey": ODDS_API_KEY},
+        timeout=15, label=f" Props/{sport.upper()} events",
+    )
+    if r is None or r.status_code != 200:
+        where = "no response" if r is None else f"HTTP {r.status_code}"
+        print(f"  [OddsAPI Props/{sport.upper()}] Events {where}")
+        return []
     try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/sports/{api_sport}/events",
-            params={"apiKey": ODDS_API_KEY},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            print(f"  [OddsAPI Props/{sport.upper()}] Events HTTP {r.status_code}")
-            return []
         event_list = r.json()
-    except Exception as e:
-        print(f"  [OddsAPI Props/{sport.upper()}] Events error: {e}")
+    except ValueError:
+        print(f"  [OddsAPI Props/{sport.upper()}] Events: bad JSON")
         return []
 
     if not event_list:
@@ -744,24 +799,26 @@ def fetch_odds_api_props(
         if not eid:
             continue
 
+        r2 = _odds_api_get(
+            f"{ODDS_API_BASE}/sports/{api_sport}/events/{eid}/odds",
+            {
+                "apiKey":      ODDS_API_KEY,
+                "regions":     "us",
+                "markets":     api_market_keys,
+                "oddsFormat":  "american",
+                "bookmakers":  ODDS_API_BOOKMAKERS,
+            },
+            timeout=15, label=f" Props/{sport.upper()}",
+        )
+        if r2 is None:
+            continue
+        remaining = r2.headers.get("x-requests-remaining", remaining)
+        credit_tracker.record(remaining)
+        if r2.status_code != 200:
+            continue
         try:
-            r2 = requests.get(
-                f"{ODDS_API_BASE}/sports/{api_sport}/events/{eid}/odds",
-                params={
-                    "apiKey":      ODDS_API_KEY,
-                    "regions":     "us",
-                    "markets":     api_market_keys,
-                    "oddsFormat":  "american",
-                    "bookmakers":  ODDS_API_BOOKMAKERS,
-                },
-                timeout=15,
-            )
-            remaining = r2.headers.get("x-requests-remaining", remaining)
-            credit_tracker.record(remaining)
-            if r2.status_code != 200:
-                continue
             ev_data = r2.json()
-        except Exception:
+        except ValueError:
             continue
 
         for bm in ev_data.get("bookmakers", []):
@@ -866,18 +923,19 @@ def fetch_odds_api_first_inning(sport: str) -> list[dict]:
     api_market_keys = ",".join(m[0] for m in fi_markets)
     market_map = {m[0]: m[1] for m in fi_markets}  # api_key -> internal_key
 
+    r = _odds_api_get(
+        f"{ODDS_API_BASE}/sports/{api_sport}/events",
+        {"apiKey": ODDS_API_KEY},
+        timeout=15, label=f" 1st-Inn/{sport.upper()} events",
+    )
+    if r is None or r.status_code != 200:
+        where = "no response" if r is None else f"HTTP {r.status_code}"
+        print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events {where}")
+        return []
     try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/sports/{api_sport}/events",
-            params={"apiKey": ODDS_API_KEY},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events HTTP {r.status_code}")
-            return []
         event_list = r.json()
-    except Exception as e:
-        print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events error: {e}")
+    except ValueError:
+        print(f"  [OddsAPI 1st-Inn/{sport.upper()}] Events: bad JSON")
         return []
 
     if not event_list:
@@ -893,24 +951,26 @@ def fetch_odds_api_first_inning(sport: str) -> list[dict]:
         if not (eid and away and home):
             continue
 
+        r2 = _odds_api_get(
+            f"{ODDS_API_BASE}/sports/{api_sport}/events/{eid}/odds",
+            {
+                "apiKey":      ODDS_API_KEY,
+                "regions":     "us",
+                "markets":     api_market_keys,
+                "oddsFormat":  "american",
+                "bookmakers":  ODDS_API_BOOKMAKERS,
+            },
+            timeout=15, label=f" 1st-Inn/{sport.upper()}",
+        )
+        if r2 is None:
+            continue
+        remaining = r2.headers.get("x-requests-remaining", remaining)
+        credit_tracker.record(remaining)
+        if r2.status_code != 200:
+            continue
         try:
-            r2 = requests.get(
-                f"{ODDS_API_BASE}/sports/{api_sport}/events/{eid}/odds",
-                params={
-                    "apiKey":      ODDS_API_KEY,
-                    "regions":     "us",
-                    "markets":     api_market_keys,
-                    "oddsFormat":  "american",
-                    "bookmakers":  ODDS_API_BOOKMAKERS,
-                },
-                timeout=15,
-            )
-            remaining = r2.headers.get("x-requests-remaining", remaining)
-            credit_tracker.record(remaining)
-            if r2.status_code != 200:
-                continue
             ev_data = r2.json()
-        except Exception:
+        except ValueError:
             continue
 
         bookmakers_out: list[dict] = []
@@ -1897,11 +1957,11 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
     for event in events:
         commence = event.get("commence_time", "")
         sport      = event.get("sport_title", "")
-        # Per-sport upper bound: weekly combat cards (UFC/boxing) get a
-        # multi-day reach so a planned promo surfaces ahead of the card;
-        # daily sports stay at the standard ~26h window. max() never
-        # shrinks the default, and live mode keeps its [past 6h, now]
-        # window untouched.
+        # Per-sport upper bound: weekly combat cards (UFC/boxing) and the
+        # multi-week World Cup get a multi-day reach so a planned promo
+        # surfaces tomorrow's (and later) fixtures ahead of time; daily
+        # sports stay at the standard ~26h window. max() never shrinks the
+        # default, and live mode keeps its [past 6h, now] window untouched.
         event_latest = latest
         if not live_only:
             _hd = _promo_horizon_days(sport)
@@ -2304,6 +2364,19 @@ _PROMO_HORIZON_DAYS_BY_SPORT: dict[str, float] = {
     "boxing": 4.0,
 }
 
+# FIFA World Cup horizon (days). Same situation as the combat cards above —
+# a multi-week, fixed-schedule tournament the user plans promos around — but
+# its game-line edges canonicalise to plain "soccer", so the by-sport map
+# can't target it without also widening every domestic league. The 1-day
+# default silently hid an ENTIRE next-day World Cup slate on the midnight
+# scan (2026-06-25: a 30% FD World Cup boost returned no pick): find_edges
+# dropped the fixtures as >26h out AND promo matching rejected them as
+# >1 day. 3 days covers the next match day in every tournament phase (daily
+# group games; every-other-day knockouts with a rest day) from any run time.
+# Cost-free and promo-pool-only for the same reasons as the combat override;
+# World Cup is additionally blocked from Play These via _BLOCKED_SOCCER.
+WORLD_CUP_PROMO_HORIZON_DAYS = 3.0
+
 # ── Promo hit-rate ruleset ────────────────────────────────────────────
 # Promos are use-it-or-lose-it and the goal is to CASH them, not to
 # maximize theoretical EV (2026-06-11: two World Cup bonus bets went on
@@ -2400,9 +2473,16 @@ def _promo_horizon_days(sport_label: str) -> float:
     """Promo reach in days for an edge/event's sport label.
 
     MAX_PROMO_DAYS for daily sports; a longer reach for weekly combat
-    cards (see _PROMO_HORIZON_DAYS_BY_SPORT). Accepts any raw sport label
-    (Odds API title, AN league, internal code) — collapses via
-    _canonical_promo_sport first."""
+    cards (see _PROMO_HORIZON_DAYS_BY_SPORT) and the FIFA World Cup. Accepts
+    any raw sport label (Odds API title, AN league, internal code)."""
+    # World Cup is matched on the RAW label, before _canonical_promo_sport
+    # collapses every FIFA title to "soccer". Exact-match the main
+    # tournament's game-line title ("FIFA World Cup") and goalscorer-prop
+    # slug ("WORLD_CUP") so FIFA Club World Cup, qualifiers, and the
+    # domestic leagues all stay at the daily default.
+    norm = (sport_label or "").strip().lower().replace(" ", "")
+    if norm in ("fifaworldcup", "world_cup", "worldcup"):
+        return WORLD_CUP_PROMO_HORIZON_DAYS
     canonical = _canonical_promo_sport(sport_label or "")
     return _PROMO_HORIZON_DAYS_BY_SPORT.get(canonical, MAX_PROMO_DAYS)
 
@@ -8159,10 +8239,71 @@ def _promo_no_pick_reason(promo: dict,
             return (f"{len(book_soccer)} {book} soccer edge(s) loaded but "
                     f"none from {in_slate_phrase}. Today's soccer slate: "
                     f"{sample}{more}.")
-        # Eligible edges exist for this book — must have been claimed
-        # by an earlier (higher-boost) promo of the same kind.
-        return (f"All {len(subset_book_soccer)} {book} {short_label} "
-                f"candidate(s) already assigned to other promos.")
+        # subset_book_soccer is non-empty: eligible-competition edges exist
+        # on this book, yet none matched the promo. Genuine dedup (another
+        # promo claimed them) is already handled at the top via
+        # `matched_all and not pool`; this diagnostic only runs when best is
+        # None (empty pool), so by here matched_all is empty — the edges
+        # exist but every one failed _promo_matches. The old code blamed
+        # dedup unconditionally, which read as "your boost lost to a better
+        # promo" when the truth was "nothing here is eligible". Pin down the
+        # subset-specific reasons the generic chain below can't see (start
+        # horizon, goalscorer ban), then fall through to it for the rest
+        # (min_odds / market / draw-insurable).
+
+        # Per-sport reach for the messages below. World Cup gets a
+        # multi-day horizon (WORLD_CUP_PROMO_HORIZON_DAYS); other subset
+        # promos (european_soccer) stay at the daily default.
+        horizon_h = int(_promo_horizon_days(
+            subset_book_soccer[0].get("sport", "")) * 24)
+
+        # (a) Every eligible fixture is beyond the promo's start horizon.
+        #     The goalscorer prop fetch reaches ~26h (per-event credit
+        #     window, see fetch_odds_api_props) while game-line promo
+        #     matching stops at this sport's horizon — so subset_book_soccer
+        #     is non-empty with nothing inside the pick window. The "come
+        #     back closer to kickoff" case the old dedup wording masked (and
+        #     which the subset_book_soccer-empty timing check above never
+        #     reached, because the 26h-window goal props keep the list
+        #     non-empty).
+        in_horizon = [e for e in subset_book_soccer
+                      if _starts_within_promo_horizon(e)]
+        if not in_horizon:
+            if sport == "world_cup":
+                timing = _wc_next_game_diagnostic(book)
+                if timing:
+                    return timing
+            hours_out = []
+            for e in subset_book_soccer:
+                try:
+                    ct = datetime.fromisoformat(
+                        e["commence"].replace("Z", "+00:00"))
+                    hours_out.append(
+                        (ct - datetime.now(ct.tzinfo)).total_seconds() / 3600)
+                except Exception:
+                    continue
+            soonest = (f" Next fixture starts in ~{min(hours_out):.1f}h —"
+                       if hours_out else "")
+            return (f"{len(subset_book_soccer)} {book} {short_label} edge(s) "
+                    f"loaded but none start within {horizon_h}h.{soonest} "
+                    f"re-run closer to kickoff.")
+
+        # (b) Only anytime-goalscorer props sit inside the window and this
+        #     isn't a goals-targeted token. The 2026-06-18 ban keeps generic
+        #     boosts off market="goal" (see _promo_matches), so a settle-
+        #     always boost has nothing here it is allowed to take — burning
+        #     the boost on a goalscorer prop is exactly what the ban prevents.
+        if market != "goal" and all(e.get("market") == "goal"
+                                    for e in in_horizon):
+            return (f"{len(in_horizon)} {book} {short_label} edge(s) within "
+                    f"{horizon_h}h are all anytime-goalscorer props — a "
+                    f"non-goals promo can't take those (goalscorer rule). Use "
+                    f"a goals-targeted token (market=goal), or wait for game "
+                    f"lines to post.")
+
+        # (c) In-window game lines exist but failed min_odds / market /
+        #     draw-insurable — fall through to the generic filter-chain
+        #     diagnostics below, which name the exact constraint.
 
     # HR-targeted promos need a dedicated diagnostic. _promo_matches
     # rejects HR edges whenever promo.market != "hr" (intentional guard
