@@ -2435,6 +2435,54 @@ PROMO_PARLAY_LEG_MAX_ODDS   = 150   # American, per leg
 PROMO_PARLAY_TOTAL_MAX_ODDS = 700   # American, combined
 
 
+# ── Profit-boost staking band ─────────────────────────────────────────
+# Fully-graded promo P&L (Apr–Jun 2026; see the promo_oddsband_pnl_analysis
+# note) showed profit boosts only cash net-positive when the *boosted*
+# price lands in a middle band. Below it, deep favorites pay too little to
+# cover their upset rate (the −200..+150 band ran ≈ −40% ROI). Above it,
+# the hit rate collapses (+300..+700 hit ~20–24%) while a large boost
+# inflates the *boosted* EV — and therefore half-Kelly — into a real-money
+# stake on a rare event; that is the band that drove the losing weeks, and
+# the same place prop-targeted promos (HR / goalscorer / double-double,
+# which have no game-line fallback so the picker always emits one) pile up.
+# Outside the band the pick is still placed — these tokens are use-it-or-
+# lose-it — but staked at the book minimum: a lottery ticket, not a Kelly
+# position. The lower bound is deliberately +100 (not +150) so legitimate
+# short totals/spreads boosts that have cashed (e.g. a first-inning over at
+# +123, a WNBA total at +118) keep a full stake.
+PROMO_FULL_KELLY_ODDS_LO = 100    # boosted American (decimal 2.00)
+PROMO_FULL_KELLY_ODDS_HI = 350    # boosted American (decimal 4.50)
+
+
+def _in_promo_kelly_band(boost_dec: float) -> bool:
+    """True if a boosted decimal price sits in the full-Kelly staking band."""
+    return (american_to_decimal(PROMO_FULL_KELLY_ODDS_LO)
+            <= boost_dec
+            <= american_to_decimal(PROMO_FULL_KELLY_ODDS_HI))
+
+
+def promo_boost_stake(bankroll: float, kelly_frac: float, boost_dec: float,
+                      book: str,
+                      max_bet: float | None = None) -> tuple[float, bool]:
+    """Stake for a profit-boost promo pick.
+
+    Full (half-)Kelly, clamped to the book minimum and the promo's max
+    bet, when the boosted price sits in the band that has historically
+    cashed (PROMO_FULL_KELLY_ODDS_LO..HI). Outside the band the pick is
+    still worth placing — a promo token is use-it-or-lose-it — but only as
+    a book-minimum lottery ticket, never a Kelly-sized real-money position.
+
+    Returns (bet, lottery_capped)."""
+    bet = clamp_bet(bankroll * kelly_frac, book)
+    lottery_capped = False
+    if bet > 0 and not _in_promo_kelly_band(boost_dec):
+        bet = min(bet, MIN_BET.get(book, 0.10))
+        lottery_capped = True
+    if max_bet and bet > max_bet:
+        bet = max_bet
+    return bet, lottery_capped
+
+
 def _starts_within_days(e, max_days: int) -> bool:
     """Return True if the edge's game starts within max_days from now."""
     commence = e.get("commence")
@@ -3292,10 +3340,12 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                                                boost_dec_v, fair_prob_v)
                     bankroll_v  = (dk_bankroll if best_edge["book"] == "DraftKings"
                                    else fd_bankroll)
-                    bet_v       = clamp_bet(bankroll_v * boosted_k, best_edge["book"])
-                    if promo.get("max_bet") and bet_v > promo["max_bet"]:
-                        bet_v = promo["max_bet"]
+                    bet_v, lottery_capped = promo_boost_stake(
+                        bankroll_v, boosted_k, boost_dec_v,
+                        best_edge["book"], promo.get("max_bet"))
                     profit_v    = bet_v * (boost_dec_v - 1)
+                    if lottery_capped:
+                        promo_label_disp += " [lottery — capped stake]"
                     values = [
                         promo_label_disp,
                         best_edge["game"],
@@ -3752,10 +3802,8 @@ def write_excel(edges: list[dict], dk_bankroll: float,
 
                 bankroll = (dk_bankroll if edge["book"] == "DraftKings"
                             else fd_bankroll)
-                bet = clamp_bet(bankroll * boosted_kelly, edge["book"])
-                # Cap at max bet if promo has one
-                if promo.get("max_bet") and bet > promo["max_bet"]:
-                    bet = promo["max_bet"]
+                bet, _ = promo_boost_stake(bankroll, boosted_kelly, boost_dec,
+                                           edge["book"], promo.get("max_bet"))
 
                 profit = bet * (boost_dec - 1)
 
@@ -4805,9 +4853,8 @@ def _build_hr_boost_rows(hr_edges: list[dict], promos: list[dict],
             boosted_kelly = kelly_bet(fair_prob, boost_dec)
             bankroll = (dk_bankroll if edge["book"] == "DraftKings"
                         else fd_bankroll)
-            bet = clamp_bet(bankroll * boosted_kelly, edge["book"])
-            if promo.get("max_bet") and bet > promo["max_bet"]:
-                bet = promo["max_bet"]
+            bet, _ = promo_boost_stake(bankroll, boosted_kelly, boost_dec,
+                                       edge["book"], promo.get("max_bet"))
             profit = bet * (boost_dec - 1)
 
             rows.append({

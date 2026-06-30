@@ -795,7 +795,7 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
         return None
 
     from odds_compare import (apply_profit_boost, calc_ev, format_american,
-                              kelly_bet, clamp_bet,
+                              kelly_bet, clamp_bet, promo_boost_stake,
                               _draw_refund_ev_pct, _promo_kelly)
 
     lines = ["<b>PROMO PICKS</b>"]
@@ -868,16 +868,16 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
             boosted_k = _promo_kelly(promo, edge, boost_dec, fair_prob,
                                      fraction=kelly_fraction)
             br = bankrolls.get(edge["book"], 0)
-            # For +EV picks: Kelly stake (capped by promo max).
-            # For fallback -EV picks: Kelly=0, so default to the promo's
-            # max_bet (or a small flat if no cap) — burning a promo on a
-            # max-$5 play is fine; don't recommend large stakes on -EV.
-            if is_fallback:
+            # Stake by Kelly, but only inside the boosted-odds band that has
+            # historically cashed; outside it (deep favorites, longshots, and
+            # prop-targeted promos with no game-line fallback) the token is
+            # still placed but only as a book-minimum lottery ticket.
+            bet, lottery_capped = promo_boost_stake(
+                br, boosted_k, boost_dec, edge["book"], promo.get("max_bet"))
+            # In-band but -EV after the boost (Kelly ≈ 0): still worth burning
+            # the token; keep the stake to the promo max (or a small flat).
+            if is_fallback and not lottery_capped:
                 bet = promo.get("max_bet") or 5.0
-            else:
-                bet = clamp_bet(br * boosted_k, edge["book"])
-                if promo.get("max_bet") and bet > promo["max_bet"]:
-                    bet = promo["max_bet"]
             profit = bet * (boost_dec - 1)
             if draw_refund and promo.get("boost_pct"):
                 # Profit boost + draw insurance.
@@ -897,7 +897,12 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
                     f"  {odds_str} -&gt; {boosted_odds} | "
                     f"EV {edge['ev_pct']}% -&gt; {boosted_ev:+.1f}%"
                 )
-            bet_label = "Bet" if not is_fallback else "Bet (promo max)"
+            if lottery_capped:
+                bet_label = "Bet (lottery — outside cashable band)"
+            elif is_fallback:
+                bet_label = "Bet (promo max)"
+            else:
+                bet_label = "Bet"
             lines.append(
                 f"  {bet_label} ${bet:.2f} -&gt; +${profit:.2f}"
             )

@@ -675,6 +675,11 @@ def _extract_sport_from_promo(promo_desc: str) -> str | None:
         ("conference league",  "conference"),
         ("liga mx",            "ligamx"),
         ("mls",                "mls"),
+        # World Cup before the generic "soccer" needle so goalscorer promos
+        # ("... / World Cup") resolve to the fifa.world ESPN feed instead of
+        # falling through to All-Sports (which never searches world_cup).
+        ("world cup",          "world_cup"),
+        ("fifa",               "world_cup"),
         ("soccer",             "soccer"),
         ("wnba",               "wnba"),
         ("afl",                "afl"),
@@ -2627,6 +2632,99 @@ _ALL_SPORTS_FALLBACK = [
 ]
 
 
+def _grade_hr_anytime(pick: dict, game_result: dict) -> str:
+    """Grade an anytime-home-run promo pick (market="HR", implicitly Over
+    0.5 HR for the named batter).
+
+    Uses the MLB Stats API box score (same source as total_bases), which
+    distinguishes "batted, 0 HR" (LOSS) from "on roster, did not bat"
+    (DNP → PUSH, the book voids and refunds the stake). A batter absent
+    from the box score is treated the same as a DNP (void). This is the
+    DNP detection whose absence kept HR/GOAL on MANUAL before.
+    Returns WIN / LOSS / PUSH / NO_RESULT."""
+    player = (pick.get("player") or pick.get("pick") or "").strip()
+    if not player:
+        return "NO_RESULT"
+    stats = _fetch_mlb_player_stats(
+        pick.get("game_date", ""),
+        game_result.get("home_team", ""),
+        game_result.get("away_team", ""))
+    if not stats:
+        return "NO_RESULT"
+    pstat = _find_player_in_stats(player, stats)
+    if pstat is None or pstat.get(_DNP_FLAG):
+        return "PUSH"          # did not appear / did not bat → voided
+    hr = pstat.get("HR")
+    if hr is None:
+        return "PUSH"
+    return "WIN" if float(hr) >= 1 else "LOSS"
+
+
+def _fetch_espn_summary(espn_path: str, event_id: str) -> dict:
+    """Fetch + cache one ESPN game summary (keyEvents, rosters, boxscore)."""
+    if not event_id:
+        return {}
+    cache_key = f"summary|{espn_path}|{event_id}"
+    if cache_key in _boxscore_cache:
+        return _boxscore_cache[cache_key]
+    url = f"{ESPN_BASE}/{espn_path}/summary?event={event_id}"
+    try:
+        resp = _espn_session.get(url, timeout=15)
+        data = resp.json() if resp.status_code == 200 else {}
+    except Exception:
+        data = {}
+    _boxscore_cache[cache_key] = data
+    time.sleep(0.12)
+    return data
+
+
+def _grade_goal_anytime(pick: dict, game_result: dict) -> str:
+    """Grade an anytime-goalscorer promo pick (market="GOAL", World Cup).
+
+    WIN if the named player is credited with a goal in the match's
+    keyEvents (own goals excluded). Otherwise the player's lineup status
+    decides: started or subbed in → LOSS; never entered the match → PUSH
+    (the book voids and refunds the stake on a DNP).
+    Returns WIN / LOSS / PUSH / NO_RESULT."""
+    player = (pick.get("player") or pick.get("pick") or "").strip()
+    if not player:
+        return "NO_RESULT"
+    espn_path = ESPN_SPORT_MAP.get("world_cup", "soccer/fifa.world")
+    summ = _fetch_espn_summary(espn_path, game_result.get("event_id", ""))
+    if not summ:
+        return "NO_RESULT"
+    pn = player.lower()
+
+    def _match(name: str) -> bool:
+        nm = (name or "").lower()
+        return (SequenceMatcher(None, pn, nm).ratio() >= 0.80
+                or (pn.split()[-1] in nm if pn.split() else False))
+
+    for ke in summ.get("keyEvents", []):
+        ttype = (ke.get("type") or {}).get("text", "") if isinstance(
+            ke.get("type"), dict) else ""
+        if "goal" in ttype.lower() and "own" not in ttype.lower():
+            for ath in ke.get("athletesInvolved") or []:
+                if _match(ath.get("displayName", "")):
+                    return "WIN"
+
+    appeared = None  # None → couldn't determine from rosters
+    for team in summ.get("rosters", []):
+        for entry in team.get("roster", []):
+            ath = entry.get("athlete", {}) or {}
+            if _match(ath.get("displayName", "")):
+                appeared = bool(entry.get("starter") or entry.get("subbedIn"))
+                break
+        if appeared is not None:
+            break
+    if appeared is False:
+        return "PUSH"          # named but never came on → voided
+    # appeared True, or rosters unavailable: a goalscorer pick is made
+    # inside the lineup window, so a non-scorer who was in the XI/subs is a
+    # LOSS; default to LOSS when rosters can't confirm (the realistic case).
+    return "LOSS"
+
+
 def run_backtest_promo(picks: list[dict]) -> list[dict]:
     """
     Grade promo picks.  Similar to run_backtest but:
@@ -2666,18 +2764,6 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
     for pick in picks:
         sport   = pick["sport"]
         game_dt = pick.get("game_date")
-
-        if pick["market"] in ("HR", "GOAL"):
-            # Binary anytime markets (MLB HR, WC anytime goalscorer).
-            # Auto-grading needs DNP detection — books void the bet when
-            # the player never enters the game, and ESPN scoreboard data
-            # can't distinguish "played, didn't score" from "never came
-            # on", so a naive LOSS default would poison the calibration
-            # data. Stays MANUAL; CLV capture still runs automatically
-            # via closing_lines.
-            pick["result"] = "MANUAL"
-            skipped += 1
-            continue
 
         if not game_dt:
             pick["result"] = "NO_RESULT"
@@ -2744,10 +2830,17 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
             unmatched += 1
             continue
 
-        # Props need box-score grading; game lines use score-based grading.
+        # Anytime binary markets (MLB HR, WC goalscorer) carry no O/U suffix
+        # so is_prop is False — grade them via box score with DNP→void
+        # detection (a void grades PUSH: stake refunded, P&L 0). Props need
+        # box-score grading; game lines use score-based grading.
         # Mirrors the same branch in run_backtest — without it, prop promos
         # were getting graded as game-line bets and returning bogus W/Ls.
-        if pick.get("is_prop"):
+        if pick["market"] == "HR":
+            grade = _grade_hr_anytime(pick, game_result)
+        elif pick["market"] == "GOAL":
+            grade = _grade_goal_anytime(pick, game_result)
+        elif pick.get("is_prop"):
             grade = grade_prop(pick, game_result)
         else:
             grade = grade_pick(pick, game_result)

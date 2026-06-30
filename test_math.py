@@ -1845,16 +1845,18 @@ def test_goalscorer_edge_construction_one_sided():
     assert not _qualifies_prop({"market": "goal", "ev_pct": 10.0})
 
 
-def test_backtest_promo_goalscorer_grades_manual():
-    # Binary anytime markets can't auto-grade without DNP detection —
-    # GOAL joins HR in the MANUAL bucket (CLV still captures via
-    # closing_lines).
+def test_backtest_promo_anytime_no_longer_forced_manual():
+    # HR and anytime-goalscorer are no longer dumped to MANUAL (they used to
+    # vanish from every P&L report). They now grade via box score — see the
+    # DNP→void logic in test_backtest_promo_grading.py. With no game_date
+    # there's nothing to grade, so the result is NO_RESULT, not MANUAL.
     from backtest import run_backtest_promo
-    pick = {"market": "GOAL", "sport": "unknown", "game_date": None,
-            "decimal": 3.0, "book": "DraftKings", "game": "x @ y",
-            "pick": "Raul Jimenez", "bet_amount": 5.0}
-    run_backtest_promo([pick])
-    assert pick["result"] == "MANUAL"
+    for market, player in (("GOAL", "Raul Jimenez"), ("HR", "Aaron Judge")):
+        pick = {"market": market, "sport": "unknown", "game_date": None,
+                "decimal": 3.0, "book": "DraftKings", "game": "x @ y",
+                "pick": player, "bet_amount": 5.0}
+        run_backtest_promo([pick])
+        assert pick["result"] == "NO_RESULT"
 
 
 def test_wc_window_message_when_next_game_beyond_promo_window():
@@ -1909,6 +1911,11 @@ from odds_compare import (
     _starts_within_minutes,
     PROMO_ODDS_WINDOWS,
     PROMO_PROP_WINDOW_MIN,
+    promo_boost_stake,
+    _in_promo_kelly_band,
+    PROMO_FULL_KELLY_ODDS_LO,
+    PROMO_FULL_KELLY_ODDS_HI,
+    MIN_BET,
 )
 
 
@@ -2023,6 +2030,67 @@ def test_promo_window_stage_boundaries():
     assert _promo_window_stage(_promo_edge(175, 33.0), windows) == 1
     assert _promo_window_stage(_promo_edge(-150, 62.0), windows) == 2
     assert _promo_window_stage(_promo_edge(2000, 5.0), windows) is None
+
+
+# ── Profit-boost staking band (promo_boost_stake) ──────────────────────
+# Fully-graded promo P&L showed boosts only cash in a middle band; the
+# +300..+700 danger zone (low hit rate, but a big boost inflates Kelly
+# into a real stake) and deep favorites bleed. Outside the band a pick is
+# still placed but lottery-sized to the book minimum. See
+# promo_oddsband_pnl_analysis.
+
+def test_in_promo_kelly_band_boundaries():
+    assert _in_promo_kelly_band(american_to_decimal(PROMO_FULL_KELLY_ODDS_LO))
+    assert _in_promo_kelly_band(american_to_decimal(PROMO_FULL_KELLY_ODDS_HI))
+    assert _in_promo_kelly_band(american_to_decimal(250))
+    assert not _in_promo_kelly_band(american_to_decimal(
+        PROMO_FULL_KELLY_ODDS_HI + 1))
+    assert not _in_promo_kelly_band(american_to_decimal(
+        PROMO_FULL_KELLY_ODDS_LO - 10))
+    assert not _in_promo_kelly_band(american_to_decimal(-150))
+
+
+def test_promo_boost_stake_in_band_full_kelly():
+    # Boosted +250 sits in the band: full Kelly (here capped by max_bet).
+    bet, capped = promo_boost_stake(
+        1000, 0.05, american_to_decimal(250), "DraftKings", max_bet=10)
+    assert bet == 10.0
+    assert capped is False
+
+
+def test_promo_boost_stake_longshot_lottery_capped():
+    # Boosted +540 (e.g. a goalscorer / HR longshot) — book-minimum lottery
+    # ticket even though Kelly would have wanted $50.
+    bet, capped = promo_boost_stake(
+        1000, 0.05, american_to_decimal(540), "DraftKings", max_bet=10)
+    assert bet == MIN_BET["DraftKings"]
+    assert capped is True
+
+
+def test_promo_boost_stake_deep_favorite_lottery_capped():
+    # Boosted to a deep favorite (-150): below the band, also lottery-sized.
+    bet, capped = promo_boost_stake(
+        1000, 0.20, american_to_decimal(-150), "FanDuel", max_bet=10)
+    assert bet == MIN_BET["FanDuel"]
+    assert capped is True
+
+
+def test_promo_boost_stake_short_total_kept_full():
+    # The +100 floor is deliberate: a short total/spread boost at +118 keeps
+    # a full stake (these have cashed), not a lottery cap.
+    bet, capped = promo_boost_stake(
+        1000, 0.05, american_to_decimal(118), "DraftKings", max_bet=10)
+    assert bet == 10.0
+    assert capped is False
+
+
+def test_promo_boost_stake_zero_kelly_not_capped():
+    # Kelly says nothing (in-band -EV after boost): $0, and NOT flagged as a
+    # lottery cap — the caller decides whether to burn the token cheaply.
+    bet, capped = promo_boost_stake(
+        1000, 0.0, american_to_decimal(250), "DraftKings", max_bet=10)
+    assert bet == 0.0
+    assert capped is False
 
 
 def test_starts_within_minutes():
