@@ -3759,11 +3759,79 @@ def _add_promo_tab(wb, promo_picks: list[dict]):
     _promo_summary_section("By Market", by_market, next_row + 1, "375623")
 
 
+def _add_parlay_sim_tab(wb, sim: dict):
+    """
+    "Parlay Sim" tab — hypothetical parlays built from each day's graded
+    picks (no real bets were placed). Summary grid across leg counts /
+    boost levels / SGP price haircuts, then per-parlay detail for the
+    headline configs.
+    """
+    ws = wb.create_sheet("Parlay Sim")
+    hdr_font = Font(bold=True, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="4472C4")
+
+    ws.cell(row=1, column=1,
+            value="PARLAY SIMULATION — hypothetical, $%.0f flat stake. "
+                  "Cross-game payouts are exact (product of leg prices); "
+                  "SGP payouts are the naive product minus the shown "
+                  "haircut, since the book's correlation-adjusted quote "
+                  "isn't recoverable." % _PARLAY_SIM_UNIT
+            ).font = Font(bold=True, italic=True)
+
+    headers = ["Type", "Legs", "Boost %", "SGP Haircut %", "Parlays",
+               "Wins", "Pushes", "Hit %", "Staked $", "P&L $", "ROI %"]
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=c, value=h)
+        cell.font, cell.fill = hdr_font, hdr_fill
+
+    r = 4
+    for row in sim.get("summary", []):
+        decided = row["parlays"] - row["pushes"]
+        hit = row["wins"] / decided * 100 if decided else 0.0
+        vals = [row["kind"].upper(), row["n_legs"], row["boost_pct"],
+                row["haircut_pct"] if row["kind"] == "sgp" else "—",
+                row["parlays"], row["wins"], row["pushes"],
+                round(hit, 1), row["staked"], row["pnl"], row["roi_pct"]]
+        for c, v in enumerate(vals, 1):
+            ws.cell(row=r, column=c, value=v)
+        r += 1
+
+    # Per-parlay detail for headline configs
+    for label, rows in sim.get("detail", {}).items():
+        r += 2
+        ws.cell(row=r, column=1, value=f"Detail — {label}").font = Font(bold=True)
+        r += 1
+        det_headers = ["Date", "Book", "Legs", "Naive Odds", "Priced Odds",
+                       "Exp EV %", "Result", "P&L $"]
+        for c, h in enumerate(det_headers, 1):
+            cell = ws.cell(row=r, column=c, value=h)
+            cell.font, cell.fill = hdr_font, hdr_fill
+        r += 1
+        for p in rows:
+            legs_txt = "; ".join(
+                f"{l['game']} {l['market']} {l['pick']}"
+                + (f" {l['line']}" if l.get("line") not in (None, "") else "")
+                for l in p["legs"])
+            vals = [p["date"], p["book"], legs_txt,
+                    round(p["naive_dec"], 2), round(p["priced_dec"], 2),
+                    p["exp_ev"], p["result"], p["pnl"]]
+            for c, v in enumerate(vals, 1):
+                ws.cell(row=r, column=c, value=v)
+            r += 1
+
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 70
+    for col in "DEFGHIJK":
+        ws.column_dimensions[col].width = 12
+
+
 def write_backtest_excel(all_picks: list[dict], settled: list[dict],
                          output_path: str, start_dt: date, end_dt: date,
                          play_these_picks: list[dict] | None = None,
                          prop_picks: list[dict] | None = None,
-                         promo_picks: list[dict] | None = None):
+                         promo_picks: list[dict] | None = None,
+                         parlay_sim: dict | None = None):
     """
     Write the full backtest Excel report.
 
@@ -4218,6 +4286,9 @@ def write_backtest_excel(all_picks: list[dict], settled: list[dict],
     if promo_picks:
         _add_promo_tab(wb, promo_picks)
 
+    if parlay_sim and parlay_sim.get("summary"):
+        _add_parlay_sim_tab(wb, parlay_sim)
+
     wb.save(output_path)
     print(f"\nBacktest report saved to: {output_path}")
 
@@ -4373,6 +4444,202 @@ def _replay_pt_from_ev(ev_graded: list[dict]) -> list[dict]:
     return out
 
 
+# ── Parlay / SGP simulation ────────────────────────────────────────────────────
+#
+# "What if each day's graded picks had been combined into a boosted parlay?"
+# Hypothetical only — selection uses pick-time data (odds + the sheet's own
+# EV), never results, so there's no hindsight bias in which combos get built.
+# Cross-game parlays price exactly (books quote the product of leg prices);
+# SGPs get a correlation-adjusted quote we can't recover, so SGP results are
+# reported across a grid of price haircuts off the naive product.
+
+_PARLAY_SIM_UNIT      = 10.0   # flat stake per simulated parlay
+_PARLAY_SIM_LEG_MAX   = 2.5    # decimal ≈ +150 per leg (mirrors live builder)
+_PARLAY_SIM_TOTAL_MAX = 8.0    # decimal ≈ +700 combined (mirrors live builder)
+_PARLAY_SIM_POOL_CAP  = 12     # top legs per pool — keeps brute force cheap
+
+# Configs that also get a per-parlay detail listing in the Excel tab.
+_PARLAY_SIM_HEADLINES = {("cross", 3, 30, 0), ("sgp", 3, 30, 20)}
+
+
+def _sim_fair_prob(p: dict) -> float:
+    """Back out the fair win prob the sheet believed at pick time:
+    ev_pct = (fair × decimal − 1) × 100  →  fair = (1 + ev/100) / decimal."""
+    dec = p.get("decimal") or 0
+    if dec <= 1:
+        return 0.0
+    fair = (1 + (p.get("ev_pct") or 0) / 100) / dec
+    return min(0.99, max(0.01, fair))
+
+
+def _sim_price(dec: float, boost_pct: float, haircut_pct: float) -> float:
+    """Naive product price → SGP haircut on the payout, then profit boost."""
+    cut = 1 + (dec - 1) * (1 - haircut_pct / 100)
+    return 1 + (cut - 1) * (1 + boost_pct / 100)
+
+
+def _sim_day_pool(legs: list[dict], unique_games: bool) -> list[dict]:
+    """Dedup a day's legs the way the live builder does (one per game+market;
+    props keyed per player) — or one per game for cross-game parlays, since
+    two same-game legs would make the book reprice the ticket as an SGP.
+    Returns the top legs by fair prob, capped for brute-force search."""
+    from odds_compare import _PLAYER_PROP_MARKETS
+    best_by_key: dict[tuple, dict] = {}
+    for p in legs:
+        mkt = (p.get("market") or "").lower()
+        if unique_games:
+            key = (p["game"],)
+        elif mkt in _PLAYER_PROP_MARKETS:
+            key = (p["game"], mkt, p.get("pick"))
+        else:
+            key = (p["game"], mkt)
+        cur = best_by_key.get(key)
+        if cur is None or _sim_fair_prob(p) > _sim_fair_prob(cur):
+            best_by_key[key] = p
+    pool = sorted(best_by_key.values(), key=_sim_fair_prob, reverse=True)
+    return pool[:_PARLAY_SIM_POOL_CAP]
+
+
+def _sim_best_combo(pool: list[dict], n_legs: int, boost_pct: float,
+                    haircut_pct: float, sgp: bool):
+    """Best n-leg combo by EV at the (haircut + boosted) price, mirroring the
+    live builder's total-odds cap. Returns (combo, ev) or (None, 0.0)."""
+    from itertools import combinations
+    from odds_compare import _sgp_combo_ok
+    best, best_ev = None, 0.0
+    for combo in combinations(pool, n_legs):
+        if sgp and not _sgp_combo_ok(
+                [{"market": (l.get("market") or "").lower(),
+                  "outcome": l.get("pick")} for l in combo]):
+            continue
+        dec, fair = 1.0, 1.0
+        for leg in combo:
+            dec  *= leg["decimal"]
+            fair *= _sim_fair_prob(leg)
+        if dec > _PARLAY_SIM_TOTAL_MAX:
+            continue
+        ev = fair * _sim_price(dec, boost_pct, haircut_pct) - 1
+        if ev > best_ev:
+            best, best_ev = combo, ev
+    return best, best_ev
+
+
+def _grade_sim_parlay(combo, boost_pct: float, haircut_pct: float):
+    """Industry rules: a pushed leg drops out and the ticket reprices; the
+    parlay wins only if every remaining leg won. Returns (result, pnl, price)."""
+    live = [l for l in combo if l["result"] != "PUSH"]
+    if not live:
+        return "PUSH", 0.0, 1.0
+    dec = 1.0
+    for l in live:
+        dec *= l["decimal"]
+    priced = _sim_price(dec, boost_pct, haircut_pct)
+    if all(l["result"] == "WIN" for l in live):
+        return "WIN", round(_PARLAY_SIM_UNIT * (priced - 1), 2), priced
+    return "LOSS", -_PARLAY_SIM_UNIT, priced
+
+
+def simulate_parlays(pt_graded: list[dict],
+                     prop_graded: list[dict] | None = None) -> dict:
+    """
+    Simulate one parlay per day per book from graded picks, across a grid of
+    configs. Play These game lines + graded props form the leg pool (props
+    are what make 3+ leg SGPs possible — PT alone carries at most one
+    compatible game-line pair per game).
+
+    Returns {"summary": [config rows], "detail": {label: [parlay rows]}}.
+    """
+    pool_src = list(pt_graded or []) + list(prop_graded or [])
+    settled = [p for p in pool_src
+               if p.get("result") in ("WIN", "LOSS", "PUSH")
+               and (p.get("decimal") or 0) > 1
+               and p.get("game_date") and p.get("game")]
+    legs_pool = [p for p in settled if p["decimal"] <= _PARLAY_SIM_LEG_MAX]
+
+    by_day_book: dict[tuple, list] = defaultdict(list)
+    for p in legs_pool:
+        by_day_book[(p["game_date"], p["book"])].append(p)
+
+    configs = ([("cross", n, b, 0) for n in (3, 4) for b in (0, 25, 30)]
+               + [("sgp", n, b, h) for n in (2, 3, 4) for b in (25, 30)
+                  for h in (0, 10, 20, 30)])
+
+    summary: list[dict] = []
+    detail:  dict[str, list] = {}
+    for kind, n_legs, boost, haircut in configs:
+        rows = []
+        for (day, book), day_legs in sorted(by_day_book.items()):
+            if kind == "sgp":
+                groups: dict[str, list] = defaultdict(list)
+                for p in day_legs:
+                    groups[p["game"]].append(p)
+                pools = [g for g in groups.values() if len(g) >= n_legs]
+            else:
+                pools = [day_legs] if len(day_legs) >= n_legs else []
+
+            best_combo, best_ev = None, 0.0
+            for pl in pools:
+                pool = _sim_day_pool(pl, unique_games=(kind == "cross"))
+                combo, ev = _sim_best_combo(
+                    pool, n_legs, boost, haircut, sgp=(kind == "sgp"))
+                if combo is not None and ev > best_ev:
+                    best_combo, best_ev = combo, ev
+            if best_combo is None:
+                continue
+
+            result, pnl, priced = _grade_sim_parlay(best_combo, boost, haircut)
+            naive_dec = 1.0
+            for l in best_combo:
+                naive_dec *= l["decimal"]
+            rows.append({
+                "date":       day,
+                "book":       book,
+                "kind":       kind,
+                "legs":       list(best_combo),
+                "n_legs":     n_legs,
+                "naive_dec":  round(naive_dec, 3),
+                "priced_dec": round(priced, 3),
+                "exp_ev":     round(best_ev * 100, 2),
+                "result":     result,
+                "pnl":        pnl,
+            })
+
+        wins   = sum(1 for r in rows if r["result"] == "WIN")
+        pushes = sum(1 for r in rows if r["result"] == "PUSH")
+        staked = _PARLAY_SIM_UNIT * sum(
+            1 for r in rows if r["result"] != "PUSH")
+        pnl    = round(sum(r["pnl"] for r in rows), 2)
+        summary.append({
+            "kind":        kind,
+            "n_legs":      n_legs,
+            "boost_pct":   boost,
+            "haircut_pct": haircut,
+            "parlays":     len(rows),
+            "wins":        wins,
+            "pushes":      pushes,
+            "staked":      staked,
+            "pnl":         pnl,
+            "roi_pct":     round(pnl / staked * 100, 1) if staked else 0.0,
+        })
+        if (kind, n_legs, boost, haircut) in _PARLAY_SIM_HEADLINES:
+            detail[f"{kind} {n_legs}-leg +{boost}% "
+                   f"(haircut {haircut}%)"] = rows
+
+    return {"summary": summary, "detail": detail}
+
+
+def _print_parlay_sim(sim: dict) -> None:
+    rows = [r for r in sim.get("summary", []) if r["parlays"]]
+    if not rows:
+        print("  No days had enough qualifying legs to build a parlay.")
+        return
+    for r in rows:
+        hc = f" cut{r['haircut_pct']:>3}%" if r["kind"] == "sgp" else "      "
+        print(f"  {r['kind']:<5} {r['n_legs']}-leg +{r['boost_pct']:>2}%{hc}"
+              f"  n={r['parlays']:<3} W{r['wins']:<3}"
+              f" P&L ${r['pnl']:+8.2f}  ROI {r['roi_pct']:+6.1f}%")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_full_backtest(start_dt: date, end_dt: date,
@@ -4491,6 +4758,15 @@ def run_full_backtest(start_dt: date, end_dt: date,
     else:
         prop_graded = None
 
+    # ── Parlay / SGP simulation (hypothetical tickets, no real bets) ─────────
+    print("\n─── Parlay / SGP simulation (PT legs + props) ───────────")
+    try:
+        parlay_sim = simulate_parlays(graded, prop_graded or [])
+        _print_parlay_sim(parlay_sim)
+    except Exception as e:
+        print(f"  Parlay sim failed: {e}")
+        parlay_sim = None
+
     # ── Archive old backtest reports ──────────────────────────────────────────
     # Run timestamp is baked into the new file's name (after the date range,
     # joined by '__'), so re-running the same date range no longer clobbers
@@ -4510,12 +4786,14 @@ def run_full_backtest(start_dt: date, end_dt: date,
     write_backtest_excel(primary_picks, primary_settled, out_path, start_dt, end_dt,
                          play_these_picks=graded if graded else None,
                          prop_picks=prop_graded,
-                         promo_picks=promo_graded)
+                         promo_picks=promo_graded,
+                         parlay_sim=parlay_sim)
 
     return {
         "primary_picks": primary_picks,
         "play_these_graded": graded,
         "excel_path": out_path,
+        "parlay_sim": parlay_sim,
     }
 
 

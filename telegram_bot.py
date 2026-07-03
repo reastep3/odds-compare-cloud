@@ -706,6 +706,16 @@ def format_summary(result: dict, user_books: list[str],
     return "\n".join(lines)
 
 
+def _win_display(bet: float, profit: float, book: str) -> str:
+    """Format a pick's win amount the way the book's own bet slip shows it,
+    so the number in the message can be eyeballed against the slip while
+    placing the bet: DraftKings displays total payout (stake + winnings),
+    FanDuel displays net profit."""
+    if book == "DraftKings":
+        return f"${bet + profit:.2f} payout"
+    return f"+${profit:.2f}"
+
+
 def format_play_edges(play_edges: list[dict], bankrolls: dict,
                       skip_mode: bool = False,
                       kelly_scale: float = 1.0) -> list[str]:
@@ -761,7 +771,8 @@ def format_play_edges(play_edges: list[dict], bankrolls: dict,
                 third_line = f"    EV {edge['ev_pct']}% | {conf}"
             else:
                 third_line = (f"    EV {edge['ev_pct']}% | {conf} | "
-                              f"${bet:.2f} -> +${profit:.2f}")
+                              f"${bet:.2f} -> "
+                              f"{_win_display(bet, profit, book_name)}")
             lines.append(
                 f"\n<b>{i}.</b> {sport} | {game}{time_part}\n"
                 f"    {market} | {pick_str} | {odds_str}\n"
@@ -773,9 +784,13 @@ def format_play_edges(play_edges: list[dict], bankrolls: dict,
                 lines.append(f'    <a href="{link}">Open in {short}</a>')
 
         if not skip_mode:
+            if book_name == "DraftKings":
+                potential = f"Potential payout: ${total_bet + total_profit:.2f}"
+            else:
+                potential = f"Potential: +${total_profit:.2f}"
             lines.append(
                 f"\n----------------------------\n"
-                f"Deployed: ${total_bet:.2f} | Potential: +${total_profit:.2f}"
+                f"Deployed: ${total_bet:.2f} | {potential}"
             )
         messages.append("\n".join(lines))
 
@@ -904,7 +919,8 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
             else:
                 bet_label = "Bet"
             lines.append(
-                f"  {bet_label} ${bet:.2f} -&gt; +${profit:.2f}"
+                f"  {bet_label} ${bet:.2f} -&gt; "
+                f"{_win_display(bet, profit, edge['book'])}"
             )
 
         link = _deep_link(edge)
@@ -922,6 +938,9 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
 
     lines = ["<b>PARLAY PICKS</b>"]
 
+    # Real (non-placeholder) rows are numbered in display order — the same
+    # order they're stashed for /sgpcheck, so "pick n" lines up.
+    n = 0
     for row in parlay_rows:
         promo = row["promo"]
         legs = row["legs"]
@@ -939,18 +958,22 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
             )
             continue
 
+        n += 1
         lines.append(
-            f"\n<b>{_esc(promo['label'])} ({row['num_legs']} legs)</b>"
+            f"\n<b>{n}. {_esc(promo['label'])} ({row['num_legs']} legs)</b>"
             f"{copy_suffix}"
         )
         lines.append(
             f"  {row['parlay_american']} -&gt; {row['boost_american']} (boosted)"
         )
         lines.append(
-            f"  EV {row['boosted_ev']}% | Win prob {row['parlay_fair_prob']:.1f}%"
+            f"  EV {row.get('unboosted_ev', 0):+.1f}% -&gt; "
+            f"{row['boosted_ev']:+.1f}% | "
+            f"Win prob {row['parlay_fair_prob']:.1f}%"
         )
         lines.append(
-            f"  Bet ${row['bet']:.2f} -&gt; +${row['profit']:.2f}"
+            f"  Bet ${row['bet']:.2f} -&gt; "
+            f"{_win_display(row['bet'], row['profit'], promo['book'])}"
         )
         lines.append("")
         for i, leg in enumerate(legs, 1):
@@ -964,6 +987,14 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
             )
             lines.append(
                 f"     {leg['market'].upper()} | {pick} | {odds}"
+            )
+
+        if promo.get("sgp"):
+            lines.append(
+                f"\n  <i>⚠ The book reprices SGPs for correlation — the "
+                f"odds above are the naive product. Build the slip, then "
+                f"send</i> <code>/sgpcheck {n} +450</code> <i>(your actual "
+                f"quote) to verify EV at the real price.</i>"
             )
 
     return "\n".join(lines)
@@ -2552,6 +2583,12 @@ async def _finalize_and_send(update: Update,
             if parlay_rows:
                 parlay_rows = [r for r in parlay_rows
                                if r["promo"]["book"] in user_books]
+            # Stash the real rows (display order = pick number) so
+            # /sgpcheck can re-price them against the book's quote.
+            real_rows = [r for r in parlay_rows if r.get("legs")]
+            if real_rows:
+                context.bot_data.setdefault(
+                    "parlay_quotes", {})[chat_id] = real_rows
             parlay_msg = format_parlay_picks(parlay_rows)
             if parlay_msg:
                 for chunk in _split_message(parlay_msg):
@@ -2786,6 +2823,107 @@ async def recv_qb_bankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ConversationHandler.END
 
 
+async def cmd_sgpcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-price a parlay pick from the last run against the odds the book
+    actually quotes on the slip (SGPs get a correlation-adjusted price the
+    Odds API can't see). Usage: /sgpcheck +450  ·  /sgpcheck 2 +450"""
+    if not is_authorized(update):
+        return
+
+    rows = context.bot_data.get("parlay_quotes", {}).get(
+        update.effective_chat.id) or []
+    if not rows:
+        await update.message.reply_text(
+            "No parlay picks stored from a recent run — run a parlay promo "
+            "first (/run_promos), then check its quote here.")
+        return
+
+    args = list(context.args or [])
+    idx, quote_txt = 1, None
+    if len(args) == 1:
+        quote_txt = args[0]
+    elif len(args) >= 2:
+        try:
+            idx = int(args[0])
+            quote_txt = args[1]
+        except ValueError:
+            quote_txt = args[0]
+    if quote_txt is None:
+        await update.message.reply_text(
+            "Usage: /sgpcheck <quoted odds> — e.g. /sgpcheck +450 — or "
+            "/sgpcheck 2 +450 when the run had several parlays.")
+        return
+    quoted_dec = _parse_any_odds(quote_txt)
+    if quoted_dec is None or quoted_dec <= 1.0:
+        await update.message.reply_text(
+            f"Couldn't read odds from {quote_txt!r} — send American "
+            f"(+450) or decimal (5.50).")
+        return
+    if not (1 <= idx <= len(rows)):
+        await update.message.reply_text(
+            f"Pick #{idx} not found — the last run stored {len(rows)} "
+            f"parlay pick(s).")
+        return
+
+    from odds_compare import (apply_profit_boost, calc_ev, kelly_bet,
+                              clamp_bet, format_american)
+
+    row       = rows[idx - 1]
+    promo     = row["promo"]
+    book      = promo.get("book", "DraftKings")
+    boost_pct = promo.get("boost_pct") or 0
+    naive_dec = row["parlay_decimal"]
+    fair      = row["parlay_fair_prob"] / 100
+
+    boosted_quote = apply_profit_boost(quoted_dec, boost_pct)
+    ev            = calc_ev(fair, boosted_quote)
+    k_frac        = get_user_kelly(update)
+    kelly         = kelly_bet(fair, boosted_quote, fraction=k_frac)
+
+    # Correlation tax: how much of the naive product payout the book kept.
+    tax = ((1 - (quoted_dec - 1) / (naive_dec - 1)) * 100
+           if naive_dec > 1 else 0.0)
+    if tax >= 0:
+        tax_str = (f"book shaved {tax:.1f}% off the naive "
+                   f"{row['parlay_american']} payout")
+    else:
+        tax_str = (f"quote beats the naive {row['parlay_american']} "
+                   f"payout by {-tax:.1f}%")
+
+    lines = [
+        f"<b>QUOTE CHECK — {_esc(promo['label'])}</b> (pick {idx})",
+        f"Quoted {format_american(quoted_dec)} — {tax_str}",
+    ]
+    if boost_pct:
+        lines.append(
+            f"After {boost_pct:g}% boost: {format_american(boosted_quote)}")
+    lines.append(
+        f"Win prob {fair * 100:.1f}% <i>(independence approx)</i> | "
+        f"EV at quote: <b>{ev:+.1f}%</b>")
+
+    if ev <= 0 or kelly <= 0:
+        lines.append(
+            "<b>SKIP</b> — the quote eats the boost; not +EV at this price.")
+    else:
+        uid = str(update.effective_user.id)
+        bankroll = (_users.get(uid, {}).get("last_bankrolls") or {}).get(book, 0)
+        if bankroll > 0:
+            bet = clamp_bet(bankroll * kelly, book)
+            if promo.get("max_bet") and bet > promo["max_bet"]:
+                bet = promo["max_bet"]
+            profit = bet * (boosted_quote - 1)
+            lines.append(
+                f"<b>BET</b> ${bet:.2f} -&gt; "
+                f"{_win_display(bet, profit, book)} "
+                f"(Kelly {kelly * 100:.2f}% of ${bankroll:,.0f} {book})")
+        else:
+            lines.append(
+                f"<b>BET</b> — Kelly {kelly * 100:.2f}% of your "
+                f"{book} bankroll.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
@@ -2802,6 +2940,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/quickbet    — Kelly calculator for promos (no API call, no archive)\n"
         "/bonus       — Best use of a free/bonus bet ($ amount + any limits)\n"
         "/drawbreaker — Best World Cup ML for a draw-refund (bonus-bet) promo\n"
+        "/sgpcheck    — Re-price a parlay pick at the book's quoted odds\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
         "/digest      — Send the last-7-days P&L digest now\n"
@@ -3387,6 +3526,12 @@ async def _kick_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _safe_send(context.bot, chat_id, chunk, parse_mode="HTML")
         await asyncio.sleep(_BURST_SEND_DELAY)
 
+    sim_msg = format_parlay_sim_results(result.get("parlay_sim"))
+    if sim_msg:
+        for chunk in _split_message(sim_msg):
+            await _safe_send(context.bot, chat_id, chunk, parse_mode="HTML")
+            await asyncio.sleep(_BURST_SEND_DELAY)
+
     if excel_path and os.path.exists(excel_path):
         with open(excel_path, "rb") as f:
             await context.bot.send_document(
@@ -3403,6 +3548,47 @@ def _run_backtest_wrapper(start_dt: date, end_dt: date,
                            an_only_mode: str = "exclude") -> dict:
     from backtest import run_full_backtest
     return run_full_backtest(start_dt, end_dt, an_only_mode=an_only_mode)
+
+
+def format_parlay_sim_results(sim: dict | None) -> str | None:
+    """Compact summary of the hypothetical parlay/SGP simulation that
+    run_full_backtest attaches to its result (full grid lives in the
+    'Parlay Sim' tab of the Excel report)."""
+    if not sim:
+        return None
+    rows = [r for r in sim.get("summary", []) if r["parlays"]]
+    if not rows:
+        return None
+
+    lines = ["<b>PARLAY SIM</b> <i>(hypothetical — $10 flat per ticket, "
+             "built from each day's archived picks; full grid in the "
+             "Excel 'Parlay Sim' tab)</i>"]
+
+    cross = [r for r in rows if r["kind"] == "cross"]
+    if cross:
+        lines.append("\n<b>Cross-game</b> (exact pricing):")
+        for r in cross:
+            lines.append(
+                f"  {r['n_legs']}-leg +{r['boost_pct']}%: "
+                f"{r['wins']}W/{r['parlays']} tickets | "
+                f"ROI {r['roi_pct']:+.1f}%")
+
+    sgps = [r for r in rows if r["kind"] == "sgp"]
+    if sgps:
+        lines.append("\n<b>SGP</b> (naive price minus haircut — the real "
+                     "correlation-adjusted quote isn't recoverable):")
+        by_cfg: dict[tuple, dict] = {}
+        for r in sgps:
+            by_cfg.setdefault(
+                (r["n_legs"], r["boost_pct"]), {})[r["haircut_pct"]] = r
+        for (n, b), hs in sorted(by_cfg.items()):
+            cuts = "/".join(str(h) for h in sorted(hs))
+            roi_str = " / ".join(
+                f"{hs[h]['roi_pct']:+.0f}% (n={hs[h]['parlays']})"
+                for h in sorted(hs))
+            lines.append(f"  {n}-leg +{b}% at {cuts}% cut: {roi_str}")
+
+    return "\n".join(lines)
 
 
 def format_backtest_results(picks: list[dict], start_dt: date, end_dt: date,
@@ -3642,6 +3828,7 @@ def main():
     app.add_handler(bonus_handler)
     app.add_handler(drawbreaker_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
+    app.add_handler(CommandHandler("sgpcheck", cmd_sgpcheck))
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("status", cmd_status))

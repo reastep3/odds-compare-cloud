@@ -6439,6 +6439,42 @@ def find_player_prop_edges(
     return edges
 
 
+# ── SGP correlation guardrails ────────────────────────────────────────
+# Same-game legs are never truly independent, but some pairs are so
+# tightly coupled that the parlay is one bet priced twice — and those
+# are exactly the combos the book's SGP engine shaves hardest. Block
+# the classic near-duplicates; keep weakly-coupled combos (props on
+# different players, prop + game line) where the independence math
+# stays a tolerable approximation of the real joint probability.
+_SGP_GAME_LINE_MARKETS = frozenset({"h2h", "spreads"})
+_SGP_TOTALS_MARKETS    = frozenset({"totals", "totals_1st"})
+
+
+def _sgp_legs_compatible(a: dict, b: dict) -> bool:
+    """True if two same-game legs are weakly correlated enough to parlay."""
+    ma = str(a.get("market", "")).lower()
+    mb = str(b.get("market", "")).lower()
+    # Moneyline + spread track the same final margin (same side is a
+    # near-duplicate; opposite sides are near-contradictory).
+    if ma in _SGP_GAME_LINE_MARKETS and mb in _SGP_GAME_LINE_MARKETS:
+        return False
+    # Full-game and first-half totals ride the same scoring pace.
+    if ma in _SGP_TOTALS_MARKETS and mb in _SGP_TOTALS_MARKETS:
+        return False
+    # Two props on the same player (outcome holds the player name).
+    if (ma in _PLAYER_PROP_MARKETS and mb in _PLAYER_PROP_MARKETS
+            and a.get("outcome") == b.get("outcome")):
+        return False
+    return True
+
+
+def _sgp_combo_ok(legs) -> bool:
+    """True if every pair of legs in the combo passes the guardrail."""
+    legs = list(legs)
+    return all(_sgp_legs_compatible(legs[i], legs[j])
+               for i in range(len(legs)) for j in range(i + 1, len(legs)))
+
+
 def _build_parlay_rows(edges: list[dict], promos: list[dict],
                        dk_bankroll: float, fd_bankroll: float,
                        extra_edges: list[dict] | None = None,
@@ -6450,8 +6486,10 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
     For ≤4 legs with ≤20 candidates: try all combinations (brute-force optimal).
     Otherwise: greedy top-N by EV%.
 
-    Assumes legs are independent (different games) for probability math.
-    Never puts two picks from the same game+market in one parlay (contradictory).
+    Assumes legs are independent for probability math. Non-SGP parlays take
+    at most one leg per game (a second same-game leg makes the book reprice
+    the ticket as an SGP); SGP combos are filtered by _sgp_combo_ok so only
+    weakly-correlated same-game legs combine.
 
     promo_pool (broader — all DK/FD outcomes, no fair_prob floor) is preferred
     over parlay_pool (fair_prob ≥ 30% favorites) so SGPs can combine mid-range-
@@ -6600,6 +6638,14 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
                     if try_legs <= 4 and len(candidate_pool) <= 20:
                         for combo in _combinations(candidate_pool, try_legs):
+                            if is_sgp and not _sgp_combo_ok(combo):
+                                continue
+                            # Non-SGP: one leg per game — a second same-game
+                            # leg makes the book reprice the ticket as an SGP
+                            # and the quoted payout stops matching the math.
+                            if not is_sgp and len({l["game"] for l in combo}
+                                                  ) < try_legs:
+                                continue
                             parlay_dec = 1.0
                             parlay_fair = 1.0
                             for leg in combo:
@@ -6617,20 +6663,46 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                                 combo_ev    = ev
                                 combo_candidate = combo
                     else:
-                        # Greedy: top-N by fair probability
-                        greedy = tuple(candidate_pool[:try_legs])
-                        parlay_dec = 1.0
-                        parlay_fair = 1.0
-                        for leg in greedy:
-                            parlay_dec  *= leg["odds_decimal"]
-                            parlay_fair *= leg["fair_prob"] / 100
-                        if ((parlay_min_dec is None
-                                or parlay_dec >= parlay_min_dec)
-                                and parlay_dec <= total_cap_dec):
-                            boost_dec = apply_profit_boost(
-                                parlay_dec, promo["boost_pct"])
-                            combo_ev = calc_ev(parlay_fair, boost_dec)
-                            combo_candidate = greedy
+                        # Greedy: top-N by fair probability. SGP skips
+                        # legs that correlate with one already taken.
+                        if is_sgp:
+                            picked: list[dict] = []
+                            for cand in candidate_pool:
+                                if all(_sgp_legs_compatible(cand, c)
+                                       for c in picked):
+                                    picked.append(cand)
+                                if len(picked) == try_legs:
+                                    break
+                            greedy = (tuple(picked)
+                                      if len(picked) == try_legs else None)
+                        else:
+                            # One leg per game (same reprice reason as the
+                            # brute-force path above).
+                            picked = []
+                            seen_games: set = set()
+                            for cand in candidate_pool:
+                                g = cand.get("game")
+                                if g in seen_games:
+                                    continue
+                                picked.append(cand)
+                                seen_games.add(g)
+                                if len(picked) == try_legs:
+                                    break
+                            greedy = (tuple(picked)
+                                      if len(picked) == try_legs else None)
+                        if greedy is not None:
+                            parlay_dec = 1.0
+                            parlay_fair = 1.0
+                            for leg in greedy:
+                                parlay_dec  *= leg["odds_decimal"]
+                                parlay_fair *= leg["fair_prob"] / 100
+                            if ((parlay_min_dec is None
+                                    or parlay_dec >= parlay_min_dec)
+                                    and parlay_dec <= total_cap_dec):
+                                boost_dec = apply_profit_boost(
+                                    parlay_dec, promo["boost_pct"])
+                                combo_ev = calc_ev(parlay_fair, boost_dec)
+                                combo_candidate = greedy
 
                     if (combo_candidate is not None
                             and combo_ev > best_overall_ev):
