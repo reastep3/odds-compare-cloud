@@ -1160,6 +1160,7 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
     dk_col   = None
     fd_col   = None
     com_col  = None
+    bb_col   = None
     for ci, h in enumerate(header):
         if not isinstance(h, str):
             continue
@@ -1170,6 +1171,8 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
             fd_col = ci
         elif hl == "commence":
             com_col = ci
+        elif hl == "best book":
+            bb_col = ci
 
     props = []
     for row_vals in rows[1:]:
@@ -1211,10 +1214,20 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
         except (ValueError, TypeError):
             ev_pct = 0.0
 
-        # Pick best available odds from DK → FD
+        # Book attribution: prefer the explicit "Best Book" column (added
+        # 2026-07) — it names the book the edge was actually priced at, which
+        # is what the closing-line CLV lookup is keyed on. Older archives
+        # without the column fall back to DK-first, which mis-attributes
+        # FanDuel-only edges to DraftKings whenever DK also lists the line.
+        book_pref = [(dk_col, "DraftKings"), (fd_col, "FanDuel")]
+        if bb_col is not None and bb_col < len(row_vals):
+            bb = str(row_vals[bb_col] or "").strip()
+            if bb == "FanDuel":
+                book_pref = [(fd_col, "FanDuel"), (dk_col, "DraftKings")]
+
         odds_am = None
         book    = None
-        for ci, bk_name in [(dk_col, "DraftKings"), (fd_col, "FanDuel")]:
+        for ci, bk_name in book_pref:
             if ci is not None and ci < len(row_vals) and row_vals[ci] is not None:
                 try:
                     odds_am = int(row_vals[ci])
@@ -3414,11 +3427,16 @@ def _add_props_tab(wb, prop_picks: list[dict]):
     }
 
     # ── Detail table ────────────────────────────────────────────────────────
+    # Close + CLV % trail the original columns (same convention as All
+    # Picks) so the positional Result/P&L styling below stays valid and
+    # build_training_table's header-driven reader picks them up for the
+    # _qualifies_prop gate calibration.
     detail_cols = [
         ("#", 5), ("File Date", 11), ("Game Date", 11), ("Sport", 8),
         ("Game", 30), ("Book", 13), ("Market", 13), ("Player", 22),
         ("Side", 6), ("Line", 7), ("Odds", 8), ("EV %", 7),
         ("Bet Amt", 10), ("Seen", 6), ("Result", 9), ("P&L", 11),
+        ("Close", 8), ("CLV %", 9),
     ]
     _hdr(ws, detail_cols, "375623")
 
@@ -3443,12 +3461,17 @@ def _add_props_tab(wb, prop_picks: list[dict]):
         side_disp = "Over" if p.get("prop_side") == "over" else "Under"
         mkt_label = PROP_MARKET_LABELS.get(p["market"], p["market"])
 
+        close_am  = p.get("close_odds_american")
+        close_str = (f"+{close_am}" if close_am and close_am > 0
+                     else str(close_am)) if close_am is not None else ""
+
         vals = [
             i + 1, fd_d, gd_d, p["sport"].upper(),
             p["game"], p["book"], mkt_label,
             p.get("player", ""), side_disp, p.get("line", ""),
             odds_str, p.get("ev_pct"), p["bet_amount"],
             p.get("times_seen", 1), result, pnl,
+            close_str, p.get("clv_pct"),
         ]
         for ci, val in enumerate(vals, 1):
             c = ws.cell(row=row, column=ci, value=val)
@@ -3479,6 +3502,14 @@ def _add_props_tab(wb, prop_picks: list[dict]):
         sc.font = Font(bold=True,
                        color="006100" if p.get("prop_side") == "over" else "9C0006")
 
+        # CLV % — green when the line moved your way, red when against
+        clv = p.get("clv_pct")
+        if clv is not None:
+            cv = ws.cell(row=row, column=18)
+            cv.number_format = '+0.00;-0.00;0.00'
+            cv.font = Font(bold=True, color="006100" if clv > 0 else
+                           ("9C0006" if clv < 0 else "1F4E79"))
+
     ws.freeze_panes = "A2"
     if sorted_props:
         ws.auto_filter.ref = (
@@ -3489,7 +3520,7 @@ def _add_props_tab(wb, prop_picks: list[dict]):
     sum_cols = [
         ("Category", 20), ("Picks", 8), ("Resolved", 9),
         ("W", 5), ("L", 5), ("P", 5), ("Win %", 8),
-        ("Wagered", 13), ("P&L", 13), ("ROI %", 9),
+        ("Wagered", 13), ("P&L", 13), ("ROI %", 9), ("Avg CLV %", 11),
     ]
 
     def _prop_summary_section(title: str, groups: dict, start_row: int, color: str) -> int:
@@ -3507,11 +3538,18 @@ def _add_props_tab(wb, prop_picks: list[dict]):
             gwa = sum(p["bet_amount"] for p in res)
             gpn = sum(p["pnl"] for p in res)
             gro = gpn / gwa * 100 if gwa else 0
+            # CLV across every pick in the group with a captured close —
+            # graded or not, CLV is valid the moment the game starts.
+            clvs = [p["clv_pct"] for p in gp
+                    if p.get("clv_pct") is not None]
+            gclv = sum(clvs) / len(clvs) if clvs else None
+            clv_disp = (f"{gclv:+.2f}% ({len(clvs)})"
+                        if gclv is not None else "—")
             pnl_color = "006100" if gpn >= 0 else "9C0006"
             base = "F2F2F2" if r % 2 == 0 else None
             for ci, val in enumerate([
                 label, len(gp), len(res), gw, gl, gp_,
-                f"{gwr:.1f}%", gwa, gpn, f"{gro:.1f}%",
+                f"{gwr:.1f}%", gwa, gpn, f"{gro:.1f}%", clv_disp,
             ], 1):
                 cell = ws.cell(row=r, column=ci, value=val)
                 cell.border    = _thin()
@@ -3521,6 +3559,10 @@ def _add_props_tab(wb, prop_picks: list[dict]):
             ws.cell(row=r, column=9).number_format = '$#,##0.00'
             ws.cell(row=r, column=9).font  = Font(bold=True, color=pnl_color)
             ws.cell(row=r, column=10).font = Font(bold=True, color=pnl_color)
+            if gclv is not None:
+                ws.cell(row=r, column=11).font = Font(
+                    bold=True, color="006100" if gclv > 0 else
+                    ("9C0006" if gclv < 0 else "1F4E79"))
             r += 1
         return r + 1
 
@@ -4347,6 +4389,64 @@ def _confidence_tier(p: dict) -> str:
     return "Light (<3%)"
 
 
+# Band edges mirror the 2026-06 promo odds-band P&L analysis: the edge has
+# lived in +150..+300; +300..+700 (the boost-stake danger zone) and >+700
+# have been bleeders. Bucketing by the P&L basis odds (boosted when a boost
+# applied — that's what pick["decimal"] holds) keeps the digest consistent
+# with how those picks were actually graded.
+_PROMO_BAND_ORDER = ["≤+100", "+100..+150", "+150..+300", "+300..+700", ">+700"]
+_PROMO_DANGER_BANDS = frozenset({"+300..+700", ">+700"})
+
+
+def _promo_odds_band(p: dict) -> str | None:
+    """Bucket a promo pick by American odds derived from its P&L decimal."""
+    dec = p.get("decimal")
+    if not isinstance(dec, (int, float)) or dec <= 1:
+        return None
+    am = (dec - 1) * 100 if dec >= 2 else -100 / (dec - 1)
+    if am <= 100:
+        return "≤+100"
+    if am <= 150:
+        return "+100..+150"
+    if am <= 300:
+        return "+150..+300"
+    if am <= 700:
+        return "+300..+700"
+    return ">+700"
+
+
+def _digest_promo_bands(promo_settled: list[dict]) -> str:
+    """Promo P&L by odds band, in fixed band order (not group size).
+
+    Separate from _digest_by_key because band order matters more than
+    sample size here — the whole point is watching whether the +150..+300
+    sweet spot holds and the >+300 danger bands keep bleeding. Danger
+    bands get a ⚠ whenever they lose money in the window.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for p in promo_settled:
+        band = _promo_odds_band(p)
+        if band:
+            groups[band].append(p)
+    rows: list[str] = []
+    for band in _PROMO_BAND_ORDER:
+        g = groups.get(band)
+        if not g:
+            continue
+        w   = sum(1 for p in g if p["result"] == "WIN")
+        l   = sum(1 for p in g if p["result"] == "LOSS")
+        pnl = sum(p["pnl"] for p in g)
+        bet = sum(p["bet_amount"] for p in g)
+        roi = pnl / bet * 100 if bet else 0
+        sgn = "+" if pnl >= 0 else ""
+        warn = "  ⚠" if band in _PROMO_DANGER_BANDS and pnl < 0 else ""
+        rows.append(f"  {band}: W{w}/L{l}  {sgn}${pnl:.0f}  "
+                    f"ROI {sgn}{roi:.0f}%{warn}")
+    if not rows:
+        return ""
+    return "\n<b>Promos by Odds Band</b>\n" + "\n".join(rows)
+
+
 def weekly_digest_text(start_dt: date, end_dt: date) -> str:
     """Build an HTML-formatted weekly P&L digest string for Telegram.
 
@@ -4394,6 +4494,13 @@ def weekly_digest_text(start_dt: date, end_dt: date) -> str:
     if promo_s:
         lines.append("  " + _digest_top_line(promo_s, "Promos"))
 
+    # Promo band watch — validates the cashable-band guard week over week
+    # (promos are play money; this never mixes into the main P&L numbers).
+    if promo_s:
+        band_block = _digest_promo_bands(promo_s)
+        if band_block:
+            lines.append(band_block)
+
     sport_block  = _digest_by_key(
         pt_s, lambda p: (p.get("sport") or "").upper(), "Sport")
     if sport_block:
@@ -4417,6 +4524,16 @@ def weekly_digest_text(start_dt: date, end_dt: date) -> str:
     if worst is not best and worst["pnl"] < 0:
         lines.append(f"💀 Worst: {html.escape(str(worst.get('pick','?')))} "
                      f"(${worst['pnl']:.2f})")
+
+    # SGP calibration — predicted vs realized joint hit rate from graded
+    # /sgpcheck slips (see sgp_log.py). Absent until slips exist.
+    try:
+        import sgp_log
+        sgp_block = sgp_log.calibration_summary()
+        if sgp_block:
+            lines.append(sgp_block)
+    except Exception as e:
+        print(f"[digest] SGP calibration block failed: {e}")
 
     return "\n".join(lines)
 

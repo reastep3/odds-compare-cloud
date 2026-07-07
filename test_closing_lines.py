@@ -437,3 +437,152 @@ def test_load_closes_handles_corrupt_json(tmp_path):
     lookup = load_closing_lines_for_dates(
         "2026-05-05", "2026-05-05", str(tmp_path))
     assert lookup == {}
+
+
+# ── /recheck verdict logic ─────────────────────────────────────────────
+
+from closing_lines import _recheck_verdict, recheck_play_picks
+
+
+def _pending_pick(open_am=-110, ev=2.5, **over):
+    p = {
+        "game": "LAL @ BOS", "book": "DraftKings", "market": "spreads",
+        "outcome": "Boston Celtics", "point": -3.5,
+        "commence": "2026-07-07T23:10:00Z",
+        "open_odds_american": open_am, "open_implied_pct": 52.4,
+        "ev_pct": ev, "play_these": True,
+        "sport_key": "basketball_nba", "event_id": "ev1", "close": None,
+    }
+    p.update(over)
+    return p
+
+
+def test_recheck_better_price_improves_ev():
+    v = _recheck_verdict(_pending_pick(open_am=-110, ev=2.0), -105)
+    assert v["status"] == "BETTER"
+    assert v["ev_now"] > v["ev_open"]
+
+
+def test_recheck_same_price():
+    v = _recheck_verdict(_pending_pick(open_am=-110, ev=2.0), -110)
+    assert v["status"] == "SAME"
+    assert v["ev_now"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_recheck_worse_but_still_ev():
+    # -110 → -115 shaves EV but a 3% open edge survives the move
+    v = _recheck_verdict(_pending_pick(open_am=-110, ev=3.0), -115)
+    assert v["status"] == "WORSE_STILL_EV"
+    assert 0 < v["ev_now"] < 3.0
+
+
+def test_recheck_edge_gone_after_big_move():
+    # -110 → -135 wipes out a 2% edge entirely
+    v = _recheck_verdict(_pending_pick(open_am=-110, ev=2.0), -135)
+    assert v["status"] == "EDGE_GONE"
+    assert v["ev_now"] <= 0
+
+
+def test_recheck_legacy_entry_without_ev_reports_direction_only():
+    v = _recheck_verdict(_pending_pick(open_am=-110, ev=None), -120)
+    assert v["status"] == "WORSE"
+    assert v["ev_now"] is None
+
+
+def test_recheck_play_picks_scopes_to_upcoming_play_these(tmp_path, monkeypatch):
+    """End-to-end over a pending file: only future play_these picks get
+    re-priced; started games and non-PT picks are ignored."""
+    now = datetime(2026, 7, 7, 18, 0, tzinfo=timezone.utc)
+    future = "2026-07-07T23:10:00Z"
+    past   = "2026-07-07T16:00:00Z"
+
+    picks = {
+        "pt-upcoming": _pending_pick(commence=future),
+        "pt-started":  _pending_pick(commence=past),
+        "broad-pool":  _pending_pick(commence=future, play_these=False),
+    }
+    d = datetime.now(EASTERN).date().isoformat()
+    (tmp_path / f"pending_closes_{d}.json").write_text(
+        json.dumps({"picks": picks}), encoding="utf-8")
+
+    fetched = []
+    def fake_fetch(sport_key, event_id, markets):
+        fetched.append((sport_key, event_id, tuple(sorted(markets))))
+        return {"bookmakers": [{"key": "draftkings", "markets": [{
+            "key": "spreads", "outcomes": [
+                {"name": "Boston Celtics", "point": -3.5, "price": -115}]}]}]}
+
+    import closing_lines
+    monkeypatch.setattr(closing_lines, "_fetch_event_odds", fake_fetch)
+
+    res = recheck_play_picks(output_dir=str(tmp_path), now_utc=now)
+    assert res["scanned"] == 1
+    assert len(fetched) == 1              # one event → one API call
+    assert len(res["results"]) == 1
+    assert res["results"][0]["status"] == "WORSE_STILL_EV"
+    assert res["pulled"] == []
+
+
+def test_recheck_play_picks_reports_pulled_line(tmp_path, monkeypatch):
+    now = datetime(2026, 7, 7, 18, 0, tzinfo=timezone.utc)
+    picks = {"pt-upcoming": _pending_pick()}
+    d = datetime.now(EASTERN).date().isoformat()
+    (tmp_path / f"pending_closes_{d}.json").write_text(
+        json.dumps({"picks": picks}), encoding="utf-8")
+
+    import closing_lines
+    # Book responds but no longer offers the market at all
+    monkeypatch.setattr(
+        closing_lines, "_fetch_event_odds",
+        lambda *a: {"bookmakers": [{"key": "draftkings", "markets": []}]})
+
+    res = recheck_play_picks(output_dir=str(tmp_path), now_utc=now)
+    assert res["results"] == []
+    assert len(res["pulled"]) == 1
+    assert "not offered" in res["pulled"][0]["reason"]
+
+
+# ── write_pending_closes_sidecar play_these stamping ───────────────────
+
+def _edge(outcome="Boston Celtics", ev=2.5, **over):
+    e = {
+        "sport": "NBA", "game": "LAL @ BOS",
+        "commence": "2026-07-07T23:10:00Z", "book": "DraftKings",
+        "market": "spreads", "outcome": outcome, "point": -3.5,
+        "odds_american": -110, "implied_prob": 52.4, "ev_pct": ev,
+        "event_id": "ev1", "sport_key": "basketball_nba",
+    }
+    e.update(over)
+    return e
+
+
+def test_sidecar_stamps_play_these_flag_and_ev(tmp_path):
+    from odds_compare import write_pending_closes_sidecar
+    pt   = _edge()
+    pool = _edge(outcome="Los Angeles Lakers", point=3.5, ev=1.1)
+    write_pending_closes_sidecar([pt, pool], None, str(tmp_path),
+                                 play_edges=[pt])
+    d = datetime.now(EASTERN).date().isoformat()
+    payload = json.loads(
+        (tmp_path / f"pending_closes_{d}.json").read_text(encoding="utf-8"))
+    entries = list(payload["picks"].values())
+    flags = {e["outcome"]: e["play_these"] for e in entries}
+    assert flags == {"Boston Celtics": True, "Los Angeles Lakers": False}
+    assert all(e["ev_pct"] is not None for e in entries)
+
+
+def test_sidecar_upgrades_flag_on_later_scan_without_touching_open(tmp_path):
+    from odds_compare import write_pending_closes_sidecar
+    # First scan: pick exists but didn't qualify
+    write_pending_closes_sidecar([_edge(ev=1.4)], None, str(tmp_path))
+    # Later scan same day: same pick, now qualified, different odds
+    write_pending_closes_sidecar([_edge(ev=2.4, odds_american=-120)], None,
+                                 str(tmp_path),
+                                 play_edges=[_edge(ev=2.4)])
+    d = datetime.now(EASTERN).date().isoformat()
+    payload = json.loads(
+        (tmp_path / f"pending_closes_{d}.json").read_text(encoding="utf-8"))
+    (entry,) = payload["picks"].values()
+    assert entry["play_these"] is True
+    # open stays frozen at first-seen (canonical open = earliest scan)
+    assert entry["open_odds_american"] == -110

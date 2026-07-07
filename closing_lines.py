@@ -389,6 +389,124 @@ def load_closing_lines_for_dates(start_date, end_date,
     return lookup
 
 
+def _recheck_verdict(pick: dict, current_am: int) -> dict:
+    """Compare a pending pick's current price to its scan-time open.
+
+    Pure function (no I/O) so the /recheck decision logic is testable.
+    EV-now is derived from the scan-time EV and the price move:
+        fair = (1 + ev_open/100) / open_dec   →   ev_now = fair·cur_dec − 1
+    Entries written before the sidecar stored ev_pct fall back to a
+    price-direction-only verdict (WORSE instead of EDGE_GONE, since we
+    can't tell whether the remaining EV survived the move).
+    """
+    open_am  = pick.get("open_odds_american")
+    open_dec = american_to_decimal(open_am) if open_am is not None else None
+    cur_dec  = american_to_decimal(current_am)
+
+    ev_open = pick.get("ev_pct")
+    ev_now  = None
+    if (ev_open is not None and open_dec and open_dec > 1
+            and cur_dec and cur_dec > 1):
+        fair   = (1 + ev_open / 100) / open_dec
+        ev_now = round((fair * cur_dec - 1) * 100, 2)
+
+    if open_dec is None:
+        status = "UNKNOWN_OPEN"
+    elif cur_dec > open_dec + 1e-9:
+        status = "BETTER"
+    elif abs(cur_dec - open_dec) <= 1e-9:
+        status = "SAME"
+    elif ev_now is None:
+        status = "WORSE"
+    elif ev_now > 0:
+        status = "WORSE_STILL_EV"
+    else:
+        status = "EDGE_GONE"
+
+    return {
+        "game":     pick.get("game"),
+        "book":     pick.get("book"),
+        "market":   pick.get("market"),
+        "outcome":  pick.get("outcome"),
+        "point":    pick.get("point"),
+        "commence": pick.get("commence"),
+        "open_am":  open_am,
+        "cur_am":   current_am,
+        "ev_open":  ev_open,
+        "ev_now":   ev_now,
+        "status":   status,
+    }
+
+
+def recheck_play_picks(output_dir: str | None = None,
+                       now_utc: datetime | None = None) -> dict:
+    """Re-price every not-yet-started Play These pick from today's (and
+    yesterday's midnight-crossing) pending-closes files at its book.
+
+    This is the bet-time revalidation behind /recheck: the canonical scan
+    runs at midnight ET but bets get placed hours later — high-EV picks
+    whose line already moved are the classic stale-line trap. One event-odds
+    call per (event × markets) batch, scoped to Play These picks only, so
+    the credit cost is a handful of calls per day.
+
+    Deliberately NOT gated on credit_tracker.should_pause_clv(): this runs
+    only when the user explicitly asks, right before real money goes down —
+    that's the highest-value fetch in the whole system. (Headers still
+    flow through credit_tracker.record via _fetch_event_odds.)
+
+    Returns {"results": [verdict dicts], "pulled": [pick dicts w/ reason],
+             "scanned": int} — results sorted by commence.
+    """
+    output_dir = output_dir or OUTPUT_DIR
+    now_utc = now_utc or datetime.now(timezone.utc)
+
+    due: list[dict] = []
+    for path in _list_recent_pending_files(output_dir):
+        payload = _load_pending(path)
+        for pick in payload.get("picks", {}).values():
+            if not pick.get("play_these"):
+                continue
+            commence = pick.get("commence")
+            try:
+                commence_dt = datetime.fromisoformat(
+                    (commence or "").replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if commence_dt <= now_utc:
+                continue   # started/in play — the bet window is over
+            if not pick.get("sport_key") or not pick.get("event_id"):
+                continue
+            due.append(pick)
+
+    results: list[dict] = []
+    pulled:  list[dict] = []
+    batches: dict[tuple, dict] = {}
+    for pick in due:
+        market_api = INTERNAL_TO_API_MARKET.get(
+            (pick.get("market") or "").lower(),
+            (pick.get("market") or "").lower())
+        entry = batches.setdefault(
+            (pick["sport_key"], pick["event_id"]),
+            {"markets": set(), "picks": []})
+        entry["markets"].add(market_api)
+        entry["picks"].append(pick)
+
+    for (sport_key, event_id), batch in batches.items():
+        event_data = _fetch_event_odds(sport_key, event_id, batch["markets"])
+        for pick in batch["picks"]:
+            if event_data is None:
+                pulled.append({**pick, "reason": "event odds fetch failed"})
+                continue
+            rec, reason = _capture_close_for_pick(pick, event_data, now_utc)
+            if rec is None:
+                pulled.append({**pick, "reason": reason})
+            else:
+                results.append(_recheck_verdict(pick, rec["odds_american"]))
+
+    results.sort(key=lambda r: r.get("commence") or "")
+    return {"results": results, "pulled": pulled, "scanned": len(due)}
+
+
 def capture_pending_closes(output_dir: str | None = None) -> dict:
     """
     Capture closing-line odds for any pending pick whose commence is in the

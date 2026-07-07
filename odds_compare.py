@@ -2265,7 +2265,8 @@ def write_book_event_ids_sidecar(edges: list[dict] | None,
 
 def write_pending_closes_sidecar(edges: list[dict] | None,
                                  prop_edges: list[dict] | None,
-                                 output_dir: str) -> str | None:
+                                 output_dir: str,
+                                 play_edges: list[dict] | None = None) -> str | None:
     """
     Append every +EV pick from this scan to the day's pending-closes JSON
     so the closing-line capture worker (closing_lines.py) can re-query the
@@ -2276,6 +2277,12 @@ def write_pending_closes_sidecar(edges: list[dict] | None,
     Only brand-new picks get added. Picks without an Odds API event_id
     (Action Network fallback events) are skipped — we have no way to
     re-query their close.
+
+    play_edges (the Play These list: qualified game lines + props) marks
+    entries with play_these=True so /recheck can re-price just the picks
+    the user was actually told to bet. The flag and scan-time ev_pct ARE
+    updated on existing entries (a pick can qualify on a later scan than
+    the one that first recorded it) — only open odds + close stay frozen.
 
     Filename: pending_closes_YYYY-MM-DD.json (date is the betting-day in ET).
     Returns the path written, or None if no eligible picks.
@@ -2291,6 +2298,8 @@ def write_pending_closes_sidecar(edges: list[dict] | None,
         except (json.JSONDecodeError, OSError):
             existing = {}
 
+    play_keys = {_make_pick_key(e) for e in (play_edges or [])}
+
     added = 0
     skipped_no_id = 0
     for edge in (edges or []) + (prop_edges or []):
@@ -2299,7 +2308,14 @@ def write_pending_closes_sidecar(edges: list[dict] | None,
             continue
         key = _make_pick_key(edge)
         if key in existing:
-            continue   # preserve first-seen open + any captured close
+            # Preserve first-seen open + any captured close, but let the
+            # Play These flag and scan-time EV refresh (see docstring).
+            entry = existing[key]
+            if key in play_keys and not entry.get("play_these"):
+                entry["play_these"] = True
+            if entry.get("ev_pct") is None:
+                entry["ev_pct"] = edge.get("ev_pct")
+            continue
         existing[key] = {
             "sport":              edge.get("sport"),
             "game":               edge.get("game"),
@@ -2312,6 +2328,8 @@ def write_pending_closes_sidecar(edges: list[dict] | None,
             "sport_key":          edge.get("sport_key"),
             "open_odds_american": edge.get("odds_american"),
             "open_implied_pct":   edge.get("implied_prob"),
+            "ev_pct":             edge.get("ev_pct"),
+            "play_these":         key in play_keys,
             "close":              None,
         }
         added += 1
@@ -3612,7 +3630,13 @@ def write_excel(edges: list[dict], dk_bankroll: float,
             ("Market", 14), ("Pick", 24), ("Line", 8), ("EV %", 8),
             ("Fair Odds", 10), ("Commence", 12),
         ]
-        cmp_columns = info_cols + [(bk, 13) for bk in book_order]
+        # "Best Book" trails the per-book odds columns so the backtester can
+        # attribute each prop row to the book the edge was actually found at
+        # (highlight fills don't survive a values-only read; without this,
+        # FanDuel-only edges get mis-keyed as DraftKings whenever DK also
+        # lists the line — which breaks the closing-line CLV lookup).
+        cmp_columns = (info_cols + [(bk, 13) for bk in book_order]
+                       + [("Best Book", 13)])
 
         for col_idx, (name, width) in enumerate(cmp_columns, 1):
             cell           = ws_cmp.cell(row=1, column=col_idx, value=name)
@@ -3733,6 +3757,16 @@ def write_excel(edges: list[dict], dk_bankroll: float,
                 else:
                     cell.value = "—"
                     cell.font  = Font(color="BBBBBB")
+
+            # Best Book (the book this edge was priced at)
+            bb_cell           = ws_cmp.cell(
+                row=row, column=info_count + len(book_order) + 1,
+                value=edge.get("book", ""))
+            bb_cell.border    = thin_border
+            bb_cell.alignment = Alignment(horizontal="center")
+            bb_cell.font      = Font(bold=True)
+            if row_fill:
+                bb_cell.fill  = row_fill
 
         ws_cmp.freeze_panes = "A2"
         ws_cmp.auto_filter.ref = (
@@ -4458,6 +4492,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
     try:
         write_pending_closes_sidecar(
             edges, player_prop_edges, os.path.dirname(output_path),
+            play_edges=play_edges,
         )
     except Exception as e:
         # Never let sidecar failure block the xlsx save; just log it.

@@ -2921,7 +2921,107 @@ async def cmd_sgpcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<b>BET</b> — Kelly {kelly * 100:.2f}% of your "
                 f"{book} bankroll.")
 
+    # Log the quote check for the SGP calibration loop — outcomes get
+    # graded by the nightly backtest job and the realized-vs-predicted
+    # joint hit rate shows up in the weekly digest. Never blocks the reply.
+    try:
+        import sgp_log
+        sgp_log.log_slip({
+            "chat_id":   update.effective_chat.id,
+            "label":     promo.get("label"),
+            "book":      book,
+            "boost_pct": boost_pct,
+            "naive_dec": naive_dec,
+            "quoted_dec": round(quoted_dec, 4),
+            "boosted_quote_dec": round(boosted_quote, 4),
+            "fair_prob": round(fair, 6),
+            "ev_pct":    round(ev, 2),
+            "kelly":     round(kelly, 6),
+            "verdict":   "SKIP" if (ev <= 0 or kelly <= 0) else "BET",
+            "legs":      [sgp_log.leg_from_edge(l)
+                          for l in (row.get("legs") or [])],
+        })
+    except Exception:
+        log.exception("[sgpcheck] slip logging failed")
+
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+_RECHECK_STATUS_FMT = {
+    # status → (emoji, trailing note)
+    "BETTER":         ("✅", "better than open"),
+    "SAME":           ("➖", "unchanged"),
+    "WORSE_STILL_EV": ("⚠️", "moved against you — still +EV"),
+    "WORSE":          ("⚠️", "moved against you"),
+    "EDGE_GONE":      ("❌", "edge gone at this price — skip"),
+    "UNKNOWN_OPEN":   ("❓", "no open recorded"),
+}
+
+
+def _recheck_line(r: dict) -> str:
+    pt   = f" {r['point']:g}" if r.get("point") is not None else ""
+    mkt  = (r.get("market") or "").upper()
+    emoji, note = _RECHECK_STATUS_FMT.get(r["status"], ("❓", r["status"]))
+
+    def _am(v):
+        return (f"+{v}" if v > 0 else str(v)) if v is not None else "?"
+
+    ev = ""
+    if r.get("ev_open") is not None and r.get("ev_now") is not None:
+        ev = f" · EV {r['ev_open']:.1f}% → <b>{r['ev_now']:.1f}%</b>"
+    return (f"{emoji} {_esc(str(r.get('outcome')))}{pt} {mkt} "
+            f"({_esc(str(r.get('book')))}) — "
+            f"{_am(r.get('open_am'))} → <b>{_am(r.get('cur_am'))}</b>{ev} "
+            f"— {note}")
+
+
+async def cmd_recheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-price today's not-yet-started Play These picks at their books —
+    the pre-bet staleness check. The midnight scan is the open; by the time
+    bets go down the line may have moved. One scoped event-odds call per
+    game with a pending pick."""
+    if not is_authorized(update):
+        return
+
+    status_msg = await update.message.reply_text(
+        "🔁 Re-pricing upcoming Play These picks…")
+    try:
+        from closing_lines import recheck_play_picks
+        res = await asyncio.to_thread(recheck_play_picks)
+    except Exception as e:
+        log.exception("[recheck] failed")
+        await status_msg.edit_text(f"Recheck failed: {e}")
+        return
+
+    results, pulled = res["results"], res["pulled"]
+    if not results and not pulled:
+        await status_msg.edit_text(
+            "No upcoming Play These picks to recheck — either today's scan "
+            "had none, or their games already started. (Picks are tracked "
+            "from scans made after this feature deployed.)")
+        return
+
+    lines = [f"🔁 <b>RECHECK</b> — {res['scanned']} upcoming "
+             f"Play These pick(s)\n"]
+    lines += [_recheck_line(r) for r in results]
+    for p in pulled:
+        pt = f" {p['point']:g}" if p.get("point") is not None else ""
+        lines.append(
+            f"🚫 {_esc(str(p.get('outcome')))}{pt} "
+            f"({_esc(str(p.get('book')))}) — line not offered right now")
+
+    gone = sum(1 for r in results if r["status"] == "EDGE_GONE")
+    if gone:
+        lines.append(f"\n<b>{gone} pick(s) no longer +EV at the current "
+                     f"price — consider skipping those.</b>")
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+    for chunk in _split_message("\n".join(lines)):
+        await _safe_send(context.bot, update.effective_chat.id, chunk,
+                         parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2941,6 +3041,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/bonus       — Best use of a free/bonus bet ($ amount + any limits)\n"
         "/drawbreaker — Best World Cup ML for a draw-refund (bonus-bet) promo\n"
         "/sgpcheck    — Re-price a parlay pick at the book's quoted odds\n"
+        "/recheck     — Re-price today's Play These picks before betting\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
         "/digest      — Send the last-7-days P&L digest now\n"
@@ -2996,6 +3097,16 @@ async def send_daily_backtest(context: ContextTypes.DEFAULT_TYPE):
                  f"output: {os.path.basename(path) if path else 'no picks'}")
     except Exception:
         log.exception("[daily-backtest] Run failed")
+
+    # Piggyback: settle any pending SGP slips from /sgpcheck while the
+    # ESPN result caches are warm. Silent like the rest of this job.
+    try:
+        import sgp_log
+        stats = await asyncio.to_thread(sgp_log.grade_pending)
+        if any(stats.values()):
+            log.info(f"[daily-backtest] SGP slips: {stats}")
+    except Exception:
+        log.exception("[daily-backtest] SGP slip grading failed")
 
 
 async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
@@ -3829,6 +3940,7 @@ def main():
     app.add_handler(drawbreaker_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
     app.add_handler(CommandHandler("sgpcheck", cmd_sgpcheck))
+    app.add_handler(CommandHandler("recheck", cmd_recheck))
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("status", cmd_status))
