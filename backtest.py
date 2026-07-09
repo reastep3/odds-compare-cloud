@@ -89,6 +89,10 @@ ESPN_SPORT_MAP = {
     # FIFA World Cup 2026 — slug verified 2026-06-10 (returns the Jun 11
     # openers). Promo-driven picks (tournament-wide boosts) grade here.
     "world_cup":     "soccer/fifa.world",
+    # Tracking-only adds 2026-07-09
+    "brazil_serie_a":    "soccer/bra.1",
+    "argentina_primera": "soccer/arg.1",
+    "cfl":               "football/cfl",
     # AFL / Boxing / Cricket / Tennis are not auto-graded via ESPN — they
     # surface in the picks output but skip backtest grading. (ESPN's
     # AFL coverage is intermittent and tennis/cricket use different slug
@@ -186,6 +190,20 @@ _SPORT_NORM: dict[str, str] = {
     # WNBA
     "wnba":                             "wnba",
     "women's national basketball association": "wnba",
+    # CFL (ESPN-graded) — tracking-only add 2026-07-09
+    "cfl":                              "cfl",
+    "canadian football league":         "cfl",
+    # Brazil / Argentina soccer (ESPN-graded) — tracking-only 2026-07-09.
+    # Odds API titles carry accents; include unaccented variants too.
+    "brazil série a":                   "brazil_serie_a",
+    "brazil serie a":                   "brazil_serie_a",
+    "primera división - argentina":     "argentina_primera",
+    "primera division - argentina":     "argentina_primera",
+    # KBO / NPB — no results source yet; normalise so they roll up
+    # under a stable key (grades as MANUAL until a grader exists).
+    "kbo":                              "kbo",
+    "kbo league":                       "kbo",
+    "npb":                              "npb",
     # AFL (Squiggle-graded)
     "afl":                              "afl",
     "australian football league":       "afl",
@@ -4554,6 +4572,9 @@ def _replay_pt_from_ev(ev_graded: list[dict]) -> list[dict]:
             "market":             (p.get("market") or "").lower(),
             "sport":              p.get("sport", ""),
             "pinnacle_anchored":  p.get("pinnacle", False),
+            # 2026-07-09: _qualifies now hard-gates on the odds band —
+            # without the price the replay would reject every pick.
+            "odds_decimal":       p.get("decimal") or 0,
         }
         if _qualifies(adapted):
             out.append(p)

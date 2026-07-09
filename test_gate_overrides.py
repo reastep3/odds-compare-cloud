@@ -90,6 +90,9 @@ def test_qualifies_consults_override(store, monkeypatch):
     monkeypatch.setattr(oc, "_starts_within_days", lambda *a, **k: True)
     e = {"sport": "TENNIS", "market": "h2h", "ev_pct": 2.75,
          "num_other_books": 10, "pinnacle_anchored": False,
+         # in-band price — 2026-07-09: _qualifies hard-gates on the
+         # -250..+350 odds band before consulting overrides
+         "odds_decimal": 2.0,
          "commence": "2099-01-01T00:00:00Z"}
     assert oc._qualifies_base(e) is True            # tennis non-Pinn floor is 2.5
     assert oc._qualifies(e) is True                 # no override -> base

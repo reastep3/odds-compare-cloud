@@ -1203,14 +1203,17 @@ def test_no_pick_european_soccer_no_soccer_at_all():
 from odds_compare import _qualifies, _qualifies_prop
 
 
-def _q(sport, market, ev, *, pinn=False, books=8):
-    """Build a minimal edge dict that exercises the qualifier."""
+def _q(sport, market, ev, *, pinn=False, books=8, dec=2.0):
+    """Build a minimal edge dict that exercises the qualifier. dec defaults
+    to an in-band price (2026-07-09: _qualifies hard-gates on the
+    -250..+350 odds band before any other rule)."""
     return {
         "sport": sport,
         "market": market,
         "ev_pct": ev,
         "pinnacle_anchored": pinn,
         "num_other_books": books,
+        "odds_decimal": dec,
         # no commence → _starts_within_days treats as soon
     }
 
@@ -1336,32 +1339,96 @@ def test_qualifies_book_count_floor_unchanged():
     assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, books=3))
 
 
+def _qp(market, ev, *, sport="NBA", dec=2.0):
+    """Minimal prop edge; dec defaults in-band (see _q)."""
+    return {"market": market, "ev_pct": ev, "sport": sport,
+            "odds_decimal": dec}
+
+
 def test_qualifies_prop_pts_floor_3pct():
     # 2026-06-02: pts threshold 2.0% → 3.0%. The ~2-month replay showed the
     # 2–3% band at -6.8% ROI / -8.2% flat (n=54); positive signal is 3%+.
-    assert _qualifies_prop({"market": "pts", "ev_pct": 3.0})
-    assert not _qualifies_prop({"market": "pts", "ev_pct": 2.9})
+    assert _qualifies_prop(_qp("pts", 3.0))
+    assert not _qualifies_prop(_qp("pts", 2.9))
     # The old 2.0–3.0 inclusion band is now excluded.
-    assert not _qualifies_prop({"market": "pts", "ev_pct": 2.0})
+    assert not _qualifies_prop(_qp("pts", 2.0))
 
 
 def test_qualifies_prop_strikeouts_floor_4pct():
     # strikeouts threshold 2.0% → 4.0%; the 1–3% band was -22% in 12 days.
-    assert not _qualifies_prop({"market": "strikeouts", "ev_pct": 3.9})
-    assert _qualifies_prop({"market": "strikeouts", "ev_pct": 4.0})
+    assert not _qualifies_prop(_qp("strikeouts", 3.9))
+    assert _qualifies_prop(_qp("strikeouts", 4.0))
 
 
 def test_qualifies_prop_total_bases_unchanged():
     # total_bases still 1.5%.
-    assert _qualifies_prop({"market": "total_bases", "ev_pct": 1.5})
-    assert not _qualifies_prop({"market": "total_bases", "ev_pct": 1.4})
+    assert _qualifies_prop(_qp("total_bases", 1.5))
+    assert not _qualifies_prop(_qp("total_bases", 1.4))
 
 
 def test_qualifies_prop_other_markets_blocked():
     # reb/ast remain excluded; unknown markets blocked.
-    assert not _qualifies_prop({"market": "rebounds", "ev_pct": 10.0})
-    assert not _qualifies_prop({"market": "assists", "ev_pct": 10.0})
-    assert not _qualifies_prop({"market": "made_threes", "ev_pct": 10.0})
+    assert not _qualifies_prop(_qp("rebounds", 10.0))
+    assert not _qualifies_prop(_qp("assists", 10.0))
+    assert not _qualifies_prop(_qp("made_threes", 10.0))
+
+
+def test_qualifies_prop_wnba_tracking_only():
+    # 2026-07-09: WNBA player points are fetched but blocked from PT until
+    # 30 days of graded data exist — the 3.0 floor was calibrated on NBA.
+    assert not _qualifies_prop(_qp("pts", 6.0, sport="WNBA"))
+
+
+def test_qualifies_prop_odds_band():
+    # Props share the -250..+350 hard band.
+    assert not _qualifies_prop(_qp("pts", 4.0, dec=5.0))     # +400
+    assert not _qualifies_prop(_qp("pts", 4.0, dec=1.30))    # -333
+
+
+# ── 2026-07-09 recalibration: odds band, AFL, tracking-only sports ─────
+
+def test_qualifies_odds_band_hard_gate():
+    # In-band passes; both tails rejected regardless of EV/pinnacle.
+    assert _qualifies(_q("MLB", "h2h", 2.0, pinn=True, dec=2.0))
+    assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, dec=4.51))  # >+351
+    assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, dec=1.39))  # <-250
+    # Boundary prices (exactly -250 / +350) stay eligible.
+    assert _qualifies(_q("MLB", "h2h", 2.0, pinn=True, dec=1.40))
+    assert _qualifies(_q("MLB", "h2h", 2.0, pinn=True, dec=4.50))
+
+
+def test_qualifies_afl_h2h_pinn_only():
+    # AFL added 2026-07-09: Pinn-anchored ≥1%, exempt from the 4-book
+    # floor (AFL edges carry Pinnacle as their only reference book).
+    assert _qualifies(_q("AFL", "h2h", 1.0, pinn=True, books=1))
+    assert not _qualifies(_q("AFL", "h2h", 0.9, pinn=True, books=1))
+    assert not _qualifies(_q("AFL", "h2h", 3.0, pinn=False, books=1))
+    # The universal <5% cap still applies.
+    assert not _qualifies(_q("AFL", "h2h", 5.0, pinn=True, books=1))
+    # The book-floor exemption is AFL+Pinn only.
+    assert not _qualifies(_q("MLB", "h2h", 2.0, pinn=True, books=1))
+
+
+def test_qualifies_tracking_only_sports_blocked():
+    # New sports accrue data but can't reach PT — both verbatim Odds API
+    # titles and backtest-normalised keys must match.
+    for label in ("CFL", "KBO", "NPB", "Brazil Série A",
+                  "Primera División - Argentina", "brazil_serie_a",
+                  "argentina_primera"):
+        assert not _qualifies(_q(label, "spreads", 3.0, pinn=True)), label
+
+
+def test_qualifies_blocked_soccer_title_forms():
+    # 2026-07-09 regression guard: the blocked-league check must match the
+    # Odds API's verbatim sport_title (live edges) AND the normalised key
+    # (backtest --replay). The old exact-match set only caught EPL.
+    for label in ("La Liga - Spain", "laliga", "Serie A - Italy", "seriea",
+                  "Bundesliga - Germany", "Ligue 1 - France", "ligue1",
+                  "UEFA Champions League", "Liga MX", "FIFA World Cup",
+                  "world_cup"):
+        assert not _qualifies(_q(label, "spreads", 3.0, pinn=True)), label
+    # MLS is NOT blocked.
+    assert _qualifies(_q("MLS", "spreads", 3.0, pinn=True))
 
 
 # ── World Cup promo support (2026 FIFA World Cup) ──────────────────────

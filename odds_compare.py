@@ -158,6 +158,12 @@ AN_SPORTS = [
     "boxing",    # Major boxing matches
     "cricket",   # IPL + other major cricket tournaments
     "tennis",    # ATP/WTA — sport key resolved dynamically per-tournament
+    # ── Tracking-only additions 2026-07-09 (see _TRACKING_ONLY_SPORTS —
+    # fetched for EV Edges + CLV, gated out of Play These until 30d of
+    # graded data). Brazil/Argentina soccer ride the "soccer" list.
+    "cfl",       # Canadian football — Jun–Nov, ESPN-gradeable
+    "kbo",       # Korean baseball — no results source yet, CLV-only
+    "npb",       # Japanese baseball — no results source yet, CLV-only
 ]
 
 ACTION_NETWORK_BASE = "https://api.actionnetwork.com/web/v2"
@@ -205,6 +211,10 @@ ODDS_API_SPORTS: dict[str, str | list[str]] = {
         # _womens / club-WC / _winner (outrights) keys are intentionally
         # NOT listed — they are separate competitions.
         "soccer_fifa_world_cup",
+        # Tracking-only 2026-07-09 (in season May–Dec, Pinnacle-priced,
+        # ESPN-gradeable via bra.1 / arg.1) — see _TRACKING_ONLY_SPORTS.
+        "soccer_brazil_campeonato",
+        "soccer_argentina_primera_division",
     ],
     # World Cup prop-fetch handle. Game lines for the tournament ride
     # the "soccer" list above; this dedicated key exists because the
@@ -216,6 +226,10 @@ ODDS_API_SPORTS: dict[str, str | list[str]] = {
     "afl":     "aussierules_afl",
     "boxing":  "boxing_boxing",
     "cricket": ["cricket_ipl"],
+    # Tracking-only 2026-07-09 (see _TRACKING_ONLY_SPORTS)
+    "cfl":     "americanfootball_cfl",
+    "kbo":     "baseball_kbo",
+    "npb":     "baseball_npb",
     # Tennis: the Odds API uses one key per tournament (e.g.
     # tennis_atp_french_open). Resolved at fetch time so the active
     # ATP/WTA events on tour are picked up automatically.
@@ -264,6 +278,13 @@ ODDS_API_PROP_MARKETS: dict[str, list[tuple[str, str, str]]] = {
     "nhl": [
         ("player_shots_on_goal", "sog",     "Shots on Goal"),
         ("player_points",        "nhl_pts", "Points"),
+    ],
+    # WNBA points added 2026-07-09 — tracking-only (blocked from PT in
+    # _qualifies_prop_base until 30d of grades). WNBA is in season and
+    # its PT game-line cohort is the current best performer (+13.2%);
+    # one market keeps the per-event credit cost minimal.
+    "wnba": [
+        ("player_points", "pts", "Points"),
     ],
     # FIFA World Cup 2026. Anytime goalscorer is Yes-only on every book
     # (verified 2026-06-10: DK 46 / FD 46 / Pinnacle 39 / BetRivers 40
@@ -2479,6 +2500,29 @@ def _in_promo_kelly_band(boost_dec: float) -> bool:
             <= american_to_decimal(PROMO_FULL_KELLY_ODDS_HI))
 
 
+# ── Play These odds band ──────────────────────────────────────────────
+# 2026-07-09, 105-day backtest (2026-03-26 → 2026-07-08, 5,728 settled
+# broad picks): the model tracks actual win rates within ~2 pts from
+# -250..+350, then overstates longshots ~2× (fair 15.6% vs actual 9.9%
+# at +501..+700; 8.9% vs 4.7% >+700). PT picks outside this band: 95
+# picks, -38.3u flat (≈-40% ROI); in-band PT ran ≈+2.8% flat vs +0.4%
+# unbanded. Applied as a HARD gate in _qualifies()/_qualifies_prop(),
+# before overrides, so an approved cohort override can never re-admit
+# out-of-band picks. Same shape as the promo boost staking band above
+# (PROMO_FULL_KELLY_*) — and for the same reason: model calibration
+# degrades at the tails, not just variance.
+PLAY_ODDS_MIN_AM = -250   # decimal 1.40
+PLAY_ODDS_MAX_AM = 350    # decimal 4.50
+
+
+def _in_play_odds_band(e) -> bool:
+    """True if the edge's price sits in the calibrated Play These band."""
+    dec = e.get("odds_decimal") or 0
+    return (american_to_decimal(PLAY_ODDS_MIN_AM)
+            <= dec
+            <= american_to_decimal(PLAY_ODDS_MAX_AM))
+
+
 def promo_boost_stake(bankroll: float, kelly_frac: float, boost_dec: float,
                       book: str,
                       max_bet: float | None = None) -> tuple[float, bool]:
@@ -2564,15 +2608,59 @@ def _starts_within_promo_horizon(e) -> bool:
 # in _qualifies). Without this entry, World Cup spreads would slip
 # through the generic spreads gate on day one. Promo picks are
 # unaffected: they draw from promo_pool, which bypasses _qualifies().
+# Blocked soccer leagues — negative ROI across the board without Pinnacle.
+#
+# Matching (2026-07-09 fix): tokens are checked as SUBSTRINGS of the
+# edge's sport label after compacting (upper, strip spaces/hyphens/
+# underscores). Live edges carry the Odds API sport_title verbatim
+# ("La Liga - Spain" → "LALIGASPAIN"), while backtest --replay feeds the
+# normalised keys ("laliga" → "LALIGA") — the token form matches both.
+# The old exact-match `sport in _BLOCKED_SOCCER` only ever fired for EPL
+# and FIFA WORLD CUP; the other leagues stayed out of PT purely because
+# the h2h/totals branches don't admit them — a Pinn-anchored European
+# spread would have slipped through the generic spreads branch.
 _BLOCKED_SOCCER = frozenset({
-    "EPL", "BUNDESLIGA", "CHAMPIONS", "EUROPA", "LALIGA",
-    "LIGUE1", "SERIEA", "LIGAMX", "CONFERENCE",
-    "FIFA WORLD CUP",
+    "EPL", "BUNDESLIGA", "LALIGA", "SERIEA", "LIGUE1", "LIGAMX",
+    "CHAMPIONS", "EUROPA", "CONFERENCE", "WORLDCUP",
 })
+
+# Tracking-only sports (2026-07-09): fetched and shown in EV Edges so CLV
+# and graded results accrue, but never Play These — house rule is 30+ days
+# of graded data before a new sport is promoted (see AFL's path). Same
+# compact-token substring matching as _BLOCKED_SOCCER. CFL / Brazil /
+# Argentina grade via ESPN (backtest.ESPN_SPORT_MAP); KBO / NPB have no
+# results source yet so their signal is CLV-only until a grader exists.
+_TRACKING_ONLY_SPORTS = frozenset({
+    "CFL", "KBO", "NPB", "BRAZIL", "ARGENTINA",
+})
+
+
+def _sport_compact(sport_upper: str) -> str:
+    """Compact a sport label for token matching: 'LA LIGA - SPAIN' →
+    'LALIGASPAIN', 'world_cup' (replay) → 'WORLDCUP'."""
+    return (sport_upper.replace(" ", "").replace("-", "")
+            .replace("_", ""))
 
 
 def _qualifies_base(e):
     """Return True if an edge qualifies for the 'Play These' tab.
+
+    2026-07-09 — recalibrated against a 105-day backtest (2026-03-26 →
+    2026-07-08; 5,728 settled broad picks, 1,730 PT). Four changes:
+
+      1. Odds band -250..+350 (hard gate in _qualifies, see
+         PLAY_ODDS_MIN_AM note). PT out-of-band: 95 picks, -38.3u.
+      2. AFL H2H added, Pinn-anchored ≥1% (every graded AFL edge was
+         Pinn-anchored). In-band 1–5%: +29% flat on n=37 across three
+         months (May +47%, Jun -4%, Jul +45%). Season runs to Sep.
+      3. _BLOCKED_SOCCER entries corrected to verbatim sport titles
+         (see the set's comment — compact tokens never matched).
+      4. New tracking-only sports (CFL, KBO, NPB, Brazil Série A,
+         Argentina Primera) fetched but gated out of PT until 30d of
+         graded data exists (_TRACKING_ONLY_SPORTS).
+    Checked, no change: strikeouts ≥4% floor (the ≥4 slice ran +46.7%
+    on n=18; the bleed is all below the floor), MLS h2h/spreads (totals
+    were already excluded by the MLB-only totals branch).
 
     2026-06-22 — BOXING H2H paused and TENNIS H2H non-Pinn floor raised
     2.0 → 2.5, from an analyst review over Mar–Jun (n=5,806 settled):
@@ -2642,7 +2730,11 @@ def _qualifies_base(e):
 
     if not _starts_within_days(e, MAX_PLAY_DAYS):
         return False
-    if books < 4:
+    # Reference-book consensus floor. AFL is exempt when Pinn-anchored:
+    # the US books we request don't carry AFL, so every graded AFL edge
+    # had num_books=1 (Pinnacle only) — and still ran +29% in-band. The
+    # Pinnacle anchor substitutes for soft-book consensus there.
+    if books < 4 and not (sport == "AFL" and pinn):
         return False
 
     # Universal EV cap — books offering 5%+ over Pinnacle are nearly
@@ -2652,7 +2744,12 @@ def _qualifies_base(e):
         return False
 
     # Block European soccer — negative ROI across the board without Pinnacle
-    if sport in _BLOCKED_SOCCER:
+    sport_c = _sport_compact(sport)
+    if any(tok in sport_c for tok in _BLOCKED_SOCCER):
+        return False
+
+    # New sports accrue graded data + CLV before any PT promotion
+    if any(tok in sport_c for tok in _TRACKING_ONLY_SPORTS):
         return False
 
     # NBA game lines: narrow re-enable for SPREADS only after 60-day
@@ -2688,6 +2785,10 @@ def _qualifies_base(e):
             if pinn and ev >= 1.0:
                 return True
             return ev >= 2.5
+        if sport == "AFL":
+            # 2026-07-09 add — Pinn-only (see docstring #2). The <5%
+            # universal cap above bounds the branch to 1.0–5.0.
+            return pinn and ev >= 1.0
         # BOXING h2h paused 2026-06-22 (see docstring) — falls through to skip.
         return False
 
@@ -2757,8 +2858,15 @@ def _qualifies_prop_base(e):
     ev    = e["ev_pct"]
     mkt   = e["market"]
     pinn  = e.get("pinnacle_anchored", False)
+    sport = (e.get("sport", "") or "").upper()
 
     if not _starts_within_days(e, MAX_PLAY_DAYS):
+        return False
+
+    # WNBA player points added 2026-07-09 as tracking-only: the pts
+    # floor below was calibrated on NBA data; WNBA props need their own
+    # 30 days of grades before qualifying.
+    if sport == "WNBA":
         return False
 
     # Pinn ≥1% gate is symmetric defence — Pinnacle props aren't wired
@@ -2804,12 +2912,18 @@ def _gate_override(e: dict, base: bool, is_prop: bool) -> bool:
 
 
 def _qualifies(e):
-    """Public game-line gate: base rules plus any human-approved override."""
+    """Public game-line gate: odds band (hard — overrides can't re-admit
+    out-of-band picks), then base rules plus any human-approved override."""
+    if not _in_play_odds_band(e):
+        return False
     return _gate_override(e, _qualifies_base(e), is_prop=False)
 
 
 def _qualifies_prop(e):
-    """Public prop gate: base rules plus any human-approved override."""
+    """Public prop gate: odds band (hard), then base rules plus any
+    human-approved override."""
+    if not _in_play_odds_band(e):
+        return False
     return _gate_override(e, _qualifies_prop_base(e), is_prop=True)
 
 
@@ -7338,6 +7452,12 @@ _LEAGUE_TO_SPORT = {
     "boxing": "boxing",
     "cricket": "cricket", "ipl": "cricket",
     "tennis": "tennis", "atp": "tennis", "wta": "tennis",
+    # Tracking-only additions 2026-07-09. Keys are lowercase-compacted
+    # sport titles (spaces stripped by the canonicaliser).
+    "cfl": "cfl", "kbo": "kbo", "npb": "npb",
+    "brazilsériea": "soccer", "brazilseriea": "soccer",
+    "primeradivisión-argentina": "soccer",
+    "primeradivision-argentina": "soccer",
 }
 
 
