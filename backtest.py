@@ -922,24 +922,50 @@ def _dedup_promo_picks(raw: list[dict]) -> list[dict]:
     return result
 
 
+def _load_from_picks_db(tab: str, start_dt: date, end_dt: date,
+                        an_only_mode: str) -> list[dict] | None:
+    """Fast path (2026-07-09): query the SQLite parse-cache instead of
+    re-reading every archive workbook. sync() first ingests any files
+    the cache hasn't seen, through the same _read_* functions the scan
+    path uses — so rows are identical either way. Returns None on ANY
+    problem; callers fall back to the original file scan, so the cache
+    can never block a backtest."""
+    try:
+        import picks_db
+        stats = picks_db.sync()
+        if stats.get("new_files"):
+            print(f"  picks.db: ingested {stats['new_files']} new file(s) "
+                  f"(+{stats['new_rows']} rows)")
+        rows = picks_db.load_raw(tab, start_dt, end_dt, an_only_mode)
+        print(f"  picks.db: {len(rows)} raw {tab} rows "
+              f"({start_dt} → {end_dt}, {an_only_mode})")
+        return rows
+    except Exception as e:
+        print(f"  picks.db unavailable ({type(e).__name__}: {e}) — "
+              f"falling back to xlsx scan")
+        return None
+
+
 def load_archive_promo_picks(start_dt: date, end_dt: date,
                               an_only_mode: str = "exclude") -> list[dict]:
     """
     Scan archive/ for ev_edges_*.xlsx in range and read the Promo Picks section
     from each "Play These" tab.  Deduplicates to first appearance only.
     """
-    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
+    raw = _load_from_picks_db("promo", start_dt, end_dt, an_only_mode)
+    if raw is None:
+        in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
-    if not in_range:
-        print("  No promo picks found in range.")
-        return []
+        if not in_range:
+            print("  No promo picks found in range.")
+            return []
 
-    print(f"Loading Promo Picks from {len(in_range)} file(s):")
-    raw: list[dict] = []
-    for fd, path in sorted(in_range):
-        picks = _read_promo_picks(path, fd)
-        print(f"  {os.path.basename(path)}: {len(picks)} promo picks")
-        raw.extend(picks)
+        print(f"Loading Promo Picks from {len(in_range)} file(s):")
+        raw = []
+        for fd, path in sorted(in_range):
+            picks = _read_promo_picks(path, fd)
+            print(f"  {os.path.basename(path)}: {len(picks)} promo picks")
+            raw.extend(picks)
 
     if not raw:
         return []
@@ -956,18 +982,20 @@ def load_archive_picks(start_dt: date, end_dt: date,
     Scan archive/ (and script dir) for ev_edges_*.xlsx within the date range.
     Returns all raw pick rows, then deduplicates to first appearance.
     """
-    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
+    raw = _load_from_picks_db("pt", start_dt, end_dt, an_only_mode)
+    if raw is None:
+        in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
-    if not in_range:
-        print(f"  No archive files found between {start_dt} and {end_dt}.")
-        return []
+        if not in_range:
+            print(f"  No archive files found between {start_dt} and {end_dt}.")
+            return []
 
-    print(f"Found {len(in_range)} file(s) in range:")
-    raw: list[dict] = []
-    for fd, path in sorted(in_range):
-        picks = _read_play_these(path, fd)
-        print(f"  {os.path.basename(path)}: {len(picks)} picks")
-        raw.extend(picks)
+        print(f"Found {len(in_range)} file(s) in range:")
+        raw = []
+        for fd, path in sorted(in_range):
+            picks = _read_play_these(path, fd)
+            print(f"  {os.path.basename(path)}: {len(picks)} picks")
+            raw.extend(picks)
 
     result     = _dedup_picks(raw)
     dupes      = len(raw) - len(result)
@@ -1123,17 +1151,19 @@ def load_archive_ev_edges(start_dt: date, end_dt: date,
     Load all +EV picks from the "EV Edges" tab across archive files in range.
     Deduplicates to first appearance only.
     """
-    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
+    raw = _load_from_picks_db("ev", start_dt, end_dt, an_only_mode)
+    if raw is None:
+        in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
-    if not in_range:
-        return []
+        if not in_range:
+            return []
 
-    print(f"\nLoading EV Edges tab from {len(in_range)} file(s):")
-    raw: list[dict] = []
-    for fd, path in in_range:
-        picks = _read_ev_edges(path, fd)
-        print(f"  {os.path.basename(path)}: {len(picks)} EV edges")
-        raw.extend(picks)
+        print(f"\nLoading EV Edges tab from {len(in_range)} file(s):")
+        raw = []
+        for fd, path in in_range:
+            picks = _read_ev_edges(path, fd)
+            print(f"  {os.path.basename(path)}: {len(picks)} EV edges")
+            raw.extend(picks)
 
     result     = _dedup_picks(raw)
     dupes      = len(raw) - len(result)
@@ -1316,17 +1346,20 @@ def _read_props_from_odds_comparison(filepath: str, file_dt: date) -> list[dict]
 def load_archive_props(start_dt: date, end_dt: date,
                         an_only_mode: str = "exclude") -> list[dict]:
     """Load and deduplicate player-prop edges from Odds Comparison tabs."""
-    in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
+    raw = _load_from_picks_db("prop", start_dt, end_dt, an_only_mode)
+    if raw is None:
+        in_range = _discover_archive_files(start_dt, end_dt, an_only_mode)
 
-    if not in_range:
-        return []
+        if not in_range:
+            return []
 
-    print(f"\nLoading props from Odds Comparison tab ({len(in_range)} file(s)):")
-    raw: list[dict] = []
-    for fd, path in in_range:
-        picks = _read_props_from_odds_comparison(path, fd)
-        print(f"  {os.path.basename(path)}: {len(picks)} prop edges")
-        raw.extend(picks)
+        print(f"\nLoading props from Odds Comparison tab "
+              f"({len(in_range)} file(s)):")
+        raw = []
+        for fd, path in in_range:
+            picks = _read_props_from_odds_comparison(path, fd)
+            print(f"  {os.path.basename(path)}: {len(picks)} prop edges")
+            raw.extend(picks)
 
     result     = _dedup_picks(raw)
     dupes      = len(raw) - len(result)
