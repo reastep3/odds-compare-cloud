@@ -126,10 +126,29 @@ def test_observed_haircut_pct(tmp_path, monkeypatch):
 
 def test_backup_skips_when_unconfigured(monkeypatch):
     for k in ("BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET",
-              "BACKUP_S3_KEY_ID", "BACKUP_S3_SECRET"):
+              "BACKUP_S3_KEY_ID", "BACKUP_S3_SECRET",
+              "AWS_ENDPOINT_URL_S3", "BUCKET_NAME",
+              "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
         monkeypatch.delenv(k, raising=False)
     result = backup_archive.run_backup(output_dir="/nonexistent")
     assert result["ok"] is False and "skipped" in result
+
+
+def test_cfg_tigris_fallback_and_precedence(monkeypatch):
+    for k in ("BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET",
+              "BACKUP_S3_KEY_ID", "BACKUP_S3_SECRET", "BACKUP_S3_REGION"):
+        monkeypatch.delenv(k, raising=False)
+    # Tigris convention (what `fly storage create` stamps on the app)
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
+    monkeypatch.setenv("BUCKET_NAME", "arbyx-backups")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "tid")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "tsecret")
+    monkeypatch.setenv("AWS_REGION", "auto")
+    cfg = backup_archive._cfg()
+    assert cfg["bucket"] == "arbyx-backups" and cfg["key_id"] == "tid"
+    # Explicit BACKUP_S3_* overrides the fallback
+    monkeypatch.setenv("BACKUP_S3_BUCKET", "elsewhere")
+    assert backup_archive._cfg()["bucket"] == "elsewhere"
 
 
 def test_build_backup_tar(tmp_path):
@@ -161,6 +180,10 @@ def test_sigv4_headers_shape_and_stability():
     h3 = backup_archive.sigv4_put_headers(cfg, "backup.tar.gz",
                                           "f" * 64, now=now)
     assert h3["Authorization"] != h1["Authorization"]
+    # Different method → different signature (DELETE for retention)
+    h4 = backup_archive.sigv4_headers(cfg, "DELETE", "backup.tar.gz",
+                                      "e" * 64, now=now)
+    assert h4["Authorization"] != h1["Authorization"]
 
 
 def test_run_backup_roundtrip(tmp_path, monkeypatch):
@@ -171,13 +194,23 @@ def test_run_backup_roundtrip(tmp_path, monkeypatch):
     out = tmp_path / "output"
     (out / "archive").mkdir(parents=True)
     (out / "archive" / "ev.xlsx").write_bytes(b"data")
-    uploads = []
+    uploads, prunes = [], []
     monkeypatch.setattr(backup_archive, "upload_file",
                         lambda cfg, path, key: uploads.append(key))
+    monkeypatch.setattr(backup_archive, "delete_file",
+                        lambda cfg, key: prunes.append(key))
+    monkeypatch.setenv("BACKUP_RETENTION_DAYS", "60")
     result = backup_archive.run_backup(output_dir=str(out),
                                        data_dir=str(tmp_path / "nostate"))
     assert result["ok"] is True and result["files"] == 1
     assert uploads and uploads[0].startswith("arbyx-backup-")
+    # Retention pruned exactly the object from 60 days before today's key
+    assert prunes == [result["pruned"]]
+    up_d = dt.date.fromisoformat(
+        uploads[0].removeprefix("arbyx-backup-").removesuffix(".tar.gz"))
+    pr_d = dt.date.fromisoformat(
+        prunes[0].removeprefix("arbyx-backup-").removesuffix(".tar.gz"))
+    assert (up_d - pr_d).days == 60
 
 
 def test_run_backup_reports_upload_failure(tmp_path, monkeypatch):
