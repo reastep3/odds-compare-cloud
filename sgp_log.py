@@ -182,6 +182,34 @@ def grade_pending() -> dict:
     return stats
 
 
+def observed_haircut_pct(default: float = 15.0, min_n: int = 8) -> float:
+    """Mean price haircut the book has actually applied across logged
+    quotes: 1 − (quoted−1)/(naive−1), as a percent of the naive payout.
+
+    The haircut is known at quote time, so ungraded slips count too —
+    every /sgpcheck contributes an observation. Deduped per ticket
+    (latest quote wins). Falls back to `default` until `min_n` distinct
+    tickets exist or on any read error; clamped to [0, 60] so one weird
+    quote can't push pricing to an extreme.
+
+    2026-07-09: this feeds the parlay builder's assumed SGP pricing, so
+    the displayed SGP EV converges on DK's real quoting behaviour as
+    slips accumulate."""
+    try:
+        by_ticket: dict[tuple, float] = {}
+        for s in sorted(_load_slips(), key=lambda s: s.get("ts") or ""):
+            nd = s.get("naive_dec") or 0
+            qd = s.get("quoted_dec") or 0
+            if nd > 1 and qd > 1:
+                by_ticket[_leg_set_key(s)] = (1 - (qd - 1) / (nd - 1)) * 100
+        cuts = list(by_ticket.values())
+        if len(cuts) < min_n:
+            return default
+        return max(0.0, min(60.0, sum(cuts) / len(cuts)))
+    except Exception:
+        return default
+
+
 def _leg_set_key(slip: dict) -> tuple:
     """Identity of the underlying ticket, so re-checking the same slip at
     two different quotes doesn't double-count it in calibration."""

@@ -375,6 +375,7 @@ def parse_promo(text: str) -> dict | None:
         "game_hint":     None,
         "sgp":           False,
         "refund_on_draw": False,
+        "straight_only": False,
         "count":         1,
         "label":         "",
     }
@@ -469,6 +470,13 @@ def parse_promo(text: str) -> dict | None:
         # sgp (same-game parlay)
         if tok == "sgp":
             promo["sgp"] = True
+            i += 1
+            continue
+
+        # straight/single(s) — token is restricted to single bets, so the
+        # boost allocator must not propose a parlay use for it.
+        if tok in ("straight", "straights", "single", "singles"):
+            promo["straight_only"] = True
             i += 1
             continue
 
@@ -746,6 +754,10 @@ def format_play_edges(play_edges: list[dict], bankrolls: dict,
             profit = bet * (edge["odds_decimal"] - 1)
             total_bet += bet
             total_profit += profit
+            # Displayed stake rides along on the edge so /placed can log
+            # exactly what the user saw (and its message number).
+            edge["_stake"] = round(bet, 2)
+            edge["_msg_idx"] = i
 
             try:
                 ct = datetime.fromisoformat(
@@ -923,6 +935,40 @@ def format_promo_picks(promo_picks: list[dict], bankrolls: dict,
                 f"{_win_display(bet, profit, edge['book'])}"
             )
 
+            # Boost-token allocator: the same token on a 3-leg cross-game
+            # parlay, when the pipeline found one worth comparing.
+            alt = pp.get("alt_parlay")
+            if alt:
+                s_exp = bet * boosted_ev / 100
+                p_exp = alt["bet"] * alt["boosted_ev"] / 100
+                if p_exp > s_exp:
+                    lines.append(
+                        f"  💡 <b>Better use: 3-leg parlay</b> — "
+                        f"~${p_exp:.2f}/token expected vs "
+                        f"~${s_exp:.2f} straight:")
+                else:
+                    lines.append(
+                        f"  <i>Straight is the better use "
+                        f"(~${s_exp:.2f}/token vs ~${p_exp:.2f} parlay). "
+                        f"Parlay option:</i>")
+                lines.append(
+                    f"    {alt['parlay_american']} -&gt; "
+                    f"{alt['boost_american']} boosted | "
+                    f"EV {alt['boosted_ev']:+.1f}% | "
+                    f"Bet ${alt['bet']:.2f} -&gt; "
+                    f"{_win_display(alt['bet'], alt['profit'], edge['book'])}"
+                )
+                for i_leg, leg in enumerate(alt["legs"], 1):
+                    leg_pick = _esc(leg["outcome"])
+                    leg_pt = _format_point(leg.get("point"),
+                                           leg.get("market", ""))
+                    if leg_pt:
+                        leg_pick += f" {leg_pt}"
+                    lines.append(
+                        f"    {i_leg}. {_esc(leg['game'])} | "
+                        f"{leg['market'].upper()} | {leg_pick} | "
+                        f"{_format_american(leg['odds_american'])}")
+
         link = _deep_link(edge)
         if link:
             short = "DK" if "draftkings" in link else "FD"
@@ -963,9 +1009,20 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
             f"\n<b>{n}. {_esc(promo['label'])} ({row['num_legs']} legs)</b>"
             f"{copy_suffix}"
         )
-        lines.append(
-            f"  {row['parlay_american']} -&gt; {row['boost_american']} (boosted)"
-        )
+        if row.get("sgp_haircut_pct"):
+            # SGP pricing already assumes the learned haircut off the
+            # naive product — show all three stages.
+            lines.append(
+                f"  {row['parlay_american']} naive -&gt; "
+                f"{row.get('eff_american', row['parlay_american'])} "
+                f"(~{row['sgp_haircut_pct']:g}% SGP cut) -&gt; "
+                f"{row['boost_american']} boosted"
+            )
+        else:
+            lines.append(
+                f"  {row['parlay_american']} -&gt; {row['boost_american']} "
+                f"(boosted)"
+            )
         lines.append(
             f"  EV {row.get('unboosted_ev', 0):+.1f}% -&gt; "
             f"{row['boosted_ev']:+.1f}% | "
@@ -991,10 +1048,11 @@ def format_parlay_picks(parlay_rows: list[dict]) -> str | None:
 
         if promo.get("sgp"):
             lines.append(
-                f"\n  <i>⚠ The book reprices SGPs for correlation — the "
-                f"odds above are the naive product. Build the slip, then "
+                f"\n  <i>⚠ EV above already assumes a "
+                f"~{row.get('sgp_haircut_pct', 0):g}% SGP price cut "
+                f"(learned from your logged quotes). Build the slip, then "
                 f"send</i> <code>/sgpcheck {n} +450</code> <i>(your actual "
-                f"quote) to verify EV at the real price.</i>"
+                f"quote) to confirm before betting.</i>"
             )
 
     return "\n".join(lines)
@@ -1896,6 +1954,7 @@ _EQUIV_FIELDS = (
     "book", "sport", "market", "promo_type", "boost_pct",
     "bet_amount", "min_odds", "max_bet", "num_legs",
     "game_specific", "sgp", "game_hint", "refund_on_draw",
+    "straight_only",
 )
 
 
@@ -2392,6 +2451,13 @@ async def _send_early_results(context: ContextTypes.DEFAULT_TYPE,
                 context.bot, chat_id, chunk, parse_mode="HTML",
                 disable_web_page_preview=True)
             await asyncio.sleep(_BURST_SEND_DELAY)
+
+    # Stash the sent plays (with displayed stakes/numbers attached by
+    # format_play_edges) so /placed can log what the user actually bet.
+    context.bot_data.setdefault("placed_stash", {})[chat_id] = {
+        "DraftKings": [e for e in play_edges if e["book"] == "DraftKings"],
+        "FanDuel":    [e for e in play_edges if e["book"] == "FanDuel"],
+    }
 
 
 def _match_game_hint(hint: str | None,
@@ -3024,6 +3090,166 @@ async def cmd_recheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          parse_mode="HTML", disable_web_page_preview=True)
 
 
+async def cmd_placed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log which picks from the last run were actually bet — the sheet
+    measures theoretical P&L; this feeds the user's real one (/mybets).
+    Usage: /placed dk 1 3 5 · /placed fd 2 · /placed 1 3 (one-book runs)
+           /placed dk all · /placed parlay 1"""
+    if not is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    stash = context.bot_data.get("placed_stash", {}).get(chat_id) or {}
+    parlays = context.bot_data.get("parlay_quotes", {}).get(chat_id) or []
+
+    args = [a.lower() for a in (context.args or [])]
+    if not args:
+        await update.message.reply_text(
+            "Usage: /placed dk 1 3 5 — log the picks you actually bet "
+            "from the last run's PLAYS lists (or /placed parlay 1). "
+            "Then /mybets shows your real P&L.")
+        return
+
+    if args[0] in ("dk", "draftkings"):
+        mode, args = "DraftKings", args[1:]
+    elif args[0] in ("fd", "fanduel"):
+        mode, args = "FanDuel", args[1:]
+    elif args[0] == "parlay":
+        mode, args = "parlay", args[1:]
+    else:
+        # Bare indices — unambiguous only when one book had plays.
+        books_with = [b for b in ("DraftKings", "FanDuel") if stash.get(b)]
+        if len(books_with) == 1:
+            mode = books_with[0]
+        else:
+            await update.message.reply_text(
+                "Both books had plays — say which: /placed dk 1 3")
+            return
+
+    pool = parlays if mode == "parlay" else (stash.get(mode) or [])
+    if not pool:
+        await update.message.reply_text(
+            f"No stored {'parlays' if mode == 'parlay' else mode + ' plays'}"
+            f" from a recent run — run first, then /placed.")
+        return
+
+    if args and args[0] == "all":
+        idxs = list(range(1, len(pool) + 1))
+    else:
+        try:
+            idxs = sorted({int(a) for a in args})
+        except ValueError:
+            await update.message.reply_text(
+                "Couldn't read those pick numbers — e.g. /placed dk 1 3 5")
+            return
+    bad = [i for i in idxs if not (1 <= i <= len(pool))]
+    if bad:
+        await update.message.reply_text(
+            f"Pick number(s) {bad} out of range — the list had {len(pool)}.")
+        return
+
+    import bets_log
+    import sgp_log
+    from odds_compare import _make_pick_key
+
+    entries, keys, lines = [], [], []
+    for i in idxs:
+        if mode == "parlay":
+            row = pool[i - 1]
+            promo = row.get("promo") or {}
+            legs = []
+            for l in row.get("legs") or []:
+                leg = sgp_log.leg_from_edge(l)
+                leg["pick_key"] = _make_pick_key(l)
+                legs.append(leg)
+            entries.append({
+                "source":    "parlay",
+                "book":      promo.get("book") or "?",
+                "stake":     row.get("bet") or 0,
+                "decimal":   row.get("boost_dec") or 1.0,
+                "boost_pct": promo.get("boost_pct") or 0,
+                "label":     (f"{row.get('promo_label')} "
+                              f"({row.get('num_legs')} legs "
+                              f"{row.get('boost_american')})"),
+                "legs":      legs,
+            })
+            keys.extend(l["pick_key"] for l in legs)
+            lines.append(f"  parlay {i}: {row.get('promo_label')} "
+                         f"${row.get('bet') or 0:.2f}")
+        else:
+            e = pool[i - 1]
+            leg = sgp_log.leg_from_edge(e)
+            leg["pick_key"] = _make_pick_key(e)
+            entries.append({
+                "source":    "play",
+                "book":      e["book"],
+                "stake":     e.get("_stake") or 0,
+                "decimal":   e.get("odds_decimal") or 1.0,
+                "boost_pct": 0,
+                "label":     (f"{e['game']} {e['market'].upper()} "
+                              f"{e['outcome']}"),
+                "legs":      [leg],
+            })
+            keys.append(leg["pick_key"])
+            lines.append(
+                f"  {i}. {e['game']} | {e['market'].upper()} "
+                f"{e['outcome']} | ${e.get('_stake') or 0:.2f}")
+
+    n = bets_log.log_placed(entries)
+    try:
+        from closing_lines import mark_placed
+        mark_placed(keys)
+    except Exception:
+        log.exception("[placed] sidecar flag failed")
+    await update.message.reply_text(
+        f"Logged {n} placed bet(s):\n" + "\n".join(lines)
+        + "\n\nGrades + P&L: /mybets")
+
+
+async def cmd_mybets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Personal P&L over bets logged with /placed. Usage: /mybets [days]"""
+    if not is_authorized(update):
+        return
+    days = 7
+    if context.args:
+        m = re.match(r"^(\d+)d?$", context.args[0].lower())
+        if m:
+            days = max(1, min(120, int(m.group(1))))
+
+    import bets_log
+    await update.message.reply_text(f"Grading your placed bets ({days}d)…")
+    try:
+        await asyncio.to_thread(bets_log.grade_pending)
+        s = await asyncio.to_thread(bets_log.summary, days)
+    except Exception as e:
+        await update.message.reply_text(f"/mybets failed: {e}")
+        return
+    if not s["n_placed"]:
+        await update.message.reply_text(
+            f"No placed bets logged in the last {days}d — after a run, "
+            f"log what you bet with /placed dk 1 3 5.")
+        return
+
+    lines = [
+        f"<b>YOUR BETS — last {days}d</b>",
+        (f"Placed: {s['n_placed']} | settled {s['n_settled']} "
+         f"(W{s['wins']}/L{s['losses']}/P{s['pushes']})"
+         + (f" | {s['pending']} pending" if s["pending"] else "")),
+        (f"Staked: ${s['staked']:.2f} | P&L: <b>${s['pnl']:+.2f}</b> | "
+         f"ROI: <b>{s['roi_pct']:+.1f}%</b>"),
+    ]
+    if s.get("clv_avg") is not None:
+        lines.append(
+            f"CLV: {s['clv_avg']:+.2f}% avg over {s['clv_n']} leg(s)")
+    for book, d in sorted(s.get("by_book", {}).items()):
+        roi = d["pnl"] / d["staked"] * 100 if d["staked"] else 0
+        lines.append(f"  {book}: {d['w']}W/{d['n']} settled | "
+                     f"${d['pnl']:+.2f} ({roi:+.1f}%)")
+    if s.get("ungradable"):
+        lines.append(f"<i>{s['ungradable']} ungradable "
+                     f"(no result source)</i>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
@@ -3041,6 +3267,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/bonus       — Best use of a free/bonus bet ($ amount + any limits)\n"
         "/drawbreaker — Best World Cup ML for a draw-refund (bonus-bet) promo\n"
         "/sgpcheck    — Re-price a parlay pick at the book's quoted odds\n"
+        "/placed      — Log which picks you actually bet (e.g. /placed dk 1 3)\n"
+        "/mybets      — Your real P&L + CLV over logged bets (/mybets 30)\n"
         "/recheck     — Re-price today's Play These picks before betting\n"
         "/kelly       — Show or set your Kelly fraction\n"
         "/backtest    — Run a backtest on past picks\n"
@@ -3192,6 +3420,30 @@ async def capture_closing_lines_job(context: ContextTypes.DEFAULT_TYPE):
     if stats.get("captured") or stats.get("no_match"):
         log.info("[closing-lines] %d captured, %d no-match",
                  stats["captured"], stats["no_match"])
+
+
+async def send_archive_backup(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: offsite backup of archive + reports + state at 4 AM
+    ET (after the 3 AM backtest so the tarball contains that night's
+    grades). Silent on success and when BACKUP_S3_* isn't configured;
+    DMs the admin only on a real failure — a backup that silently fails
+    forever is worse than no backup at all."""
+    from backup_archive import run_backup
+    result = await asyncio.to_thread(run_backup)
+    if result.get("ok"):
+        log.info(f"[backup] Uploaded {result['key']} "
+                 f"({result['files']} files, {result['bytes']:,} bytes)")
+    elif "skipped" in result:
+        log.info(f"[backup] Skipped — {result['skipped']}")
+    else:
+        log.error(f"[backup] FAILED — {result.get('error')}")
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ Nightly archive backup failed: {result.get('error')}",
+            )
+        except Exception:
+            pass
 
 
 async def send_weekly_digest(context: ContextTypes.DEFAULT_TYPE):
@@ -3940,6 +4192,8 @@ def main():
     app.add_handler(drawbreaker_handler)
     app.add_handler(CommandHandler("run_live", cmd_run_live))
     app.add_handler(CommandHandler("sgpcheck", cmd_sgpcheck))
+    app.add_handler(CommandHandler("placed", cmd_placed))
+    app.add_handler(CommandHandler("mybets", cmd_mybets))
     app.add_handler(CommandHandler("recheck", cmd_recheck))
     app.add_handler(CommandHandler("kelly", cmd_kelly))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
@@ -4022,6 +4276,18 @@ def main():
             name="closing_lines_capture",
         )
         log.info("Closing-line capture scheduled — every 60s (silent).")
+
+        # Nightly offsite backup — 4:00 AM ET (after the 3 AM backtest),
+        # silent. Tars archive + reports + state to an S3-compatible
+        # bucket via backup_archive.py. No-op until the BACKUP_S3_*
+        # secrets are set; DMs the admin only on real failures.
+        app.job_queue.run_daily(
+            send_archive_backup,
+            time=dtime(hour=4, minute=0,
+                       tzinfo=ZoneInfo("America/New_York")),
+            name="archive_backup",
+        )
+        log.info("Nightly archive backup scheduled — 4:00 AM ET (silent).")
     else:
         log.warning("JobQueue unavailable — weekly digest disabled. "
                     "Install with: pip install 'python-telegram-bot[job-queue]'")

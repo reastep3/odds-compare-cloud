@@ -507,6 +507,40 @@ def recheck_play_picks(output_dir: str | None = None,
     return {"results": results, "pulled": pulled, "scanned": len(due)}
 
 
+def mark_placed(pick_keys: list[str], output_dir: str | None = None) -> int:
+    """Flag sidecar entries as actually placed by the user (/placed).
+
+    Checks today's and yesterday's ET files — a bet logged just after
+    midnight belongs to the previous betting day's sidecar. Returns how
+    many entries were flagged, so CLV reports can split "picks shown"
+    from "picks bet"."""
+    output_dir = output_dir or OUTPUT_DIR
+    keys = set(pick_keys)
+    flagged = 0
+    today_et = datetime.now(EASTERN).date()
+    for d in (today_et, today_et - timedelta(days=1)):
+        path = os.path.join(output_dir, f"pending_closes_{d.isoformat()}.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        changed = False
+        for key, pick in payload.get("picks", {}).items():
+            if key in keys and not pick.get("placed"):
+                pick["placed"] = True
+                changed = True
+                flagged += 1
+        if changed:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+    return flagged
+
+
 def capture_pending_closes(output_dir: str | None = None) -> dict:
     """
     Capture closing-line odds for any pending pick whose commence is in the

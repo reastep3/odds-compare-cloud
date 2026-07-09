@@ -2473,6 +2473,24 @@ PROMO_PROP_WINDOW_MIN = 75
 PROMO_PARLAY_LEG_MAX_ODDS   = 150   # American, per leg
 PROMO_PARLAY_TOTAL_MAX_ODDS = 700   # American, combined
 
+# SGP pricing: books re-quote same-game parlays with a correlation
+# haircut off the naive leg-product price. 2026-07-09: the builder now
+# prices SGP candidates at an ASSUMED haircut so displayed EV / Kelly /
+# stake reflect a realistic quote instead of the naive product. The
+# default is replaced by the observed mean from logged /sgpcheck quotes
+# (sgp_log.observed_haircut_pct) once ≥8 distinct tickets exist.
+SGP_ASSUMED_HAIRCUT_PCT = 15.0
+
+
+def _sgp_assumed_haircut() -> float:
+    """Observed mean SGP haircut from logged quotes; assumed default
+    until the slip log has enough distinct tickets."""
+    try:
+        from sgp_log import observed_haircut_pct
+        return observed_haircut_pct(default=SGP_ASSUMED_HAIRCUT_PCT)
+    except Exception:
+        return SGP_ASSUMED_HAIRCUT_PCT
+
 
 # ── Profit-boost staking band ─────────────────────────────────────────
 # Fully-graded promo P&L (Apr–Jun 2026; see the promo_oddsband_pnl_analysis
@@ -6662,7 +6680,18 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         if promo.get("boost_pct") is None:
             print(f"  Skipping parlay promo — no boost_pct: {promo.get('label')}")
             continue
-        num_legs = promo.get("num_legs", 3)
+        is_sgp = promo.get("sgp", False)
+        # 2026-07-09 (105d parlay sim): SGP defaults to 2 legs — 2-leg
+        # tickets survived realistic haircuts (+11-17% ROI) while 3-leg
+        # ran -76% and worse. Cross-game keeps the 3-leg default.
+        num_legs = promo.get("num_legs") or (2 if is_sgp else 3)
+        # SGP candidates are priced at the assumed/learned haircut so EV,
+        # Kelly and stake reflect a realistic quote, not the naive product.
+        haircut_pct = _sgp_assumed_haircut() if is_sgp else 0.0
+
+        def _eff(dec: float) -> float:
+            """Naive product price → realistic pre-boost price."""
+            return 1 + (dec - 1) * (1 - haircut_pct / 100)
 
         # Collect qualifying legs — NOTE: min_odds is NOT checked here.
         # For parlays the minimum-odds restriction applies to the combined
@@ -6722,8 +6751,6 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
         # Sort by fair probability descending (best parlay legs first)
         qualifying.sort(key=lambda e: e.get("fair_prob", 0), reverse=True)
 
-        is_sgp = promo.get("sgp", False)
-
         # Pre-compute the parlay-level min-odds decimal once (None = no floor)
         parlay_min_dec = (american_to_decimal(promo["min_odds"])
                           if promo.get("min_odds") is not None else None)
@@ -6777,7 +6804,11 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
             best_overall_legs  = None
 
             for candidate_pool, _game_name in pools_to_try:
-                max_try_legs = min(num_legs + 3, len(candidate_pool))
+                # 2026-07-09: build EXACTLY num_legs — the old +3
+                # exploration picked extra legs on model EV, which is
+                # inflated per added leg (independence error compounds);
+                # the 105d sim graded 4-leg at -23% vs 3-leg +39%.
+                max_try_legs = min(num_legs, len(candidate_pool))
                 for try_legs in range(num_legs, max_try_legs + 1):
                     if len(candidate_pool) < try_legs:
                         break
@@ -6800,13 +6831,15 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                             for leg in combo:
                                 parlay_dec  *= leg["odds_decimal"]
                                 parlay_fair *= leg["fair_prob"] / 100
+                            # Min-odds terms are judged on the book's
+                            # QUOTED price → use the haircut price.
                             if (parlay_min_dec is not None
-                                    and parlay_dec < parlay_min_dec):
+                                    and _eff(parlay_dec) < parlay_min_dec):
                                 continue
                             if parlay_dec > total_cap_dec:
                                 continue
                             boost_dec = apply_profit_boost(
-                                parlay_dec, promo["boost_pct"])
+                                _eff(parlay_dec), promo["boost_pct"])
                             ev = calc_ev(parlay_fair, boost_dec)
                             if ev > combo_ev:
                                 combo_ev    = ev
@@ -6846,10 +6879,10 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                                 parlay_dec  *= leg["odds_decimal"]
                                 parlay_fair *= leg["fair_prob"] / 100
                             if ((parlay_min_dec is None
-                                    or parlay_dec >= parlay_min_dec)
+                                    or _eff(parlay_dec) >= parlay_min_dec)
                                     and parlay_dec <= total_cap_dec):
                                 boost_dec = apply_profit_boost(
-                                    parlay_dec, promo["boost_pct"])
+                                    _eff(parlay_dec), promo["boost_pct"])
                                 combo_ev = calc_ev(parlay_fair, boost_dec)
                                 combo_candidate = greedy
 
@@ -6872,9 +6905,12 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                 parlay_dec  *= leg["odds_decimal"]
                 parlay_fair *= leg["fair_prob"] / 100
 
-            boost_dec    = apply_profit_boost(parlay_dec, promo["boost_pct"])
+            # All realistic pricing flows from the effective (haircut)
+            # price — for cross-game parlays _eff() is the identity.
+            eff_dec      = _eff(parlay_dec)
+            boost_dec    = apply_profit_boost(eff_dec, promo["boost_pct"])
             boosted_ev   = calc_ev(parlay_fair, boost_dec)
-            unboosted_ev = calc_ev(parlay_fair, parlay_dec)
+            unboosted_ev = calc_ev(parlay_fair, eff_dec)
             boosted_kelly = kelly_bet(parlay_fair, boost_dec)
 
             bet = clamp_bet(bankroll * boosted_kelly, promo["book"])
@@ -6890,6 +6926,9 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
                 "parlay_decimal":   round(parlay_dec, 3),
                 "parlay_american":  format_american(parlay_dec),
                 "parlay_fair_prob": round(parlay_fair * 100, 3),
+                "sgp_haircut_pct":  round(haircut_pct, 1) if is_sgp else 0,
+                "eff_decimal":      round(eff_dec, 3),
+                "eff_american":     format_american(eff_dec),
                 "boost_dec":        round(boost_dec, 3),
                 "boost_american":   format_american(boost_dec),
                 "unboosted_ev":     round(unboosted_ev, 2),
@@ -6920,6 +6959,58 @@ def _build_parlay_rows(edges: list[dict], promos: list[dict],
 
     rows.sort(key=lambda x: x["boosted_ev"], reverse=True)
     return rows
+
+
+def _attach_parlay_alternatives(promo_picks: list[dict],
+                                edges: list[dict],
+                                dk_bankroll: float, fd_bankroll: float,
+                                extra_edges: list[dict] | None = None,
+                                parlay_pool: list = None,
+                                promo_pool: list = None) -> list[dict]:
+    """Boost-token allocator (2026-07-09).
+
+    A generic % profit boost can usually ride EITHER a single bet or a
+    parlay — and the 105-day parlay sim showed boosts on 3-leg cross-game
+    parlays extract roughly double the expected $ per token (+34.6%/+39.3%
+    flat ROI at 25/30% boosts) versus the same token on a straight. For
+    each straight boost pick, build the best 3-leg cross-game parlay under
+    the same token terms and attach it as pp["alt_parlay"]; the Telegram
+    formatter renders the side-by-side and recommends the better use.
+
+    Skipped for tokens that can't parlay: straight_only (user typed
+    "straight"/"single"), game-specific, draw-refund riders, bonus bets,
+    and duplicate copies of the same token (copy_idx > 0).
+    """
+    for pp in promo_picks:
+        promo = pp.get("promo") or {}
+        if (promo.get("promo_type") != "straight"
+                or not promo.get("boost_pct")
+                or promo.get("straight_only")
+                or promo.get("game_specific") or promo.get("game_filter")
+                or promo.get("refund_on_draw")
+                or pp.get("copy_idx")):
+            continue
+        synth = dict(promo)
+        synth.update({
+            "promo_type": "parlay",
+            "num_legs":   3,
+            "sgp":        False,
+            "count":      1,
+            "label":      f"{promo.get('label', 'boost')} → as 3-leg parlay",
+        })
+        try:
+            alt_rows = _build_parlay_rows(
+                edges, [synth], dk_bankroll, fd_bankroll,
+                extra_edges=extra_edges, parlay_pool=parlay_pool,
+                promo_pool=promo_pool)
+        except Exception as e:
+            print(f"  [allocator] parlay alternative failed for "
+                  f"{promo.get('label')}: {e}")
+            continue
+        alt = next((r for r in alt_rows if r.get("legs")), None)
+        if alt is not None:
+            pp["alt_parlay"] = alt
+    return promo_picks
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -8321,6 +8412,13 @@ def run_headless_finalize(fetched: dict,
         promo_pool, promos,
         extra_edges=(list(pp_promo_pool or [])
                      + list(golf_promo_pool or [])))
+
+    # Boost-token allocator: attach the best 3-leg parlay use of each
+    # generic % boost so the bot can recommend straight vs parlay.
+    _attach_parlay_alternatives(
+        promo_picks, all_edges, dk_bankroll, fd_bankroll,
+        extra_edges=player_prop_edges, parlay_pool=parlay_pool,
+        promo_pool=promo_pool)
 
     # Build parlay rows for the bot
     parlay_rows = _build_parlay_rows(
