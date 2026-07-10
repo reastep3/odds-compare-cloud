@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-05-09 v30 (Brand: real Arbyx logo + login lockup)";
+const BUILD = "2026-07-09 v31 (Archive: All +EV Edges section)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -1020,6 +1020,7 @@ function renderArchiveDetail(j) {
   $("#archive-play-count").textContent  = `(${counts.play_these || 0})`;
   $("#archive-promo-count").textContent = `(${counts.promo_picks || 0})`;
   $("#archive-props-count").textContent = `(${counts.player_props || 0})`;
+  $("#archive-all-count").textContent   = `(${counts.all_plays || 0})`;
 
   // Tables
   if ((j.play_these || []).length) {
@@ -1034,8 +1035,16 @@ function renderArchiveDetail(j) {
     $("#archive-props-section").hidden = false;
     renderPropsTable(j.player_props);
   }
+  // Broad pool (EV Edges tab) — backend has shipped this all along;
+  // reuses the Play These renderer so Close/CLV/Result behave the same.
+  if ((j.all_plays || []).length) {
+    $("#archive-all-section").hidden = false;
+    $("#archive-all-results").innerHTML =
+      renderResultsRollup(j.all_plays_results);
+    renderPlayTheseTable(j.all_plays, "#archive-all-table");
+  }
   if (!(j.play_these || []).length && !(j.promo_picks || []).length
-      && !(j.player_props || []).length) {
+      && !(j.player_props || []).length && !(j.all_plays || []).length) {
     $("#archive-empty-state").hidden = false;
   }
 }
@@ -1100,7 +1109,7 @@ function resultCell(p) {
   return `<td data-label="Result" class="${cls}"><b>${r}</b>${ret}</td>`;
 }
 
-function renderPlayTheseTable(picks) {
+function renderPlayTheseTable(picks, targetSel = "#archive-play-table") {
   const showClv = hasAnyClv(picks);
   const rows = picks.map((p) => {
     const ev = Number(p.ev_pct ?? 0);
@@ -1117,7 +1126,7 @@ function renderPlayTheseTable(picks) {
       ${resultCell(p)}
     </tr>`;
   }).join("");
-  $("#archive-play-table").innerHTML = `
+  $(targetSel).innerHTML = `
     <thead><tr>
       <th class="col-sport">Sport</th><th class="col-game">Game</th>
       <th class="col-book">Book</th><th class="col-mkt">Mkt</th>
