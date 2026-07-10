@@ -161,9 +161,9 @@ AN_SPORTS = [
     # ── Tracking-only additions 2026-07-09 (see _TRACKING_ONLY_SPORTS —
     # fetched for EV Edges + CLV, gated out of Play These until 30d of
     # graded data). Brazil/Argentina soccer ride the "soccer" list.
-    "cfl",       # Canadian football — Jun–Nov, ESPN-gradeable
-    "kbo",       # Korean baseball — no results source yet, CLV-only
-    "npb",       # Japanese baseball — no results source yet, CLV-only
+    "cfl",       # Canadian football — Jun–Nov, TheSportsDB-graded
+    "kbo",       # Korean baseball — TheSportsDB-graded (2026-07-09)
+    "npb",       # Japanese baseball — TheSportsDB-graded (2026-07-09)
 ]
 
 ACTION_NETWORK_BASE = "https://api.actionnetwork.com/web/v2"
@@ -2645,9 +2645,9 @@ _BLOCKED_SOCCER = frozenset({
 # Tracking-only sports (2026-07-09): fetched and shown in EV Edges so CLV
 # and graded results accrue, but never Play These — house rule is 30+ days
 # of graded data before a new sport is promoted (see AFL's path). Same
-# compact-token substring matching as _BLOCKED_SOCCER. CFL / Brazil /
-# Argentina grade via ESPN (backtest.ESPN_SPORT_MAP); KBO / NPB have no
-# results source yet so their signal is CLV-only until a grader exists.
+# compact-token substring matching as _BLOCKED_SOCCER. Brazil / Argentina
+# grade via ESPN (backtest.ESPN_SPORT_MAP); CFL / KBO / NPB via
+# TheSportsDB (backtest.THESPORTSDB_SPORTS) — all five graded + CLV'd.
 _TRACKING_ONLY_SPORTS = frozenset({
     "CFL", "KBO", "NPB", "BRAZIL", "ARGENTINA",
 })

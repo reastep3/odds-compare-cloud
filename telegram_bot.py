@@ -3336,6 +3336,26 @@ async def send_daily_backtest(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         log.exception("[daily-backtest] SGP slip grading failed")
 
+    # Grading-gap audit (2026-07-09): re-grade the trailing 3 days and
+    # DM the admin ONLY if scoreable picks are stuck ungraded — a result
+    # source went quiet or matching broke. Silence = pipeline healthy.
+    try:
+        from backtest import grading_gap_audit
+        audit = await asyncio.to_thread(grading_gap_audit, 3)
+        log.info(f"[daily-backtest] {audit['text']}")
+        if audit["anomalies"]:
+            lines = [f"⚠️ Grading gaps — {len(audit['anomalies'])} pick(s) "
+                     f"stuck ungraded ({audit['start']}..{audit['end']}):"]
+            for a in audit["anomalies"][:10]:
+                lines.append(f"  {a['sport'].upper()} {a['game']} "
+                             f"[{a['market']}] {a['game_date']} — {a['status']}")
+            if len(audit["anomalies"]) > 10:
+                lines.append(f"  …and {len(audit['anomalies']) - 10} more")
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID, text="\n".join(lines))
+    except Exception:
+        log.exception("[daily-backtest] gap audit failed")
+
 
 async def send_daily_skip_run(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: run /run skip at 10 AM ET as a backup data snapshot.

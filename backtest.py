@@ -92,7 +92,9 @@ ESPN_SPORT_MAP = {
     # Tracking-only adds 2026-07-09
     "brazil_serie_a":    "soccer/bra.1",
     "argentina_primera": "soccer/arg.1",
-    "cfl":               "football/cfl",
+    # CFL is NOT here: ESPN dropped CFL (football/cfl returns no events —
+    # discovered 2026-07-09 when four Jul 3–6 picks graded NO_RESULT).
+    # CFL grades via TheSportsDB instead (THESPORTSDB_SPORTS below).
     # AFL / Boxing / Cricket / Tennis are not auto-graded via ESPN — they
     # surface in the picks output but skip backtest grading. (ESPN's
     # AFL coverage is intermittent and tennis/cricket use different slug
@@ -199,11 +201,12 @@ _SPORT_NORM: dict[str, str] = {
     "brazil serie a":                   "brazil_serie_a",
     "primera división - argentina":     "argentina_primera",
     "primera division - argentina":     "argentina_primera",
-    # KBO / NPB — no results source yet; normalise so they roll up
-    # under a stable key (grades as MANUAL until a grader exists).
+    # KBO / NPB — TheSportsDB-graded (THESPORTSDB_SPORTS, 2026-07-09)
     "kbo":                              "kbo",
     "kbo league":                       "kbo",
+    "korean kbo league":                "kbo",
     "npb":                              "npb",
+    "nippon baseball league":           "npb",
     # AFL (Squiggle-graded)
     "afl":                              "afl",
     "australian football league":       "afl",
@@ -239,6 +242,12 @@ def _normalise_sport(raw: str) -> str:
 # Sports graded via Squiggle (api.squiggle.com.au — free, no key, AFL only)
 SQUIGGLE_SPORTS = {"afl"}
 
+# Sports graded via TheSportsDB (free tier, finals carry strStatus "FT").
+# 2026-07-09: covers the tracking-only adds ESPN can't grade — KBO/NPB
+# baseball (verified: English team names match the Odds API's exactly)
+# and CFL (see the ESPN_SPORT_MAP note). Values are TheSportsDB league ids.
+THESPORTSDB_SPORTS = {"kbo": 4830, "npb": 4591, "cfl": 4405}
+
 # Sports graded by scraping box.live (free, public, server-rendered HTML)
 BOXLIVE_SPORTS = {"boxing"}
 
@@ -259,6 +268,7 @@ ESPN_CRICKET_LEAGUES: dict[str, int] = {
 SCOREABLE = (set(ESPN_SPORT_MAP.keys())
              | SQUIGGLE_SPORTS
              | BOXLIVE_SPORTS
+             | set(THESPORTSDB_SPORTS)
              | TENNISEXPLORER_SPORTS
              | set(ESPN_CRICKET_LEAGUES.keys()))
 
@@ -1431,6 +1441,10 @@ def fetch_espn_games(sport: str, date_str: str) -> list[dict]:
         games = _fetch_squiggle_games(date_str)
         _espn_all_cache[cache_key] = games
         return games
+    if sport in THESPORTSDB_SPORTS:
+        games = _fetch_thesportsdb_games(THESPORTSDB_SPORTS[sport], date_str)
+        _espn_all_cache[cache_key] = games
+        return games
     if sport in BOXLIVE_SPORTS:
         games = _fetch_boxlive_games(date_str)
         _espn_all_cache[cache_key] = games
@@ -1583,6 +1597,58 @@ def _build_game_dict(home_slot: dict, away_slot: dict, winner_team: str,
         "completed":  completed,
         "status":     status_name,
     }
+
+
+# ── TheSportsDB (KBO / NPB / CFL) ─────────────────────────────────────
+# Free community API, one call per league-day. Finals carry strStatus
+# "FT" with integer scores; postponed games come back "POST" with null
+# scores. Team names are plain English ("Doosan Bears", "BC Lions") and
+# match the Odds API's naming, so the standard fuzzy matcher works.
+_TSDB_BASE = "https://www.thesportsdb.com/api/v1/json/123"
+_TSDB_HEADERS = {
+    "User-Agent": "arbyx-odds-compare/1.0 (https://github.com/reastep3/odds-compare-cloud)",
+}
+
+
+def _fetch_thesportsdb_games(league_id: int, date_str: str) -> list[dict]:
+    """One league's games for a YYYYMMDD date via TheSportsDB eventsday."""
+    d_iso = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+    try:
+        resp = _espn_session.get(
+            f"{_TSDB_BASE}/eventsday.php?d={d_iso}&l={league_id}",
+            headers=_TSDB_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return []
+        events = resp.json().get("events") or []
+    except Exception:
+        return []
+
+    games = []
+    for e in events:
+        status = (e.get("strStatus") or "").upper()
+        hs, aw = e.get("intHomeScore"), e.get("intAwayScore")
+        try:
+            h, a = int(hs), int(aw)
+            have_score = True
+        except (TypeError, ValueError):
+            h = a = 0
+            have_score = False
+        # FT/AET/AOT = final. POST(poned)/CANC(elled) map to "SCHEDULED"
+        # so run_backtest reads them as NOT_STARTED (true: they'll be
+        # made up later) instead of IN_PROGRESS.
+        completed = have_score and status in ("FT", "AET", "AOT", "MATCH FINISHED")
+        if status in ("POST", "CANC", "NS", ""):
+            status = "SCHEDULED"
+        home = {"name": e.get("strHomeTeam") or "", "abbr": "",
+                "short": e.get("strHomeTeam") or "", "score": h}
+        away = {"name": e.get("strAwayTeam") or "", "abbr": "",
+                "short": e.get("strAwayTeam") or "", "score": a}
+        winner = (home["name"] if h > a else
+                  away["name"] if a > h else "")
+        games.append(_build_game_dict(
+            home, away, winner, completed, status,
+            str(e.get("idEvent") or "")))
+    return games
 
 
 # ── Squiggle (AFL) ────────────────────────────────────────────────────
@@ -4809,6 +4875,63 @@ def _print_parlay_sim(sim: dict) -> None:
         print(f"  {r['kind']:<5} {r['n_legs']}-leg +{r['boost_pct']:>2}%{hc}"
               f"  n={r['parlays']:<3} W{r['wins']:<3}"
               f" P&L ${r['pnl']:+8.2f}  ROI {r['roi_pct']:+6.1f}%")
+
+
+# ── Grading-gap audit ──────────────────────────────────────────────────────────
+
+def grading_gap_audit(days: int = 3) -> dict:
+    """Nightly watchdog for silent grading holes (2026-07-09).
+
+    Re-grades the trailing `days` of broad-pool picks (window ends
+    yesterday) in memory — no report written — and splits whatever is
+    still ungraded into:
+
+      anomalies — SCOREABLE sport, game date passed, yet the pick grades
+                  NO_RESULT / UNKNOWN / NOT_STARTED. A result source went
+                  quiet, a slug died (how the dead ESPN CFL path was
+                  found), or name matching failed. Someone should look.
+      expected  — known-ungradeable cohorts (MANUAL sports like PGA/HR
+                  props, or sports with no results source configured).
+
+    The Telegram daily job DMs the admin only when anomalies exist, so
+    silence means the grading pipeline is healthy.
+    """
+    end   = date.today() - timedelta(days=1)
+    start = end - timedelta(days=days - 1)
+    picks  = load_archive_ev_edges(start, end, "exclude")
+    graded = run_backtest(picks) if picks else []
+
+    today_s = date.today().strftime("%Y%m%d")
+    anomalies: list[dict] = []
+    expected: dict[str, int] = defaultdict(int)
+    settled = 0
+    for p in graded:
+        r = p.get("result")
+        if r in ("WIN", "LOSS", "PUSH"):
+            settled += 1
+            continue
+        gd = p.get("game_date") or ""
+        if not gd or gd >= today_s:
+            continue                    # today/future — nothing due yet
+        sport = p.get("sport", "?")
+        if sport not in SCOREABLE or r == "MANUAL":
+            expected[sport] += 1
+        else:
+            anomalies.append({
+                "sport":     sport,
+                "game":      p.get("game"),
+                "market":    p.get("market"),
+                "game_date": gd,
+                "status":    r,
+            })
+
+    exp_str = (", ".join(f"{s}:{n}" for s, n in sorted(expected.items()))
+               or "none")
+    text = (f"gap audit {start}..{end}: {settled} settled, "
+            f"{len(anomalies)} anomalies, expected-ungradeable [{exp_str}]")
+    return {"start": str(start), "end": str(end), "settled": settled,
+            "anomalies": anomalies, "expected": dict(expected),
+            "text": text}
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
