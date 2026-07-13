@@ -1090,7 +1090,7 @@ def _aggregate_archive_results(picks: list[dict]) -> dict[str, Any]:
     in_progress = sum(1 for p in picks if p.get("result") == "IN_PROGRESS")
     legacy_pend = sum(1 for p in picks if p.get("result") == "PENDING")
     manual  = sum(1 for p in picks
-                   if p.get("result") in ("MANUAL", "NO_RESULT"))
+                   if p.get("result") in ("MANUAL", "NO_RESULT", "VOID"))
     pnl = sum(p.get("pnl") or 0 for p in settled)
     bet = sum(p.get("bet_amount") or 0 for p in settled)
     roi = (pnl / bet * 100) if bet else 0

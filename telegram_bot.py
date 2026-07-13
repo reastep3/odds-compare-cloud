@@ -3341,16 +3341,17 @@ async def send_daily_backtest(context: ContextTypes.DEFAULT_TYPE):
     # source went quiet or matching broke. Silence = pipeline healthy.
     try:
         from backtest import grading_gap_audit
-        audit = await asyncio.to_thread(grading_gap_audit, 3)
+        audit = await asyncio.to_thread(grading_gap_audit, 3, True)
         log.info(f"[daily-backtest] {audit['text']}")
-        if audit["anomalies"]:
-            lines = [f"⚠️ Grading gaps — {len(audit['anomalies'])} pick(s) "
-                     f"stuck ungraded ({audit['start']}..{audit['end']}):"]
-            for a in audit["anomalies"][:10]:
+        new = audit["new_anomalies"]
+        if new:
+            lines = [f"⚠️ Grading gaps — {len(new)} NEW pick(s) stuck "
+                     f"ungraded ({audit['start']}..{audit['end']}):"]
+            for a in new[:10]:
                 lines.append(f"  {a['sport'].upper()} {a['game']} "
                              f"[{a['market']}] {a['game_date']} — {a['status']}")
-            if len(audit["anomalies"]) > 10:
-                lines.append(f"  …and {len(audit['anomalies']) - 10} more")
+            if len(new) > 10:
+                lines.append(f"  …and {len(new) - 10} more")
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID, text="\n".join(lines))
     except Exception:

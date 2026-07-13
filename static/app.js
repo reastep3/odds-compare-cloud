@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-07-09 v31 (Archive: All +EV Edges section)";
+const BUILD = "2026-07-13 v32 (VOID results for postponed/abandoned)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -1100,6 +1100,10 @@ function resultCell(p) {
   }
   if (r === "MANUAL" || r === "NO_RESULT" || r === "UNKNOWN") {
     return `<td data-label="Result" class="muted">—</td>`;
+  }
+  if (r === "VOID") {
+    // Postponed / abandoned / canceled — book refunds the stake.
+    return `<td data-label="Result" class="muted">∅ Void</td>`;
   }
   const cls = r === "WIN" ? "pos" : r === "LOSS" ? "neg" : "";
   const u   = p.unit_return_pct;

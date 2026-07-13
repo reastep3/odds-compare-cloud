@@ -53,8 +53,8 @@ def test_fetch_thesportsdb_games(monkeypatch):
 
     postponed = games[1]
     assert not postponed["completed"]
-    # POST maps to SCHEDULED so run_backtest reads it as NOT_STARTED
-    assert postponed["status"] == "SCHEDULED"
+    # POST passes through raw so the grader's VOID branch sees it
+    assert postponed["status"] == "POST"
 
     tie = games[2]                               # KBO allows 12-inning ties
     assert tie["completed"] and tie["winner"] == ""
@@ -83,6 +83,7 @@ def test_dispatch_routes_kbo_to_thesportsdb(monkeypatch):
 
 def test_grading_gap_audit_categorises(monkeypatch):
     yday   = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+    stale  = (date.today() - timedelta(days=3)).strftime("%Y%m%d")
     future = (date.today() + timedelta(days=1)).strftime("%Y%m%d")
 
     def pick(sport, result, gd):
@@ -91,9 +92,12 @@ def test_grading_gap_audit_categorises(monkeypatch):
 
     picks = [
         pick("mlb", "WIN", yday),               # settled
-        pick("kbo", "NO_RESULT", yday),         # anomaly: scoreable, past
-        pick("mlb", "NOT_STARTED", yday),       # anomaly: stale not-started
+        pick("kbo", "NO_RESULT", yday),         # anomaly: no fixture found
+        pick("mlb", "IN_PROGRESS", yday),       # fine: grace (suspended /
+        pick("afl", "NOT_STARTED", yday),       #   overseas evening game)
+        pick("mlb", "IN_PROGRESS", stale),      # anomaly: stuck 3 days
         pick("mlb", "NOT_STARTED", future),     # fine: genuinely future
+        pick("mlb", "VOID", yday),              # expected: postponed, refunded
         pick("pga", "MANUAL", yday),            # expected: manual sport
         pick("mysterysport", "NO_RESULT", yday),  # expected: no source
     ]
@@ -104,6 +108,52 @@ def test_grading_gap_audit_categorises(monkeypatch):
     audit = grading_gap_audit(days=3)
     assert audit["settled"] == 1
     assert {(a["sport"], a["status"]) for a in audit["anomalies"]} == {
-        ("kbo", "NO_RESULT"), ("mlb", "NOT_STARTED")}
-    assert audit["expected"] == {"pga": 1, "mysterysport": 1}
+        ("kbo", "NO_RESULT"), ("mlb", "IN_PROGRESS")}
+    assert audit["expected"] == {"pga": 1, "mysterysport": 1, "mlb": 1}
     assert "2 anomalies" in audit["text"]
+
+
+def test_gap_audit_remember_alerts_once(monkeypatch, tmp_path):
+    """remember=True: an anomaly DMs the first night only — known
+    ungradeables (club-card bouts) must not nag until they age out."""
+    yday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+    picks = [{"sport": "boxing", "result": "NO_RESULT", "game_date": yday,
+              "game": "A vs B", "market": "H2H"}]
+    monkeypatch.setattr(backtest, "load_archive_ev_edges",
+                        lambda s, e, m: picks)
+    monkeypatch.setattr(backtest, "run_backtest", lambda p: p)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    first = grading_gap_audit(days=3, remember=True)
+    assert len(first["anomalies"]) == 1 and len(first["new_anomalies"]) == 1
+    second = grading_gap_audit(days=3, remember=True)
+    assert len(second["anomalies"]) == 1          # still visible in logs
+    assert second["new_anomalies"] == []          # but no repeat DM
+    # remember=False (manual/analysis use) never touches the state file
+    third = grading_gap_audit(days=3, remember=False)
+    assert len(third["new_anomalies"]) == 1
+
+
+def test_run_backtest_voids_postponed(monkeypatch):
+    """A same-day fixture with a POSTPONED/ABD status must grade VOID —
+    not IN_PROGRESS forever, and never against the makeup game."""
+    yday = (date.today() - timedelta(days=1))
+    pick = {"sport": "mlb", "game": "Milwaukee Brewers @ Pittsburgh Pirates",
+            "game_date": yday.strftime("%Y%m%d"), "market": "H2H",
+            "pick": "Milwaukee Brewers", "line": None, "odds": -110,
+            "decimal": 1.909, "bet_amount": 10.0, "ev_pct": 2.0,
+            "result": None, "pnl": None}
+    postponed_game = {
+        "home_team": "Pittsburgh Pirates", "home_abbr": "PIT",
+        "home_short": "Pirates", "home_score": 0,
+        "away_team": "Milwaukee Brewers", "away_abbr": "MIL",
+        "away_short": "Brewers", "away_score": 0,
+        "winner": "", "total": 0, "event_id": "x",
+        "completed": False, "status": "STATUS_POSTPONED",
+    }
+    monkeypatch.setattr(backtest, "fetch_espn_results", lambda s, d: [])
+    monkeypatch.setattr(backtest, "fetch_espn_games",
+                        lambda s, d: [postponed_game])
+    graded = backtest.run_backtest([pick])
+    assert graded[0]["result"] == "VOID"
+    assert graded[0]["pnl"] is None

@@ -28,6 +28,7 @@ Notes:
 
 import glob
 import html
+import json
 import os
 import re
 import shutil
@@ -1633,11 +1634,12 @@ def _fetch_thesportsdb_games(league_id: int, date_str: str) -> list[dict]:
         except (TypeError, ValueError):
             h = a = 0
             have_score = False
-        # FT/AET/AOT = final. POST(poned)/CANC(elled) map to "SCHEDULED"
-        # so run_backtest reads them as NOT_STARTED (true: they'll be
-        # made up later) instead of IN_PROGRESS.
+        # FT/AET/AOT = final. POST/CANC/ABD pass through RAW so the
+        # grader's VOID branch can see them (2026-07-13 — an ABD'd KBO
+        # game sat "IN_PROGRESS" for days because this used to mask
+        # postponements as SCHEDULED). Only not-started maps.
         completed = have_score and status in ("FT", "AET", "AOT", "MATCH FINISHED")
-        if status in ("POST", "CANC", "NS", ""):
+        if status in ("NS", ""):
             status = "SCHEDULED"
         home = {"name": e.get("strHomeTeam") or "", "abbr": "",
                 "short": e.get("strHomeTeam") or "", "score": h}
@@ -2687,7 +2689,15 @@ def run_backtest(picks: list[dict],
         same_day_match = _find_game_result(pick, same_day_all)
         if same_day_match is not None and not same_day_match.get("completed"):
             status = (same_day_match.get("status") or "").upper()
-            if "SCHED" in status or "PRE" in status or "DELAY" in status:
+            # POSTPONED / CANCELED / ABANDONED (2026-07-13, from the gap
+            # audit's first real catch): books void these bets, and the
+            # makeup runs as a fresh fixture (often a doubleheader) that
+            # the original pick must NOT grade against. VOID is terminal:
+            # excluded from P&L like MANUAL, but named for what it is.
+            if ("POST" in status or "CANC" in status or "ABD" in status
+                    or "ABAN" in status):
+                pick["result"] = "VOID"
+            elif "SCHED" in status or "PRE" in status or "DELAY" in status:
                 pick["result"] = "NOT_STARTED"
             else:
                 pick["result"] = "IN_PROGRESS"
@@ -2923,7 +2933,15 @@ def run_backtest_promo(picks: list[dict]) -> list[dict]:
                     break
         if same_day_match is not None and not same_day_match.get("completed"):
             status = (same_day_match.get("status") or "").upper()
-            if "SCHED" in status or "PRE" in status or "DELAY" in status:
+            # POSTPONED / CANCELED / ABANDONED (2026-07-13, from the gap
+            # audit's first real catch): books void these bets, and the
+            # makeup runs as a fresh fixture (often a doubleheader) that
+            # the original pick must NOT grade against. VOID is terminal:
+            # excluded from P&L like MANUAL, but named for what it is.
+            if ("POST" in status or "CANC" in status or "ABD" in status
+                    or "ABAN" in status):
+                pick["result"] = "VOID"
+            elif "SCHED" in status or "PRE" in status or "DELAY" in status:
                 pick["result"] = "NOT_STARTED"
             else:
                 pick["result"] = "IN_PROGRESS"
@@ -4879,7 +4897,17 @@ def _print_parlay_sim(sim: dict) -> None:
 
 # ── Grading-gap audit ──────────────────────────────────────────────────────────
 
-def grading_gap_audit(days: int = 3) -> dict:
+def _gap_seen_path() -> str:
+    return os.path.join(os.environ.get("DATA_DIR") or SCRIPT_DIR,
+                        "gap_audit_seen.json")
+
+
+def _gap_key(a: dict) -> str:
+    return (f"{a['sport']}|{a['game']}|{a['market']}|"
+            f"{a['game_date']}|{a['status']}")
+
+
+def grading_gap_audit(days: int = 3, remember: bool = False) -> dict:
     """Nightly watchdog for silent grading holes (2026-07-09).
 
     Re-grades the trailing `days` of broad-pool picks (window ends
@@ -4914,24 +4942,60 @@ def grading_gap_audit(days: int = 3) -> dict:
         if not gd or gd >= today_s:
             continue                    # today/future — nothing due yet
         sport = p.get("sport", "?")
-        if sport not in SCOREABLE or r == "MANUAL":
+        if sport not in SCOREABLE or r in ("MANUAL", "VOID"):
+            # VOID (2026-07-13): postponed/abandoned — book refunds the
+            # stake; terminal and expected, not a pipeline failure.
             expected[sport] += 1
-        else:
-            anomalies.append({
-                "sport":     sport,
-                "game":      p.get("game"),
-                "market":    p.get("market"),
-                "game_date": gd,
-                "status":    r,
-            })
+            continue
+        # Grace period for live/suspended states: an overseas evening
+        # game (AFL/KBO run "yesterday" ET while genuinely live) or a
+        # rain-suspended MLB game resuming next day legitimately reads
+        # IN_PROGRESS/NOT_STARTED for a day. Only 2+ days stale is a
+        # real stuck state; NO_RESULT (no fixture found at all) alerts
+        # after one day, since it's the signature of a dead source or
+        # broken name matching.
+        two_days_ago = (date.today() - timedelta(days=2)).strftime("%Y%m%d")
+        if r in ("IN_PROGRESS", "NOT_STARTED") and gd > two_days_ago:
+            continue
+        anomalies.append({
+            "sport":     sport,
+            "game":      p.get("game"),
+            "market":    p.get("market"),
+            "game_date": gd,
+            "status":    r,
+        })
+
+    # remember=True (the nightly job): DM-worthy anomalies are only the
+    # ones never alerted before — ungradeable club-card bouts and
+    # vanished postponements would otherwise nag every night until they
+    # age out of the window. Everything still lands in the log/text.
+    new_anomalies = anomalies
+    if remember:
+        try:
+            seen: dict[str, str] = {}
+            if os.path.exists(_gap_seen_path()):
+                with open(_gap_seen_path(), "r", encoding="utf-8") as f:
+                    seen = json.load(f)
+            new_anomalies = [a for a in anomalies
+                             if _gap_key(a) not in seen]
+            today_iso = date.today().isoformat()
+            for a in new_anomalies:
+                seen[_gap_key(a)] = today_iso
+            cutoff = (date.today() - timedelta(days=14)).isoformat()
+            seen = {k: v for k, v in seen.items() if v >= cutoff}
+            with open(_gap_seen_path(), "w", encoding="utf-8") as f:
+                json.dump(seen, f)
+        except Exception:
+            new_anomalies = anomalies      # state trouble → alert anyway
 
     exp_str = (", ".join(f"{s}:{n}" for s, n in sorted(expected.items()))
                or "none")
     text = (f"gap audit {start}..{end}: {settled} settled, "
-            f"{len(anomalies)} anomalies, expected-ungradeable [{exp_str}]")
+            f"{len(anomalies)} anomalies ({len(new_anomalies)} new), "
+            f"expected-ungradeable [{exp_str}]")
     return {"start": str(start), "end": str(end), "settled": settled,
-            "anomalies": anomalies, "expected": dict(expected),
-            "text": text}
+            "anomalies": anomalies, "new_anomalies": new_anomalies,
+            "expected": dict(expected), "text": text}
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
