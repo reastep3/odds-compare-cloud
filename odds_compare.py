@@ -6234,7 +6234,10 @@ def fetch_player_props(
     else:
         target_sports = sorted(ODDS_API_PROP_MARKETS.keys())
 
-    for sport in target_sports:
+    import progress as _progress
+    for _sp_i, sport in enumerate(target_sports):
+        _progress.report("run", "Fetching player props", _sp_i,
+                         len(target_sports), note=sport)
         sport_raw: list[dict] = []
         wanted_markets = (sport_markets.get(sport)
                           if sport_markets is not None else None)
@@ -8160,11 +8163,17 @@ def run_headless_fetch(dk_bankroll: float, fd_bankroll: float,
     an_count       = 0
     sport_sources: dict[str, str] = {}
 
+    import progress as _progress
+    _fetched_n = 0
+    _progress.report("run", "Fetching game lines", 0, len(sports_to_fetch))
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_fetch_sport_all, sport): sport
                    for sport in sports_to_fetch}
         for future in as_completed(futures):
             sport = futures[future]
+            _fetched_n += 1
+            _progress.report("run", "Fetching game lines", _fetched_n,
+                             len(sports_to_fetch), note=sport)
             try:
                 sport_name, events, pinn_m, bov_m, source = future.result()
                 sport_sources[sport_name] = source
@@ -8349,6 +8358,9 @@ def run_headless_finalize(fetched: dict,
     """
     promos       = promos or []
     game_filters = game_filters or {}
+
+    import progress as _progress
+    _progress.report("run", "Computing edges & writing sheets")
 
     all_edges         = fetched["all_edges"]
     hr_edges          = fetched["hr_edges"]

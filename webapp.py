@@ -224,9 +224,12 @@ def build_app() -> FastAPI:
     api = FastAPI(title="Odds Compare PWA",
                    docs_url=None, redoc_url=None)
 
-    # Background-backtest job state (2026-07-17, see POST /api/backtest).
-    # Single process, single job — a plain closure dict is all we need.
+    # Background job state (2026-07-17, see POST /api/backtest and
+    # POST /api/run). Single process, one job per kind — plain closure
+    # dicts are all we need. progress.py supplies the live phase/counts
+    # the status endpoints attach for the frontend's progress bars.
     _bt_job: dict[str, Any] = {"state": "idle"}
+    _run_job: dict[str, Any] = {"state": "idle"}
 
     # Cache-busting for the PWA shell — applies to /static/* (StaticFiles
     # mount) plus any other text/JS responses we might add later. API
@@ -380,10 +383,21 @@ def build_app() -> FastAPI:
                 if parsed is not None:
                     parsed_promos.append(parsed)
 
-        # Run the existing pipeline in a thread so we don't block the
-        # asyncio loop (which is also serving Telegram polling).
+        # 2026-07-17: background job + polling, same pattern as
+        # /api/backtest — scans run 60-90s+ and holding the response
+        # open risks the same proxy-kill "Failed to fetch".
+        if _run_job.get("state") == "running":
+            raise HTTPException(status_code=409,
+                                detail="A run is already in progress")
+
         import asyncio
+        import time as _time
+        import progress
         from odds_compare import (run_headless_fetch, run_headless_finalize)
+
+        progress.clear("run")
+        _run_job.clear()
+        _run_job.update(state="running", started_at=_time.time())
 
         def _do_run() -> dict[str, Any]:
             # When no promos are entered, pass promos=[] so the HR gate
@@ -393,8 +407,37 @@ def build_app() -> FastAPI:
             fetched = run_headless_fetch(dk, fd, promos=parsed_promos)
             return run_headless_finalize(fetched, promos=parsed_promos)
 
-        result = await asyncio.to_thread(_do_run)
-        return _shape_run_result(result)
+        async def _runner():
+            try:
+                result = await asyncio.to_thread(_do_run)
+                _run_job["result"] = _shape_run_result(result)
+                _run_job["state"] = "done"
+            except Exception as e:  # noqa: BLE001 — job must never hang "running"
+                log.exception("[run-job] scan failed")
+                _run_job["error"] = f"{type(e).__name__}: {e}"
+                _run_job["state"] = "error"
+
+        asyncio.create_task(_runner())
+        return {"status": "started"}
+
+    @api.get("/api/run/status")
+    async def run_status(
+        _user: dict = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Poll target for the background scan job — state, elapsed,
+        live progress (phase + counts), and the shaped result once done."""
+        import time as _time
+        import progress
+        out: dict[str, Any] = {"state": _run_job.get("state", "idle")}
+        if _run_job.get("started_at"):
+            out["elapsed_s"] = int(_time.time() - _run_job["started_at"])
+        if out["state"] == "running":
+            out["progress"] = progress.get("run")
+        elif out["state"] == "done":
+            out["result"] = _run_job.get("result")
+        elif out["state"] == "error":
+            out["error"] = _run_job.get("error")
+        return out
 
     @api.post("/api/run_live")
     async def run_live(_user: str = Depends(current_user)) -> dict[str, Any]:
@@ -630,8 +673,10 @@ def build_app() -> FastAPI:
 
         import asyncio
         import time as _time
+        import progress
         from backtest import run_full_backtest
 
+        progress.clear("backtest")
         _bt_job.clear()
         _bt_job.update(state="running", start=str(start_dt),
                        end=str(end_dt), an_only_mode=an_mode,
@@ -664,6 +709,7 @@ def build_app() -> FastAPI:
         once state == "done"; it stays until the next job starts, so a
         page refresh mid-run can still collect the finished report."""
         import time as _time
+        import progress
         out: dict[str, Any] = {
             "state": _bt_job.get("state", "idle"),
             "start": _bt_job.get("start"),
@@ -671,7 +717,9 @@ def build_app() -> FastAPI:
         }
         if _bt_job.get("started_at"):
             out["elapsed_s"] = int(_time.time() - _bt_job["started_at"])
-        if out["state"] == "done":
+        if out["state"] == "running":
+            out["progress"] = progress.get("backtest")
+        elif out["state"] == "done":
             out["result"] = _bt_job.get("result")
         elif out["state"] == "error":
             out["error"] = _bt_job.get("error")

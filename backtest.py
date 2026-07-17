@@ -2621,8 +2621,12 @@ def _stamp_clv(pick: dict, lookup: dict | None) -> None:
 
 
 def run_backtest(picks: list[dict],
-                  closing_lines_lookup: dict | None = None) -> list[dict]:
+                  closing_lines_lookup: dict | None = None,
+                  progress_label: str | None = None) -> list[dict]:
     """Grade all picks. Attaches 'result', 'pnl', 'actual_result' to each.
+
+    progress_label names this pool ("EV pool", "props", …) in the live
+    progress feed the webapp's job-status endpoints poll (progress.py).
 
     If closing_lines_lookup is provided, also attaches 'close_odds_american',
     'close_implied_pct', 'clv_pct', 'clv_captured' for every pick (None
@@ -2643,9 +2647,14 @@ def run_backtest(picks: list[dict],
                         (sport_norm,
                          (gd + timedelta(days=off)).strftime("%Y%m%d")))
 
+    import progress as _progress
+    _plabel = f"Grading {progress_label}" if progress_label else "Grading picks"
+
     print(f"Fetching results for {len(sport_dates)} sport-date combos from ESPN...")
     for i, (sport, dt_str) in enumerate(sorted(sport_dates)):
         fetch_espn_results(sport, dt_str)
+        _progress.report("backtest", f"{_plabel}: fetching results",
+                         i + 1, len(sport_dates), note=sport)
         if (i + 1) % 15 == 0:
             print(f"  {i+1}/{len(sport_dates)}...")
     total_games = sum(len(v) for v in _espn_cache.values())
@@ -2653,7 +2662,10 @@ def run_backtest(picks: list[dict],
 
     matched = unmatched = skipped = 0
 
-    for pick in picks:
+    for _pick_i, pick in enumerate(picks):
+        if _pick_i % 25 == 0:
+            _progress.report("backtest", f"{_plabel}: grading",
+                             _pick_i, len(picks))
         # Normalise sport name (AN may store full league name)
         pick["sport"] = _normalise_sport(pick["sport"])
         sport   = pick["sport"]
@@ -5023,6 +5035,9 @@ def run_full_backtest(start_dt: date, end_dt: date,
     if replay:
         print("  Mode: REPLAY (PT subset = current _qualifies() applied to EV Edges)")
 
+    import progress as _progress
+    _progress.report("backtest", "Loading picks from archive")
+
     # ── Closing-line lookup — built once for the whole date range ────────────
     # Reads pending_closes_*.json files seeded by every scan. Picks without
     # captured closes (AN-fallback events, or games still in the future)
@@ -5039,7 +5054,9 @@ def run_full_backtest(start_dt: date, end_dt: date,
     # ── All +EV Picks (primary dataset — EV Edges tab) ────────────────────────
     print("─── All +EV Picks (EV Edges tab) ────────────────────────")
     ev_raw    = load_archive_ev_edges(start_dt, end_dt, an_only_mode)
-    ev_graded = run_backtest(ev_raw, clv_lookup) if ev_raw else []
+    ev_graded = (run_backtest(ev_raw, clv_lookup,
+                           progress_label="EV pool")
+                 if ev_raw else [])
     if ev_graded:
         ev_settled_list = analyze(ev_graded, label="All +EV Picks")
     else:
@@ -5058,7 +5075,9 @@ def run_full_backtest(start_dt: date, end_dt: date,
     else:
         print("\n─── Play These (filtered picks) ─────────────────────────")
         picks  = load_archive_picks(start_dt, end_dt, an_only_mode)
-        graded = run_backtest(picks, clv_lookup) if picks else []
+        graded = (run_backtest(picks, clv_lookup,
+                                progress_label="Play These")
+                  if picks else [])
         if graded:
             pt_settled_list = analyze(graded, label="Play These (filtered)")
         else:
@@ -5092,7 +5111,9 @@ def run_full_backtest(start_dt: date, end_dt: date,
     # ── Player Props ──────────────────────────────────────────────────────────
     print("\n─── Player Props (Odds Comparison tab) ──────────────────")
     prop_raw    = load_archive_props(start_dt, end_dt, an_only_mode)
-    prop_graded = run_backtest(prop_raw, clv_lookup) if prop_raw else []
+    prop_graded = (run_backtest(prop_raw, clv_lookup,
+                                 progress_label="player props")
+                   if prop_raw else [])
     if prop_graded:
         prop_settled = [p for p in prop_graded if p.get("result") in ("WIN","LOSS","PUSH")]
         print(f"Props settled: {len(prop_settled)} picks")
@@ -5141,6 +5162,7 @@ def run_full_backtest(start_dt: date, end_dt: date,
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_name = f"backtest_{start_dt}_{end_dt}__{run_stamp}.xlsx"
     out_path = os.path.join(SCRIPT_DIR, out_name)
+    _progress.report("backtest", "Writing report")
     write_backtest_excel(primary_picks, primary_settled, out_path, start_dt, end_dt,
                          play_these_picks=graded if graded else None,
                          prop_picks=prop_graded,

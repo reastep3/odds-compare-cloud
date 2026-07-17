@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-07-17 v33 (Backtest runs as background job + polling)";
+const BUILD = "2026-07-17 v34 (Live progress bars for runs + backtests)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -787,14 +787,19 @@ $("#run-btn").addEventListener("click", async () => {
   localStorage.setItem("arbyx.promos", promos);
   $("#run-btn").disabled = true;
   $("#run-live-btn").disabled = true;
-  setStatus($("#run-status"), "Running scan — this can take 60-90 seconds…",
-            "loading");
+  setStatus($("#run-status"), "Starting scan…", "loading");
   try {
-    const j = await apiJSON("/api/run", {
-      method: "POST",
-      body: JSON.stringify({ dk_bankroll: dk, fd_bankroll: fd, promos }),
-    });
+    try {
+      await apiJSON("/api/run", {
+        method: "POST",
+        body: JSON.stringify({ dk_bankroll: dk, fd_bankroll: fd, promos }),
+      });
+    } catch (e) {
+      // 409 = a scan is already in flight — attach to it.
+      if (!/already in progress/i.test(e.message)) throw e;
+    }
     setStatus($("#run-status"), "");
+    const j = await pollJobUntilDone("/api/run/status", $("#run-progress"));
     renderRunSummary(j.summary);
     renderEdges(j.play_edges);
     renderRunPromoPicks(j.promo_picks);
@@ -1547,26 +1552,57 @@ function renderBacktest(j) {
   $("#bt-result").hidden = false;
 }
 
-// The backtest runs as a background job server-side (long grades used
-// to hold the HTTP response open until Fly's proxy killed it — the old
-// "Failed to fetch"). POST starts it; this polls until done/error.
-async function pollBacktestUntilDone() {
+// ── Background-job polling + live progress bars ──────────────────────
+// Runs and backtests execute server-side as background jobs (holding
+// the HTTP response open used to get killed by the proxy — the old
+// "Failed to fetch"). Their status endpoints attach {progress: {phase,
+// done, total, note}} while running; these helpers drive the bar.
+
+function fmtElapsed(s) {
+  s = s || 0;
+  const m = Math.floor(s / 60);
+  return m ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
+function renderProgress(barEl, prog, elapsed) {
+  if (!barEl) return;
+  barEl.hidden = false;
+  const fill  = barEl.querySelector(".progress-fill");
+  const label = barEl.querySelector(".progress-label");
+  if (prog && prog.total) {
+    barEl.classList.remove("indeterminate");
+    const pct = Math.min(100, Math.round((prog.done || 0) / prog.total * 100));
+    fill.style.width = `${pct}%`;
+    const note = prog.note ? ` — ${prog.note}` : "";
+    label.textContent =
+      `${prog.phase} ${prog.done ?? 0}/${prog.total}${note} · ${fmtElapsed(elapsed)}`;
+  } else {
+    // No countable total (loading, writing, or worker hasn't reported
+    // yet) — pulse the full bar with the phase name.
+    barEl.classList.add("indeterminate");
+    fill.style.width = "100%";
+    label.textContent = `${prog ? prog.phase : "Working"}… ${fmtElapsed(elapsed)}`;
+  }
+}
+
+async function pollJobUntilDone(statusPath, barEl,
+                                maxMs = 30 * 60 * 1000) {
   const t0 = Date.now();
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 5000));
-    if (Date.now() - t0 > 30 * 60 * 1000) {
-      throw new Error("Backtest still running after 30 minutes — check " +
-                      "back via this tab later or see the server logs.");
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (Date.now() - t0 > maxMs) {
+        throw new Error("Job still running after 30 minutes — check back " +
+                        "on this tab later.");
+      }
+      const s = await apiJSON(statusPath);
+      if (s.state === "done")  return s.result;
+      if (s.state === "error") throw new Error(s.error || "Job failed.");
+      if (s.state === "idle")  throw new Error("Job vanished — try again.");
+      renderProgress(barEl, s.progress, s.elapsed_s);
     }
-    const s = await apiJSON("/api/backtest/status");
-    if (s.state === "done")  return s.result;
-    if (s.state === "error") throw new Error(s.error || "Backtest failed.");
-    if (s.state === "idle")  throw new Error("Job vanished — try again.");
-    const mins = Math.floor((s.elapsed_s || 0) / 60);
-    const secs = (s.elapsed_s || 0) % 60;
-    setStatus($("#bt-status"),
-              `Grading ${s.start} → ${s.end} against results… ` +
-              `${mins ? `${mins}m ` : ""}${secs}s elapsed`, "loading");
+  } finally {
+    if (barEl) barEl.hidden = true;
   }
 }
 
@@ -1593,8 +1629,9 @@ $("#bt-run-btn").addEventListener("click", async () => {
       // attach to it instead of failing.
       if (!/already running/i.test(e.message)) throw e;
     }
-    const result = await pollBacktestUntilDone();
     setStatus($("#bt-status"), "");
+    const result = await pollJobUntilDone("/api/backtest/status",
+                                          $("#bt-progress"));
     renderBacktest(result);
   } catch (e) {
     setStatus($("#bt-status"), e.message, "error");

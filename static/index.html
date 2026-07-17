@@ -17,7 +17,7 @@
   <!-- Versioned URLs so any cached old HTML asking for /static/app.js
        (no version) becomes a cache miss when the new HTML asks for
        /static/app.js?v=4. Bump these together with BUILD in app.js. -->
-  <link rel="stylesheet" href="/static/style.css?v=24">
+  <link rel="stylesheet" href="/static/style.css?v=25">
   <title>Arbyx — +EV Edge Finder</title>
 </head>
 <body>
@@ -200,6 +200,10 @@
         <button id="run-live-btn" class="secondary-btn">⚡ Live edges only</button>
 
         <div id="run-status" class="status" hidden></div>
+        <div id="run-progress" class="progress-track" hidden>
+          <div class="progress-fill"></div>
+          <div class="progress-label"></div>
+        </div>
       </div>
 
       <div id="run-promo-section" class="card" hidden>
@@ -379,6 +383,10 @@
 
         <button id="bt-run-btn" class="primary-btn">▶ Run backtest</button>
         <div id="bt-status" class="status" hidden></div>
+        <div id="bt-progress" class="progress-track" hidden>
+          <div class="progress-fill"></div>
+          <div class="progress-label"></div>
+        </div>
       </div>
 
       <div id="bt-result" class="card" hidden>
@@ -423,6 +431,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=27"></script>
+  <script src="/static/app.js?v=28"></script>
 </body>
 </html>
