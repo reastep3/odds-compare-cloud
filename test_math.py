@@ -1540,17 +1540,19 @@ def test_generic_soccer_promo_covers_world_cup():
     assert _promo_matches(_wc_promo(sport="soccer"), _wc_edge())
 
 
-def test_promo_horizon_world_cup_stays_at_daily_cap():
-    # World Cup must stay at the 24h MAX_PROMO_DAYS default like any other
-    # daily-games sport — the user gets one promo/day and a pick more than
-    # 24h out wastes that day's token. Only weekly one-off cards (combat
-    # sports) intentionally reach ahead. Regression guard against treating
-    # WC like a plan-ahead card.
+def test_promo_horizon_daily_cap_for_all_sports():
+    # 2026-07-13: EVERY sport promos at the same ~24h bracket as Play
+    # These — the user wants promo picks to resolve quickly, never parked
+    # on a game days out. Combat sports lost their 4-day reach; their
+    # picks now surface on fight day via the 10 AM auto-scan. Regression
+    # guard against any sport quietly regaining a multi-day horizon.
     assert _promo_horizon_days("FIFA World Cup") == MAX_PROMO_DAYS
     assert _promo_horizon_days("WORLD_CUP") == MAX_PROMO_DAYS
     assert _promo_horizon_days("world_cup") == MAX_PROMO_DAYS
     assert _promo_horizon_days("EPL") == MAX_PROMO_DAYS
-    assert _promo_horizon_days("ufc") == 4.0       # combat cards still reach
+    assert _promo_horizon_days("ufc") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("boxing") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("MMA") == MAX_PROMO_DAYS
 
 
 def test_promo_matches_world_cup_capped_at_24h():
@@ -2281,41 +2283,42 @@ def test_scope_ufc_h2h_routes_to_ufc_fetch():
 
 def test_promo_horizon_days_per_sport():
     from odds_compare import _promo_horizon_days, MAX_PROMO_DAYS
-    # Combat sports — both Odds API title and internal code resolve.
-    assert _promo_horizon_days("MMA") == 4.0
-    assert _promo_horizon_days("ufc") == 4.0
-    assert _promo_horizon_days("Boxing") == 4.0
-    # Daily sports keep the 1-day default.
+    # 2026-07-13: combat sports lost their 4-day reach — every sport
+    # promos at the same ~24h bracket as Play These (user preference:
+    # picks must resolve quickly; the 10 AM auto-scan surfaces cards on
+    # fight day). See _PROMO_HORIZON_DAYS_BY_SPORT for the history.
+    assert _promo_horizon_days("MMA") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("ufc") == MAX_PROMO_DAYS
+    assert _promo_horizon_days("Boxing") == MAX_PROMO_DAYS
     assert _promo_horizon_days("MLB") == MAX_PROMO_DAYS
     assert _promo_horizon_days("NBA") == MAX_PROMO_DAYS
     assert _promo_horizon_days("") == MAX_PROMO_DAYS
 
 
-def test_ufc_promo_surfaces_card_beyond_one_day():
-    # The White House-card miss: a UFC bout ~40h out must now match a UFC
-    # promo, while a daily-sport edge the same distance out still does not.
+def test_ufc_promo_no_longer_reaches_beyond_one_day():
+    # Inverse of the old White House-card behavior (2026-07-13): a UFC
+    # bout ~40h out must NOT match a UFC promo anymore — same 24h bracket
+    # as every other sport, so promo picks always resolve quickly.
     ufc_promo = {"book": "FanDuel", "sport": "ufc", "market": "all",
                  "promo_type": "straight", "boost_pct": 50, "min_odds": -200}
     ufc_far = _promo_edge(-150, 62.0, market="h2h", sport="MMA",
                           book="FanDuel", commence=_iso_in(40 * 60))
-    assert _promo_matches(ufc_promo, ufc_far) is True
-    mlb_promo = {"book": "FanDuel", "sport": "mlb", "market": "all",
-                 "promo_type": "straight", "boost_pct": 50, "min_odds": -200}
-    mlb_far = _promo_edge(-150, 62.0, market="h2h", sport="MLB",
-                          book="FanDuel", commence=_iso_in(40 * 60))
-    assert _promo_matches(mlb_promo, mlb_far) is False
+    assert _promo_matches(ufc_promo, ufc_far) is False
+    ufc_soon = _promo_edge(-150, 62.0, market="h2h", sport="MMA",
+                           book="FanDuel", commence=_iso_in(18 * 60))
+    assert _promo_matches(ufc_promo, ufc_soon) is True
 
 
 def test_starts_within_promo_horizon_uses_sport():
     from odds_compare import _starts_within_promo_horizon
-    # 40h out: inside the UFC reach, outside MLB's.
+    # 40h out: outside the bracket for every sport (2026-07-13).
     assert _starts_within_promo_horizon(
-        {"sport": "MMA", "commence": _iso_in(40 * 60)}) is True
+        {"sport": "MMA", "commence": _iso_in(40 * 60)}) is False
     assert _starts_within_promo_horizon(
         {"sport": "MLB", "commence": _iso_in(40 * 60)}) is False
-    # 5 days out: beyond even the combat reach.
+    # Inside 24h: fine.
     assert _starts_within_promo_horizon(
-        {"sport": "MMA", "commence": _iso_in(5 * 24 * 60)}) is False
+        {"sport": "MMA", "commence": _iso_in(18 * 60)}) is True
 
 
 # ── HR-targeted promo no longer held (end to end) ──────────────────────

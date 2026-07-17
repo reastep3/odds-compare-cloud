@@ -2387,29 +2387,18 @@ def _confidence(e):
 MAX_PLAY_DAYS = 1      # Play These: ignore games > 1 day out
 MAX_PROMO_DAYS = 1     # Promos (singles + parlays): default within 1 day
 
-# Per-sport promo horizon override (days). Most sports run daily and the
-# user bets same-day, so a 1-day reach is right. Combat sports are weekly
-# one-off cards whose books post lines a week+ ahead and which users plan
-# promos around — a 1-day cap silently hid the user's FanDuel UFC promo
-# ~40h before the 2026-06-14 White House card (find_edges discarded the
-# bouts as >26h out, so the promo pool never saw them). Give combat
-# sports a multi-day reach. Cost-free: the per-sport /odds fetch already
-# returns the whole card in one call; the old window just dropped it
-# client-side. Play These re-caps to MAX_PLAY_DAYS independently inside
-# _qualifies, so the wider reach feeds ONLY the promo pool, never the
-# curated cash list. Keyed by canonical sport (see _canonical_promo_sport).
-_PROMO_HORIZON_DAYS_BY_SPORT: dict[str, float] = {
-    "ufc":    4.0,
-    "boxing": 4.0,
-}
-# NB: the FIFA World Cup is deliberately NOT here, even though it's a
-# tournament. It has DAILY games and the user gets ONE promo/day, so a pick
-# more than the 24h default out would waste that day's token (it can't be
-# held for a match several days away — "24h max from run time"). Only
-# genuinely weekly one-off cards (combat sports) get a multi-day reach.
-# The real cause of the 2026-06-25 "no WC pick" was a dropped fetch, not the
-# horizon — see _odds_api_get's retry (a 429 on the last soccer league
-# silently ate the World Cup feed).
+# Per-sport promo horizon override (days). EMPTY since 2026-07-13: the
+# user wants promos to obey the same ~24h bracket as Play These so every
+# pick resolves quickly — no capital or attention parked on games days
+# away. Combat sports (ufc/boxing 4.0) were the only entries, added
+# 2026-06-14 after a 1-day cap hid a FanDuel UFC promo ~40h before the
+# White House card. Removing the reach re-accepts that trade KNOWINGLY:
+# a UFC/boxing token entered midweek now shows "no qualifying pick"
+# until fight day — which is fine, because the 10 AM ET daily auto-scan
+# (send_daily_skip_run) guarantees the pick surfaces on event day
+# without the user having to remember to re-run. The seam stays so a
+# future exception is a one-line entry, not an archaeology dig.
+_PROMO_HORIZON_DAYS_BY_SPORT: dict[str, float] = {}
 
 # ── Promo hit-rate ruleset ────────────────────────────────────────────
 # Promos are use-it-or-lose-it and the goal is to CASH them, not to

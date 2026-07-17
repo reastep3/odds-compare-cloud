@@ -1510,7 +1510,7 @@ async def _run_bonus_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # — not a full slate. Reuses the existing draw-insurance machinery
 # (_is_draw_insurable / _draw_refund_ev_pct, now refund_as_bonus-aware).
 
-_DRAWBREAKER_HORIZON_DAYS = 3   # surface WC matches a few days out for planning
+_DRAWBREAKER_HORIZON_DAYS = 1   # 2026-07-13: same ~24h bracket as all picks
 
 _DB_DETAILS_PROMPT = (
     "Enter the bet amount and any minimum odds.\n"
