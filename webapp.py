@@ -224,6 +224,10 @@ def build_app() -> FastAPI:
     api = FastAPI(title="Odds Compare PWA",
                    docs_url=None, redoc_url=None)
 
+    # Background-backtest job state (2026-07-17, see POST /api/backtest).
+    # Single process, single job — a plain closure dict is all we need.
+    _bt_job: dict[str, Any] = {"state": "idle"}
+
     # Cache-busting for the PWA shell — applies to /static/* (StaticFiles
     # mount) plus any other text/JS responses we might add later. API
     # responses are unaffected (they're already volatile by nature).
@@ -613,15 +617,65 @@ def build_app() -> FastAPI:
 
         replay = bool(body.get("replay", False))
 
+        # 2026-07-17: run as a background job. A multi-week grade takes
+        # minutes; holding the HTTP response open that long gets killed
+        # by Fly's proxy (~60s) — the browser surfaced it as "Failed to
+        # fetch" and the stalled response even flunked the machine's
+        # health check. POST now returns immediately; the frontend polls
+        # GET /api/backtest/status. One job at a time (409 while busy —
+        # the frontend treats that as "attach to the running job").
+        if _bt_job.get("state") == "running":
+            raise HTTPException(status_code=409,
+                                detail="A backtest is already running")
+
         import asyncio
+        import time as _time
         from backtest import run_full_backtest
+
+        _bt_job.clear()
+        _bt_job.update(state="running", start=str(start_dt),
+                       end=str(end_dt), an_only_mode=an_mode,
+                       replay=replay, started_at=_time.time())
 
         def _do_bt() -> dict[str, Any]:
             return run_full_backtest(start_dt, end_dt, an_only_mode=an_mode,
                                       replay=replay)
 
-        result = await asyncio.to_thread(_do_bt)
-        return _shape_backtest_result(result, start_dt, end_dt)
+        async def _runner():
+            try:
+                result = await asyncio.to_thread(_do_bt)
+                _bt_job["result"] = _shape_backtest_result(
+                    result, start_dt, end_dt)
+                _bt_job["state"] = "done"
+            except Exception as e:      # noqa: BLE001 — job must never hang "running"
+                log.exception("[backtest-job] run failed")
+                _bt_job["error"] = f"{type(e).__name__}: {e}"
+                _bt_job["state"] = "error"
+
+        asyncio.create_task(_runner())
+        return {"status": "started", "start": str(start_dt),
+                "end": str(end_dt)}
+
+    @api.get("/api/backtest/status")
+    async def backtest_status(
+        _user: dict = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Poll target for the background backtest job. `result` appears
+        once state == "done"; it stays until the next job starts, so a
+        page refresh mid-run can still collect the finished report."""
+        import time as _time
+        out: dict[str, Any] = {
+            "state": _bt_job.get("state", "idle"),
+            "start": _bt_job.get("start"),
+            "end":   _bt_job.get("end"),
+        }
+        if _bt_job.get("started_at"):
+            out["elapsed_s"] = int(_time.time() - _bt_job["started_at"])
+        if out["state"] == "done":
+            out["result"] = _bt_job.get("result")
+        elif out["state"] == "error":
+            out["error"] = _bt_job.get("error")
+        return out
 
     # ── Static + PWA wiring ───────────────────────────────────────────
 

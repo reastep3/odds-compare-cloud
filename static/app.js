@@ -3,7 +3,7 @@
 
 // Bump on every meaningful release. Shown in the page footer so you can
 // confirm at a glance that the cache evicted and you're on fresh code.
-const BUILD = "2026-07-13 v32 (VOID results for postponed/abandoned)";
+const BUILD = "2026-07-17 v33 (Backtest runs as background job + polling)";
 
 const TOKEN_KEY = "arbyx_token";
 const $  = (s) => document.querySelector(s);
@@ -1547,6 +1547,29 @@ function renderBacktest(j) {
   $("#bt-result").hidden = false;
 }
 
+// The backtest runs as a background job server-side (long grades used
+// to hold the HTTP response open until Fly's proxy killed it — the old
+// "Failed to fetch"). POST starts it; this polls until done/error.
+async function pollBacktestUntilDone() {
+  const t0 = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 5000));
+    if (Date.now() - t0 > 30 * 60 * 1000) {
+      throw new Error("Backtest still running after 30 minutes — check " +
+                      "back via this tab later or see the server logs.");
+    }
+    const s = await apiJSON("/api/backtest/status");
+    if (s.state === "done")  return s.result;
+    if (s.state === "error") throw new Error(s.error || "Backtest failed.");
+    if (s.state === "idle")  throw new Error("Job vanished — try again.");
+    const mins = Math.floor((s.elapsed_s || 0) / 60);
+    const secs = (s.elapsed_s || 0) % 60;
+    setStatus($("#bt-status"),
+              `Grading ${s.start} → ${s.end} against results… ` +
+              `${mins ? `${mins}m ` : ""}${secs}s elapsed`, "loading");
+  }
+}
+
 $("#bt-run-btn").addEventListener("click", async () => {
   const start = $("#bt-start").value;
   const end   = $("#bt-end").value;
@@ -1557,14 +1580,22 @@ $("#bt-run-btn").addEventListener("click", async () => {
   const an_only_mode = $("#bt-anonly").value;
   $("#bt-run-btn").disabled = true;
   setStatus($("#bt-status"),
-            "Grading picks against ESPN — can take a minute…", "loading");
+            "Starting backtest — long ranges can take a few minutes…",
+            "loading");
   try {
-    const j = await apiJSON("/api/backtest", {
-      method: "POST",
-      body: JSON.stringify({ start, end, an_only_mode }),
-    });
+    try {
+      await apiJSON("/api/backtest", {
+        method: "POST",
+        body: JSON.stringify({ start, end, an_only_mode }),
+      });
+    } catch (e) {
+      // 409 = a job is already in flight (e.g. after a page refresh) —
+      // attach to it instead of failing.
+      if (!/already running/i.test(e.message)) throw e;
+    }
+    const result = await pollBacktestUntilDone();
     setStatus($("#bt-status"), "");
-    renderBacktest(j);
+    renderBacktest(result);
   } catch (e) {
     setStatus($("#bt-status"), e.message, "error");
   } finally {
