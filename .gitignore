@@ -35,3 +35,4 @@ gate_proposals.txt
 
 # Logs
 *.log
+picks.db

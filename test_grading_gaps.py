@@ -1,6 +1,7 @@
 """Tests for the TheSportsDB results source (KBO/NPB/CFL) and the
 nightly grading-gap audit — the watchdog that DMs the admin when
 scoreable picks silently stop grading."""
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ class _Resp:
     def __init__(self, payload, status=200):
         self._payload = payload
         self.status_code = status
+        self.text = json.dumps(payload)   # fetcher sniffs .text for CF errors
 
     def json(self):
         return self._payload
@@ -100,11 +102,9 @@ def test_fetch_thesportsdb_rate_limit_retries(monkeypatch):
     assert calls["n"] == 2 and 4 in sleeps          # backed off then retried
 
     # Permanent limiting → both attempts fail → [] (ungraded, not wrong)
-    calls["n"] = 0
     monkeypatch.setattr(backtest._espn_session, "get",
                         lambda url, **kw: _Limited())
     assert _fetch_thesportsdb_games(4830, "20260708") == []
-    assert calls["n"] == 0 or True
 
 
 def test_dispatch_routes_kbo_to_thesportsdb(monkeypatch):
