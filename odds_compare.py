@@ -2109,6 +2109,13 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
 
                 # ── EV check ─────────────────────────────────────────────
                 outcome_name = outcome_key.split("|")[0]
+                # Shadow calibration (2026-07-25): isotonic-corrected
+                # fair prob + EV recorded ALONGSIDE the raw numbers.
+                # Nothing reads them yet — gates/stakes stay on raw EV
+                # until the shadow record earns the switch. calibrate()
+                # is identity until a fitted model exists on the volume.
+                import calibration as _calibration
+                _cal_fair = _calibration.calibrate(fair_prob, has_pinnacle)
                 for book, dec_odds, am_odds, point, _src in target_lines:
                     ev = calc_ev(fair_prob, dec_odds)
                     edge_dict = {
@@ -2124,6 +2131,8 @@ def find_edges(events: list[dict], parlay_pool: list | None = None,
                         "fair_prob":       round(fair_prob * 100, 1),
                         "implied_prob":    round(decimal_to_implied_prob(dec_odds) * 100, 1),
                         "ev_pct":          round(ev, 2),
+                        "cal_fair_prob":   round(_cal_fair * 100, 1),
+                        "cal_ev_pct":      round(calc_ev(_cal_fair, dec_odds), 2),
                         "kelly_pct":       round(kelly_bet(fair_prob, dec_odds) * 100, 2),
                         "num_other_books": len(other_lines),
                         "best_other_odds": format_american(best_other_dec),
@@ -3084,6 +3093,9 @@ def write_excel(edges: list[dict], dk_bankroll: float,
         ("Implied Prob %", 14), ("EV %", 9), ("Edge %", 9),
         ("Kelly %", 9), ("Bet Amount", 13), ("Potential Profit", 15),
         ("# Books", 9), ("Best Other Line", 15), ("📌 Pinnacle", 10),
+        # Appended 2026-07-25 (shadow calibration). New columns go at
+        # the END only: backtest readers address columns by position.
+        ("Cal EV %", 9),
     ]
 
     for col_idx, (name, width) in enumerate(columns, 1):
@@ -3127,6 +3139,7 @@ def write_excel(edges: list[dict], dk_bankroll: float,
             bet_amount, profit,
             edge["num_other_books"], edge["best_other_odds"],
             "✓" if edge.get("pinnacle_anchored") else "",
+            edge.get("cal_ev_pct"),
         ]
 
         for col_idx, val in enumerate(values, 1):

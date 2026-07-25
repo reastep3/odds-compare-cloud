@@ -3635,6 +3635,24 @@ async def send_gate_proposals_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         log.exception("[gate] failed to send proposals")
 
+    # Weekly calibration refit (2026-07-25, shadow layer): re-learn the
+    # predicted→realized isotonic curves from the last ~120 days of
+    # graded picks and write calibration.json to the volume. Scans pick
+    # the new model up automatically (mtime cache). Silent; failures
+    # logged — a stale model is safe (identity if none has ever fit).
+    try:
+        import calibration
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=120)
+        model = await asyncio.to_thread(calibration.fit_from_history,
+                                        start, end)
+        path = await asyncio.to_thread(calibration.save_model, model)
+        log.info(f"[calibration] weekly refit n={model['n']} "
+                 f"segments={ {k: len(v) for k, v in model['segments'].items()} } "
+                 f"→ {path}")
+    except Exception:
+        log.exception("[calibration] weekly refit failed")
+
 
 async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """On-demand: run the tuner + Claude's take now (admin only)."""

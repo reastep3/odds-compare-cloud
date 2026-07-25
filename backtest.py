@@ -324,6 +324,7 @@ _EV_COL_BET_AMT   = 16
 _EV_COL_POTENTIAL = 17
 _EV_COL_NUM_BOOKS = 18
 _EV_COL_PINNACLE  = 20
+_EV_COL_CAL_EV    = 21    # shadow calibrated EV — appended 2026-07-25
 
 EV_THRESHOLDS = [0, 1, 2, 3, 4, 5, 7, 10]   # min EV % values to bucket by
 
@@ -1073,6 +1074,8 @@ def _read_ev_edges(filepath: str, file_dt: date) -> list[dict]:
                         if len(row_vals) >= _EV_COL_NUM_BOOKS else None
         pin_raw   = row_vals[_EV_COL_PINNACLE - 1] \
                     if len(row_vals) >= _EV_COL_PINNACLE else None
+        cal_raw   = row_vals[_EV_COL_CAL_EV - 1] \
+                    if len(row_vals) >= _EV_COL_CAL_EV else None
 
         if not sport or not game or not pick:
             continue
@@ -1117,6 +1120,7 @@ def _read_ev_edges(filepath: str, file_dt: date) -> list[dict]:
             "potential":   _f(potential),
             "num_books":   int(num_books_raw) if num_books_raw else 0,
             "pinnacle":    pinnacle,
+            "cal_ev_pct":  _f(cal_raw),   # None on pre-shadow archives
             "source_file": os.path.basename(filepath),
             "file_date":   file_dt,
             # resolved later

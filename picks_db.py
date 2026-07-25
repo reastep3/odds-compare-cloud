@@ -34,7 +34,8 @@ log = logging.getLogger(__name__)
 
 # Bump when any backtest._read_* output shape changes — forces a full
 # re-ingest so cached rows always match what the readers would produce.
-SCHEMA_VERSION = 1
+# v2 (2026-07-25): _read_ev_edges gained cal_ev_pct (shadow calibration).
+SCHEMA_VERSION = 2
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", _MODULE_DIR)
