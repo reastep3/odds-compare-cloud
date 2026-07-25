@@ -15,8 +15,10 @@ lever is a sharp-line anchor we don't capture yet). So the win isn't a fancier
 predictor — it's removing the MANUAL step from the tuning you already do well.
 
 Honesty / scope:
-* Decisions use realized flat unit-ROI with a 95% CI (signal must clear noise)
-  plus a minimum sample size. Shrinkage tempers thin-cell point estimates.
+* Decisions use realized flat unit-ROI with a 95% CI AND an exact
+  Poisson-binomial tail test (2026-07-25 — the Wald CI alone proved
+  anti-conservative at cohort sizes; both must agree before a proposal
+  fires) plus a minimum sample size. Shrinkage tempers thin cells.
 * PROPS proposals are EXACT: production props are all non-Pinnacle and the gate
   has no live Pinn path, so the probe matches live behaviour 1:1.
 * GAME-LINE proposals are flagged "review": graded reports don't preserve the
@@ -36,9 +38,14 @@ from datetime import date
 
 import odds_compare as oc
 
-# Neutralize the timing guard so we probe the EV/sport/market POLICY, not a
-# specific game's clock. We pass books>=4 honestly below; only timing is mocked.
-oc._starts_within_days = lambda *a, **k: True   # noqa: E305
+# NOTE (2026-07-25): this module used to monkeypatch
+# oc._starts_within_days = True at IMPORT time to neutralize the timing
+# guard for probes. That patch leaked process-wide: the Sunday job
+# imports this module inside the bot, so every Sunday-11AM run silently
+# disabled the live 24h bracket until the next restart (the likely
+# cause of the Jul-13 "promo outside the bracket" reports). Probes now
+# simply OMIT the commence key — _starts_within_days treats a missing
+# timestamp as "starts soon" — so no global mutation is needed.
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(ROOT, "training_table.csv")
@@ -90,6 +97,29 @@ def flat_ci(units):
     return m, m - 1.96 * se, m + 1.96 * se
 
 
+def pb_pvalues(picks):
+    """Exact tail probabilities under the null that each pick wins with
+    its own implied breakeven probability (1/decimal).
+
+    2026-07-25: added after the Jul-22 review panel showed the Wald CI
+    above is anti-conservative on skewed unit returns at cohort sizes
+    (n~30-60) — it produced a false "significant" on WNBA spreads that
+    this exact Poisson-binomial test (P computed by dynamic programming)
+    correctly rejected. Proposals now require BOTH tests to agree.
+
+    Returns (p_under, p_over): P(W <= w_obs) and P(W >= w_obs)."""
+    probs = [1.0 / r["dec"] for r in picks]
+    w_obs = sum(r["won"] for r in picks)
+    dist = [1.0]
+    for q in probs:
+        dist = [(dist[k] if k < len(dist) else 0.0) * (1 - q)
+                + (dist[k - 1] * q if k > 0 else 0.0)
+                for k in range(len(dist) + 1)]
+    p_under = sum(dist[: w_obs + 1])
+    p_over = sum(dist[w_obs:])
+    return p_under, p_over
+
+
 # ───────────────────────── load ──────────────────────────────────────
 
 def load(csv_path=None):
@@ -116,6 +146,7 @@ def load(csv_path=None):
                 "ev": ev, "won": won,
                 "bet": float(r["bet"]) if r["bet"] not in ("", None) else 0.0,
                 "pnl": float(r["pnl"]) if r["pnl"] not in ("", None) else 0.0,
+                "dec": american_to_decimal(odds),
                 "unit": (american_to_decimal(odds) - 1) if won else -1.0,
                 "clv": float(r["clv_pct"]) if r["clv_pct"] not in ("", None) else None,
                 "date": date.fromisoformat(r["game_date"]),
@@ -126,15 +157,21 @@ def load(csv_path=None):
 # ───────────────────────── live-gate probes ──────────────────────────
 
 def gate_gameline(sport, market, ev, pinn):
+    # The probe must satisfy every hard gate that is NOT the subject of
+    # the probe. 2026-07-25 fixes: odds_decimal=2.0 (mid-band — the
+    # Jul-9 odds band made price-less probes auto-fail, which silently
+    # disabled EXCLUDE proposals and spammed spurious PROMOTEs for two
+    # Sundays), and NO commence key (absent = "starts soon" per
+    # _starts_within_days; the old 2099 stamp failed the 1-day window).
     return oc._qualifies({"sport": sport, "market": market, "ev_pct": ev,
                           "num_other_books": 10, "pinnacle_anchored": pinn,
-                          "commence": "2099-01-01T00:00:00Z"})
+                          "odds_decimal": 2.0})
 
 
 def gate_prop(market, ev, pinn):
     return oc._qualifies_prop({"market": market, "ev_pct": ev,
                                "pinnacle_anchored": pinn,
-                               "commence": "2099-01-01T00:00:00Z"})
+                               "odds_decimal": 2.0})
 
 
 def gate_plays(is_prop, sport, market, ev, pinn=False):
@@ -194,7 +231,8 @@ class Tee:
         self.f.close()
 
 
-def _mk_proposal(kind, is_prop, sport, market, lo, hi, n, m, blo, bhi, droi):
+def _mk_proposal(kind, is_prop, sport, market, lo, hi, n, m, blo, bhi,
+                 droi, exact_p):
     """Structured proposal record (consumed by gate_overrides + the bot)."""
     return {
         "kind": kind, "is_prop": bool(is_prop),
@@ -202,6 +240,7 @@ def _mk_proposal(kind, is_prop, sport, market, lo, hi, n, m, blo, bhi, droi):
         "ev_lo": float(lo), "ev_hi": float(hi), "n": int(n),
         "flat_roi": round(m * 100, 1),
         "ci_lo": round(blo * 100), "ci_hi": round(bhi * 100),
+        "exact_p": round(exact_p, 4),
         "droi": round(droi),
         # Exact when the live gate behaviour is unambiguous: props are all
         # non-Pinn, and tennis has no Pinnacle coverage. Other game lines mix
@@ -251,6 +290,7 @@ def analyze(rows, is_prop, out):
             if nb == 0:
                 continue
             bm, blo, bhi = flat_ci([r["unit"] for r in bp])
+            p_under, p_over = pb_pvalues(bp)
             wager = sum(r["bet"] for r in bp)
             pnl = sum(r["pnl"] for r in bp)
             droi = pnl / wager * 100 if wager else 0.0
@@ -258,12 +298,16 @@ def analyze(rows, is_prop, out):
             mid = (lo_b + (hi_b if hi_b < 99 else 6)) / 2
             plays = gate_plays(is_prop, sport, market, mid, pinn=False)
 
+            # Verdicts require the Wald CI AND the exact PB test to agree
+            # (the CI alone flagged false significants — see pb_pvalues).
             if nb < MIN_BAND_N:
                 verdict = "thin"
-            elif blo > 0:
+            elif blo > 0 and p_over < 0.05:
                 verdict = "PLAY"
-            elif bhi < 0:
+            elif bhi < 0 and p_under < 0.05:
                 verdict = "SKIP"
+            elif blo > 0 or bhi < 0:
+                verdict = "ci-only"          # CI fired, exact test didn't
             else:
                 verdict = "mixed"
 
@@ -271,14 +315,18 @@ def analyze(rows, is_prop, out):
             if verdict == "PLAY" and not plays:
                 tag = "  <= PROMOTE"
                 proposals.append(_mk_proposal("PROMOTE", is_prop, sport, market,
-                                              lo_b, hi_b, nb, bm, blo, bhi, droi))
+                                              lo_b, hi_b, nb, bm, blo, bhi,
+                                              droi, p_over))
             elif verdict == "SKIP" and plays:
                 tag = "  <= EXCLUDE"
                 proposals.append(_mk_proposal("EXCLUDE", is_prop, sport, market,
-                                              lo_b, hi_b, nb, bm, blo, bhi, droi))
+                                              lo_b, hi_b, nb, bm, blo, bhi,
+                                              droi, p_under))
 
+            p_show = p_under if bm < 0 else p_over
             out(f"    {band_label(lo_b,hi_b):<9}{nb:>5}{f'{w}/{nb-w}':>9}"
                 f"{bm*100:>+8.1f}%{f'[{blo*100:+.0f},{bhi*100:+.0f}]':>16}"
+                f"{f'p={p_show:.3f}':>9}"
                 f"{droi:>+7.0f}%{('play' if plays else 'skip'):>7}"
                 f"{verdict:>8}{tag}")
 
@@ -291,12 +339,30 @@ def sort_proposals(props):
                                         -abs(p["flat_roi"]) * math.sqrt(p["n"])))
 
 
+# ── Pre-registered decisions (2026-07-25) ────────────────────────────
+# Committed IN ADVANCE so the 2026-08-08 review is decided by data, not
+# re-litigated mid-stream. Included in every Sunday DM until resolved.
+PREREGISTERED = """\
+PRE-REGISTERED DECISIONS — resolve on 2026-08-08 (do not re-litigate early):
+  1. KBO promotion: PROMOTE to Play These iff by Aug 8 the broad-pool
+     cohort (since Jul 9) shows n>=100 settled, flat ROI > 0, and mean
+     CLV >= +1.0% on >=50 captured closes. Markets per their own splits.
+     (Standing Jul 25: n=82, +13.6%, CLV +1.37% on 71 — on track.)
+  2. WNBA Pinn-anchored spreads: EXCLUDE iff exact PB p(under) < 0.05
+     on the full rule-inception window (2026-05-22 onward — no
+     sub-window selection); otherwise KEEP and close the watch item.
+     (Standing Jul 25: 31d p=0.144 — not significant.)
+  3. Odds band (-250..+350): KEEP unless the band-era exact p(under)
+     < 0.05 with CLV also below +0.5%; positive CLV keeps the variance
+     interpretation. (Standing Jul 25: p=0.129, CLV +2.35% — keep.)"""
+
+
 def _run(rows, out):
     """Run the full analysis, emitting each line via out(); return proposals."""
     dts = [r["date"] for r in rows]
     out(f"Gate auto-tuner — {len(rows)} settled picks, {min(dts)} .. {max(dts)}")
-    out(f"Verdict rule: flat-ROI 95% CI clears 0 AND n>={MIN_BAND_N}.  "
-        f"'gate' = your live _qualifies probed non-Pinn.")
+    out(f"Verdict rule: flat-ROI 95% CI clears 0 AND exact PB p<0.05 "
+        f"AND n>={MIN_BAND_N}.  'gate' = your live _qualifies probed non-Pinn.")
 
     gl = analyze(rows, False, out)
     pp = analyze(rows, True, out)
@@ -311,7 +377,9 @@ def _run(rows, out):
         scope = "" if p["exact"] else " [review: Pinn-mixed]"
         out(f"  {p['kind']:<8} {p['label']:<20} EV {p['band']:<8} "
             f"n={p['n']:<4} flatROI {p['flat_roi']:+.1f}% "
-            f"[{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}]  $ROI {p['droi']:+.0f}%{scope}")
+            f"[{p['ci_lo']:+.0f},{p['ci_hi']:+.0f}] p={p['exact_p']:.3f} "
+            f"$ROI {p['droi']:+.0f}%{scope}")
+    out("\n" + PREREGISTERED)
     return allp
 
 
