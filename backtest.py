@@ -1612,17 +1612,34 @@ _TSDB_HEADERS = {
 
 
 def _fetch_thesportsdb_games(league_id: int, date_str: str) -> list[dict]:
-    """One league's games for a YYYYMMDD date via TheSportsDB eventsday."""
+    """One league's games for a YYYYMMDD date via TheSportsDB eventsday.
+
+    2026-07-25: Cloudflare rate-limits (HTTP 429 / an "error code: 1015"
+    body) must NOT read as an empty slate — that silently un-grades
+    every pick for the league-days after the limiter kicks in (found
+    when a local analysis run "lost" NPB's month). Retry once with a
+    backoff, pace successive calls, and give up loudly in the log.
+    """
     d_iso = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-    try:
-        resp = _espn_session.get(
-            f"{_TSDB_BASE}/eventsday.php?d={d_iso}&l={league_id}",
-            headers=_TSDB_HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return []
-        events = resp.json().get("events") or []
-    except Exception:
+    url = f"{_TSDB_BASE}/eventsday.php?d={d_iso}&l={league_id}"
+    events = None
+    for attempt in (1, 2):
+        try:
+            resp = _espn_session.get(url, headers=_TSDB_HEADERS, timeout=15)
+            limited = (resp.status_code in (429, 403, 503)
+                       or resp.text.lstrip().startswith("error code"))
+            if resp.status_code == 200 and not limited:
+                events = resp.json().get("events") or []
+                break
+        except Exception:
+            pass
+        if attempt == 1:
+            time.sleep(4)          # backoff before the one retry
+    if events is None:
+        print(f"  [TheSportsDB/{league_id}] unavailable (rate-limited?) "
+              f"for {d_iso} — picks stay ungraded rather than mis-graded")
         return []
+    time.sleep(0.35)               # pace the next league-day call
 
     games = []
     for e in events:

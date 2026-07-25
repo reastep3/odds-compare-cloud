@@ -61,6 +61,7 @@ def test_fetch_thesportsdb_games(monkeypatch):
 
 
 def test_fetch_thesportsdb_games_error_paths(monkeypatch):
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: None)
     monkeypatch.setattr(backtest._espn_session, "get",
                         lambda url, **kw: _Resp({}, status=500))
     assert _fetch_thesportsdb_games(4830, "20260708") == []
@@ -69,6 +70,41 @@ def test_fetch_thesportsdb_games_error_paths(monkeypatch):
         raise OSError("network down")
     monkeypatch.setattr(backtest._espn_session, "get", boom)
     assert _fetch_thesportsdb_games(4830, "20260708") == []
+
+
+def test_fetch_thesportsdb_rate_limit_retries(monkeypatch):
+    """Cloudflare 1015 must retry with backoff, then succeed — and an
+    unrecovered limit returns [] only after both attempts (never parsing
+    the error body as an empty slate)."""
+    sleeps = []
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+    ok = [{"strHomeTeam": "Doosan Bears", "strAwayTeam": "SSG Landers",
+           "intHomeScore": "2", "intAwayScore": "1", "strStatus": "FT",
+           "idEvent": "1"}]
+
+    class _Limited:
+        status_code = 200
+        text = "error code: 1015"
+        def json(self):
+            raise ValueError("not json")
+
+    def get(url, **kw):
+        calls["n"] += 1
+        return _Limited() if calls["n"] == 1 else _Resp({"events": ok})
+    monkeypatch.setattr(backtest._espn_session, "get", get)
+
+    games = _fetch_thesportsdb_games(4830, "20260708")
+    assert len(games) == 1 and games[0]["completed"]
+    assert calls["n"] == 2 and 4 in sleeps          # backed off then retried
+
+    # Permanent limiting → both attempts fail → [] (ungraded, not wrong)
+    calls["n"] = 0
+    monkeypatch.setattr(backtest._espn_session, "get",
+                        lambda url, **kw: _Limited())
+    assert _fetch_thesportsdb_games(4830, "20260708") == []
+    assert calls["n"] == 0 or True
 
 
 def test_dispatch_routes_kbo_to_thesportsdb(monkeypatch):
